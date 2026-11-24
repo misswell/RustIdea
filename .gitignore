@@ -5,5 +5,8 @@
 .idea/
 .vscode/
 dist/
+!crates/ide-plugin/tests/fixtures/*/dist/
+!crates/ide-plugin/tests/fixtures/*/dist/plugin.wasm
+!crates/ide-plugin/tests/fixtures/*/dist/plugin.wasm.sources
 artifacts/
 test-results/
