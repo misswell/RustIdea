@@ -25,6 +25,12 @@ dependency. Backend crates are vendored here as they are adopted.
 cargo run -p rustidea
 ```
 
+Create a signed and notarized macOS universal app:
+
+```sh
+scripts/release-macos.sh
+```
+
 ## Test
 
 ```sh
