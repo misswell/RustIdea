@@ -1,9 +1,11 @@
 # macOS release checklist
 
-Status: `0.1.2` release preparation. Static native architecture, targeted
-tests, formatting, Clippy and license inventory have passed locally. Interactive
-Phase 1–2 acceptance and comparative performance remain open. The release is a
-native GPUI MVP, not OpenIDEA parity.
+Status: `0.1.2` release build signed and notarized. Static native architecture,
+targeted tests, formatting, Clippy and license inventory passed locally; the
+universal app is Developer ID signed, notarized (`Accepted`), stapled and
+`spctl` accepted. Interactive Phase 2 acceptance and comparative UI performance
+remain open because the macOS console is screen-locked. The release is a native
+GPUI MVP, not OpenIDEA parity.
 
 1. Keep `RUSTIDEA_MIGRATION_AUDIT.md`, `RUSTIDEA_FEATURE_PARITY.md` and
    `RUSTIDEA_ARCHITECTURE.md` accurate. Do not describe placeholders as

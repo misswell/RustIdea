@@ -53,13 +53,18 @@ This is a test-harness safety fix, not a product behavior change.
 
 ## Release build, signature and notarization
 
-Status: pending at the time this document was written. The release checklist
-requires a universal arm64+x86_64 build, Developer ID Application signature
-with hardened runtime and timestamp, a validated notarytool profile, accepted
-Apple notarization, stapling, `spctl` acceptance and SHA-256 publication.
+Status: **passed** for commit `45a02d36cc255170d76faf6f29e25f1caa3b796a`.
 
-Do not claim these checks passed until the artifacts and notary submission id
-are recorded.
+- Universal executable: `x86_64 arm64`.
+- Signature: Developer ID Application `Guofeng Liu (U8U443D7ZL)`, hardened
+  runtime, secure timestamp `2026-11-24 18:29:55`.
+- Notary submission `9bf898c6-a891-4b42-9f47-7aff034aea5b`: `Accepted`.
+- Stapler validation and `spctl --assess --type execute`: accepted
+  (`source=Notarized Developer ID`).
+- `otool -L` on the universal executable: no WebKit, WebView, JavaScriptCore,
+  Tauri or Wry framework.
+- Universal zip SHA-256:
+  `4072f5c4adbe192d19ce47291139dd7067c718852a8159a14ecfe0d2ed116a8c`.
 
 ## Interactive acceptance still open
 
