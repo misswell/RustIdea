@@ -1,0 +1,9 @@
+/target
+/.DS_Store
+**/.DS_Store
+*.log
+.idea/
+.vscode/
+dist/
+artifacts/
+test-results/

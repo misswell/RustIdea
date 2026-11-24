@@ -1,0 +1,16 @@
+[package]
+name = "rustidea-editor"
+description = "Native RustIdea document, input and layout core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ide-core.workspace = true
+ide-text.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
