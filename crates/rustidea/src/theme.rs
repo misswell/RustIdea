@@ -92,4 +92,47 @@ impl Theme {
             },
         }
     }
+
+    /// Editor syntax colours, tuned per mode. The mapping follows the
+    /// OpenIDEA Lezer theme so migrated grammars keep the same meaning.
+    pub fn syntax(&self, kind: ide_language::SyntaxHighlightKind) -> Hsla {
+        use ide_language::SyntaxHighlightKind as Kind;
+        if self.mode == ThemeMode::Dark {
+            match kind {
+                Kind::Keyword => rgb(0xc792ea).into(),
+                Kind::String | Kind::StringSpecial | Kind::Escape | Kind::Regexp => {
+                    rgb(0xa5d6a7).into()
+                }
+                Kind::Atom | Kind::Constant | Kind::Number => rgb(0xf78c6c).into(),
+                Kind::Comment | Kind::DocComment => rgb(0x697a85).into(),
+                Kind::Function | Kind::FunctionCall => rgb(0x82aaff).into(),
+                Kind::Builtin | Kind::Command => rgb(0xffcb6b).into(),
+                Kind::Type | Kind::Namespace => rgb(0xffcb6b).into(),
+                Kind::Variable | Kind::Parameter => rgb(0xd7dae0).into(),
+                Kind::SelfVariable => rgb(0xf07178).into(),
+                Kind::Property | Kind::Attribute => rgb(0x7fdbca).into(),
+                Kind::Macro => rgb(0xc792ea).into(),
+                Kind::Label | Kind::Tag => rgb(0x7fdbca).into(),
+                Kind::Operator | Kind::Punctuation => rgb(0x89ddff).into(),
+            }
+        } else {
+            match kind {
+                Kind::Keyword => rgb(0x9c3ea8).into(),
+                Kind::String | Kind::StringSpecial | Kind::Escape | Kind::Regexp => {
+                    rgb(0x2e7d32).into()
+                }
+                Kind::Atom | Kind::Constant | Kind::Number => rgb(0xb45309).into(),
+                Kind::Comment | Kind::DocComment => rgb(0x6b7280).into(),
+                Kind::Function | Kind::FunctionCall => rgb(0x1d4ed8).into(),
+                Kind::Builtin | Kind::Command => rgb(0x9a6700).into(),
+                Kind::Type | Kind::Namespace => rgb(0x8a5a00).into(),
+                Kind::Variable | Kind::Parameter => rgb(0x25282f).into(),
+                Kind::SelfVariable => rgb(0xb91c1c).into(),
+                Kind::Property | Kind::Attribute => rgb(0x0e7490).into(),
+                Kind::Macro => rgb(0x9c3ea8).into(),
+                Kind::Label | Kind::Tag => rgb(0x0e7490).into(),
+                Kind::Operator | Kind::Punctuation => rgb(0x475569).into(),
+            }
+        }
+    }
 }

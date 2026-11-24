@@ -1,59 +1,95 @@
 # RustIdea regression report
 
-## Scope and build
+## Scope
 
-Verified application source revision: `bfadf41e47708ea3c48f887e5312584dd6e2e477`.
-Host: macOS 27.2.1, Apple M5, arm64. App build: Rust 1.98.1,
-`aarch64-apple-darwin`, version 0.1.1.
+Version: `0.1.2` (working tree before release commit).  
+Host: macOS 27.2.1, Apple M5, arm64.  
+Rust: 1.98.1, edition 2024.  
+Architecture: GPUI native application with reused Apache-2.0 `ide-*` backend
+crates.
 
-The automated checks completed successfully:
+## Automated checks completed in this run
 
 | Check | Result |
 |---|---|
-| `cargo check --workspace --all-targets` | Pass |
-| `cargo test --workspace` | Pass, 156 tests |
 | `cargo fmt --all --check` | Pass |
-| `cargo clippy --workspace --all-targets -- -D warnings` | Pass |
-| `cargo build --release -p rustidea` | Pass |
-| `cargo build --release -p rustidea --target x86_64-apple-darwin` | Pass |
-| `cargo about ... --target aarch64-apple-darwin --locked --offline --fail` | Pass |
-| Dependency and executable linkage search for Tauri/WebKit/React/CodeMirror | No matches |
-| GitHub Actions CI on macOS 15, Ubuntu 24.04 and Windows 2025 | Pass; build, 156 tests and Clippy |
+| `cargo check -p rustidea` | Pass |
+| `cargo test -p rustidea -p rustidea-editor -p ide-text -p ide-workspace -p ide-host --lib` | Pass, 685 tests |
+| `cargo test -p rustidea` (binary tests) | Pass, 17 tests |
+| `cargo clippy -p rustidea -p rustidea-editor -p ide-workspace -p ide-host --all-targets -- -D warnings` | Pass |
+| `cargo fmt --all --check` | Pass |
+| `cargo about ... --target aarch64-apple-darwin --locked --offline --fail` | Pass, 919 crate records, 12 SPDX identifiers |
+| Dependency search for Tauri/Wry/WebView/WebKit/React/CodeMirror/Monaco/xterm | No runtime matches |
 
-CI run: <https://github.com/misswell/RustIdea/actions/runs/45312837627>.
-macOS completed in 3m22s, Ubuntu in 20m56s and Windows in 3m30s.
+The 685 library tests include 491 `ide-host` tests, 165 `ide-workspace` tests,
+13 `ide-text` tests and 16 versioned editor/document tests. The 17 RustIdea
+binary tests cover canonical document identity/rekey/ref-counting, cached tree
+expansion, incremental watcher invalidation, external disk stamps, UTF-16/IME
+run conversion and terminal ANSI handling.
 
-The arm64/x86_64 universal release app was signed with Developer ID, accepted
-by Apple Notary Service, stapled, and accepted by Gatekeeper. The accepted
-notarization submission is `0dd04501-d29a-429e-8491-ceedc1111566`. These checks
-do not replace interactive app testing.
+The 1M-line engine stress test inserts at line 500,000, verifies the new line,
+undoes it and verifies the original line count. It completes as part of the
+editor suite. The optimized Criterion baseline is recorded in
+`RUSTIDEA_PERFORMANCE_REPORT.md`.
+
+### Architecture correction evidence
+
+| Requirement | Evidence |
+|---|---|
+| No temporary/duplicate backend | `backend.rs` and `project.rs` are absent; project/document/VCS/search/terminal/run/build/db/LSP operations call `ide_host::ops::*` through `NativeHost`. |
+| GPUI futures run on the backend runtime | `NativeHost::run` moves operations to the host Tokio runtime. This fixed two launch-time panics: missing reactor in `vcs_branch_info` and out-of-order `EnterGuard` drops. The app process now stays alive in a PTY session. |
+| Async lazy project tree | `ProjectTree` caches per-directory `ide_vfs` listings, loads only root/missing directories, rebuilds cached expansions without I/O and uses `uniform_list`. |
+| Incremental file watcher updates | `FsChanged` invalidates only affected loaded parents; deleted directories are not re-read. Unit tests cover cached expansion, incremental invalidation and removal. |
+| No workbench repaint per keystroke | The app no longer has `cx.observe(&editor)` subscriptions. `BufferEvent::Changed` returns before `cx.notify`; dirty/title/save/error are the only workbench notifications. |
+| DocumentStore | Canonical path/symlink identity, one handle per document, view ref-counting, Save As rekey and last-view release are tested. |
+| External change protection | Disk-stamp detection plus dirty-conflict banner and save guard; backend `reload_discarding_changes` has an automated dirty-buffer reload test. |
+| Bounded editor work | Visible-line virtualization, bounded shaped-line cache, version/epoch invalidation, 1,000-entry history, delta undo/redo, coalesced autosave and large-file syntax cutoff. |
+| No WebView runtime | Static dependency search and `Cargo.lock` contain no Tauri/Wry/WebKit/WebView/CodeMirror/Monaco/xterm runtime. |
+
+The dangerous upstream `trust_vcs_sweep` fixture was changed to use a
+non-recursive marker script for `remote.origin.uploadpack`; the prior fixture
+could recursively spawn `git-upload-pack` when git itself honored the config.
+This is a test-harness safety fix, not a product behavior change.
+
+## Release build, signature and notarization
+
+Status: pending at the time this document was written. The release checklist
+requires a universal arm64+x86_64 build, Developer ID Application signature
+with hardened runtime and timestamp, a validated notarytool profile, accepted
+Apple notarization, stapling, `spctl` acceptance and SHA-256 publication.
+
+Do not claim these checks passed until the artifacts and notary submission id
+are recorded.
 
 ## Interactive acceptance still open
 
-AgentSpace `AgentUse` has no logged-in GUI session, so the app was not launched
-in an isolated desktop. These task-book checks have not been performed and are
-not claimed as passing:
+The macOS console is screen-locked (`CGSSessionScreenIsLocked=Yes`). AgentSpace's
+AgentUse account still has no logged-in GUI session. The native process starts,
+opens the OpenIDEA project path through the backend and remains alive, but no
+usable window or screenshot is available while the console is locked. These
+task-book checks are not claimed as passing:
 
-- Open and edit a real project file; save, quit, and reopen it.
-- Light/dark theme changes, tab/window lifecycle and project-tree interaction.
-- Clipboard, undo/redo and real Chinese IME composition.
-- 100,000- and 1,000,000-line files; responsive scrolling and editing.
-- Four splits of one document and multiple open documents.
-- Long-running stability, crash recovery and data-compatibility behavior.
+- Open, edit, save, quit and reopen a real project file.
+- Window lifecycle, menu actions, light/dark theme, project tree and context
+  menu interactions.
+- Clipboard, undo/redo, autosave and actual Chinese IME composition.
+- 100,000- and 1,000,000-line editing and scrolling in the GPUI window (engine
+  stress tests pass, but UI input/scroll timings are not measured).
+- Four splits of one document and simultaneous edits.
+- Long-running stability, recovery and data compatibility.
 - GUI process-tree inspection for hidden WebView/browser processes.
-- Interactive CPU/GPU checks and memory-growth checks.
+- CPU/GPU and memory measurements.
 
-Local cross-target checks for Linux x86_64 and Windows GNU were blocked because
-the host lacks the target C compilers (`x86_64-linux-gnu-gcc` and
-`x86_64-w64-mingw32-gcc`). Native GitHub Actions jobs independently built,
-tested and linted the application on Ubuntu 24.04 and Windows 2025, so
-cross-platform compile verification is complete. Interactive cross-platform
-GUI acceptance remains open.
+The engine-level 1M-line and document-store/tree/watcher automated checks are
+green. They are not a substitute for the locked-session GUI acceptance items.
 
-## Required follow-up
+The absence of WebView is verified statically from the dependency graph and
+will be checked again against the release executable with `otool -L`.
 
-Log into the `AgentUse` account in AgentSpace, then repeat the interactive
-checks above. Use the same host, fixture and steps for the OpenIDEA comparison;
-record each performance scenario at least five times and report medians in
-`RUSTIDEA_PERFORMANCE_REPORT.md`. Do not declare Phase 2 accepted or the
-performance targets met until the missing evidence is recorded.
+## Follow-up gate
+
+Log in to the isolated AgentSpace user, then repeat the interactive checks and
+compare the same fixtures with OpenIDEA. Record at least five samples per
+performance scenario in `RUSTIDEA_PERFORMANCE_REPORT.md`. Do not declare Phase 2
+interactive acceptance, full OpenIDEA parity or performance targets passed
+until that evidence exists.

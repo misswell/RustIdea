@@ -1,0 +1,32 @@
+id = "cpp"
+name = "C++"
+extensions = ["cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++", "ipp", "tpp", "inl", "ixx", "cppm"]
+line-comment = "//"
+block-comment = ["/*", "*/"]
+indent = { tab-size = 4, insert-spaces = true }
+ui-mode = "C++"
+tree-sitter = "cpp"
+scratch-template = '''
+#include <iostream>
+
+int main() {
+    $END$
+    return 0;
+}
+'''
+
+# Rainbow brackets › angle: editor syntax nodes whose `<` `>` pair up (never comparisons).
+[rainbow-brackets]
+angle = ["TemplateArgumentList", "TemplateParameterList"]
+
+[[language-servers]]
+name = "clangd"
+command = "clangd"
+args = ["--background-index", "--header-insertion=never"]
+root-markers = ["compile_commands.json", "compile_flags.txt", ".clangd", "CMakeLists.txt", "meson.build", "Makefile"]
+install-hint = "Install clangd (LLVM): brew install llvm, apt install clangd, or https://clangd.llvm.org/installation"
+
+[debugger]
+adapter = "lldb-dap"
+command = "lldb-dap"
+install-hint = "Install LLVM's lldb-dap (brew install llvm), or on macOS use the one found by xcrun -f lldb-dap"

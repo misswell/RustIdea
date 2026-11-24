@@ -204,6 +204,13 @@ impl Document {
         self.version
     }
 
+    /// Restores the backend's version when a native editor mirrors an already
+    /// opened document. UI adapters use this only immediately after
+    /// constructing the mirror; ordinary edits must go through [`Self::apply`].
+    pub fn set_version(&mut self, version: u32) {
+        self.version = version;
+    }
+
     pub fn line_ending(&self) -> LineEnding {
         self.line_ending
     }

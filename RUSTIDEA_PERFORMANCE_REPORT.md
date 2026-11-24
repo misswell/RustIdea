@@ -1,12 +1,25 @@
 # RustIdea performance report
 
-Status: **measurements not collected; performance acceptance is open**.
+Status: **document-engine baseline collected; UI/comparative acceptance is open**.
 
-The test host is an Apple M5 arm64 Mac with macOS 27.2.1. The installed
-OpenIDEA 0.1.50 app is available, but neither app was launched for comparative
-measurements in this run. Therefore there are no memory, CPU, GPU, startup,
-input-latency, file-open, tab-switching or scroll-FPS values to report. No
-resource reduction is claimed.
+The test host is an Apple M5 arm64 Mac with macOS 27.2.1. The engine benchmark
+was run in the optimized `bench` profile with Criterion, 10 samples and a 3-second
+measurement window per case:
+
+| Document | Single-line edit (median) | Undo + redo (median) | 60-line viewport reads (median) |
+|---|---:|---:|---:|
+| 100,000 lines | 1.326 µs | 3.167 µs | 5.946 µs |
+| 1,000,000 lines | 1.431 µs | 3.853 µs | 6.860 µs |
+
+These values cover `ide-text`/Ropey document mutation, bounded undo history
+lookup and visible-line extraction. They do not measure `shape_line`, GPUI
+paint, clipboard, IME, file watching, LSP or memory. The editor's bounded
+layout cache and 4,000-line/512-KiB syntax cutoff are code-level safeguards for
+those paths, not substituted performance evidence.
+
+No OpenIDEA/RustIdea process-tree comparison exists yet. There are still no
+memory, CPU, GPU, startup, input-latency, file-open, tab-switching or scroll-FPS
+measurements. No resource reduction is claimed.
 
 Use `RUSTIDEA_PERFORMANCE_BASELINE.md` for the A–J scenarios, process-tree
 measurement rules, five-run minimum and acceptance thresholds. Run the same

@@ -1,9 +1,11 @@
 # Performance baseline
 
-Status: **not collected**. No memory or speed improvement is claimed. The
-installed OpenIDEA 0.1.50 app is available as a candidate baseline; its exact
-build, hardware, OS, settings, fixture and process tree must be recorded with
-the results. Source snapshot and release binary are not identical evidence.
+Status: **document-engine baseline collected; UI comparison not collected**.
+No memory or speed improvement is claimed. The optimized RustIdea engine
+numbers are in `RUSTIDEA_PERFORMANCE_REPORT.md`. The installed OpenIDEA 0.1.50
+app remains the UI baseline candidate; its exact build, hardware, OS, settings,
+fixture and process tree must be recorded with the results. Source snapshot and
+release binary are not identical evidence.
 
 Candidate measurement host inspected on 2026-11-24: Apple M5, arm64,
 25,769,803,776 bytes physical RAM, macOS 27.2.1 build 26B131. The installed

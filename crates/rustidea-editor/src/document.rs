@@ -192,6 +192,26 @@ impl Document {
         }
     }
 
+    /// Builds the local view of a document that already exists in the backend
+    /// (an OpenIDEA `Documents` buffer). `version` is the backend's version;
+    /// the local mirror must start at the same version so the first edit can
+    /// be applied to both without a gap.
+    pub fn from_backend(
+        id: DocumentId,
+        path: Option<std::path::PathBuf>,
+        text: &str,
+        version: u32,
+        dirty: bool,
+    ) -> Self {
+        let mut document = Self::new(id, text);
+        document.path = path;
+        document.text.set_version(version);
+        if !dirty {
+            document.saved_version = version;
+        }
+        document
+    }
+
     pub fn open(
         id: DocumentId,
         path: impl Into<std::path::PathBuf>,
@@ -279,6 +299,54 @@ impl Document {
 
     pub fn mark_saved(&mut self) {
         self.saved_version = self.version();
+    }
+
+    /// Mirrors a backend dirty notification. A dirty flag on a document that
+    /// matches its saved version moves the saved marker one version back; the
+    /// exact backend version is restored by the next snapshot or save.
+    pub fn set_dirty(&mut self, dirty: bool) {
+        if dirty {
+            if self.saved_version == self.version() {
+                self.saved_version = self.version().wrapping_sub(1);
+            }
+        } else {
+            self.saved_version = self.version();
+        }
+    }
+
+    /// Replaces the mirror after the backend reports a full document snapshot.
+    /// Local history is discarded because the backend is authoritative and
+    /// may have changed the text through a reload, format or workspace edit.
+    pub fn replace_from_backend(&mut self, text: &str, version: u32, dirty: bool) {
+        self.text = TextDocument::new(text);
+        self.text.set_version(version);
+        self.saved_version = if dirty {
+            version.saturating_sub(1)
+        } else {
+            version
+        };
+        self.undo.clear();
+        self.redo.clear();
+    }
+
+    /// Applies a backend-originated patch without recording a local undo step.
+    pub fn apply_backend_patch(
+        &mut self,
+        base_version: u32,
+        changes: Vec<Change>,
+    ) -> Result<u32, DocumentError> {
+        if base_version != self.version() {
+            return Err(DocumentError::OutOfSync {
+                expected: base_version,
+                actual: self.version(),
+            });
+        }
+        validate_changes(&changes, self.len_utf16())?;
+        let change_set = to_change_set(&changes);
+        self.text
+            .apply(base_version, &change_set)
+            .map_err(|error| DocumentError::Io(std::io::Error::other(error.to_string())))?;
+        Ok(self.version())
     }
 
     pub fn mark_saved_if_version(&mut self, version: u32) -> bool {
@@ -376,8 +444,14 @@ impl Document {
     }
 
     pub fn undo(&mut self) -> Result<bool, DocumentError> {
+        Ok(self.undo_with_changes()?.is_some())
+    }
+
+    /// Undo and return the exact edits that must be mirrored to the backend.
+    /// This avoids diffing two full copies of large documents on every undo.
+    pub fn undo_with_changes(&mut self) -> Result<Option<Vec<Change>>, DocumentError> {
         let Some(entry) = self.undo.pop_back() else {
-            return Ok(false);
+            return Ok(None);
         };
         let version = self.version();
         if let Err(error) = self.apply(Transaction::new(
@@ -388,13 +462,18 @@ impl Document {
             self.undo.push_back(entry);
             return Err(error);
         }
+        let changes = entry.inverse.clone();
         self.redo.push(entry);
-        Ok(true)
+        Ok(Some(changes))
     }
 
     pub fn redo(&mut self) -> Result<bool, DocumentError> {
+        Ok(self.redo_with_changes()?.is_some())
+    }
+
+    pub fn redo_with_changes(&mut self) -> Result<Option<Vec<Change>>, DocumentError> {
         let Some(entry) = self.redo.pop() else {
-            return Ok(false);
+            return Ok(None);
         };
         let version = self.version();
         if let Err(error) = self.apply(Transaction::new(
@@ -405,8 +484,9 @@ impl Document {
             self.redo.push(entry);
             return Err(error);
         }
+        let changes = entry.forward.clone();
         self.undo.push_back(entry);
-        Ok(true)
+        Ok(Some(changes))
     }
 
     pub fn can_undo(&self) -> bool {
@@ -522,6 +602,63 @@ mod tests {
         assert_eq!(document.text(), "one two three");
         assert!(document.redo().unwrap());
         assert_eq!(document.text(), "1 two 3");
+    }
+
+    #[test]
+    fn undo_returns_the_exact_inverse_change() {
+        let mut document = doc("hello");
+        document
+            .apply(Transaction::new(
+                0,
+                vec![Change::replace(1..4, "ELL")],
+                EditSource::Local,
+            ))
+            .unwrap();
+        let changes = document.undo_with_changes().unwrap().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].from, 1);
+        assert_eq!(changes[0].to, 4);
+        assert_eq!(&*changes[0].insert, "ell");
+        assert_eq!(document.text(), "hello");
+    }
+
+    #[test]
+    fn history_is_bounded() {
+        let mut document = doc("");
+        for index in 0..1_100 {
+            let len = document.len_utf16();
+            document
+                .apply(Transaction::new(
+                    document.version(),
+                    vec![Change::insert(len, format!("{index}\n"))],
+                    EditSource::Local,
+                ))
+                .unwrap();
+        }
+        let mut undo_count = 0;
+        while document.undo().unwrap() {
+            undo_count += 1;
+        }
+        assert_eq!(undo_count, DEFAULT_HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn million_line_document_stays_editable() {
+        let text = "fn generated() {}\n".repeat(1_000_000);
+        let mut document = Document::new(DocumentId::new(9), &text);
+        assert_eq!(document.line_count(), 1_000_001);
+        let middle = document.line_start(500_000);
+        document
+            .apply(Transaction::new(
+                document.version(),
+                vec![Change::insert(middle, "// stress\n")],
+                EditSource::Local,
+            ))
+            .unwrap();
+        assert_eq!(document.line_count(), 1_000_002);
+        assert_eq!(document.line(500_000).as_deref(), Some("// stress"));
+        assert!(document.undo().unwrap());
+        assert_eq!(document.line_count(), 1_000_001);
     }
 
     #[test]

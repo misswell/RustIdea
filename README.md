@@ -13,8 +13,18 @@ This repository is following the migration plan in the root `RUSTIDEA_*.md` file
 
 - Phase 0: migration audit, feature inventory, architecture and license
   inventory are documented; comparative performance measurements remain open.
-- Phase 1: standalone GPUI application shell, theme, menus, logging, services.
-- Phase 2: native editor minimum viable version.
+- Phase 1: standalone GPUI application shell, native menus, themes, workbench
+  panels, session persistence, logging and reused Rust services.
+- Phase 2: native editor with UTF-16 document buffers, undo/redo, selection,
+  clipboard, line numbers, virtualized scrolling, syntax highlighting,
+  diagnostics, save/autosave and IME marked-text handling.
+
+This is not yet complete OpenIDEA parity. Native project search, VCS, terminal,
+run/build, database and HTTP panels are implemented at MVP depth. LSP
+completion/hover/rename, full terminal emulation, real debugger sessions,
+plugins/MCP, agents, SSH/remote development, notebooks, viewers and several
+language tool windows remain incomplete or placeholders. See
+`RUSTIDEA_FEATURE_PARITY.md` for the item-by-item status.
 
 The old OpenIDEA tree is a read-only migration reference, not a runtime
 dependency. Backend crates are vendored here as they are adopted.
@@ -35,6 +45,13 @@ scripts/release-macos.sh
 
 ```sh
 cargo test --workspace
+```
+
+The targeted release-gate test set is:
+
+```sh
+cargo test -p rustidea -p rustidea-editor -p ide-text
+cargo clippy -p rustidea --all-targets -- -D warnings
 ```
 
 Licensing details are in `THIRD_PARTY_LICENSES.md`,

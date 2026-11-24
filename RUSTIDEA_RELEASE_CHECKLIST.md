@@ -1,37 +1,44 @@
 # macOS release checklist
 
-Status: static code verification, three-platform CI, and the macOS
-signing/notarization pipeline are complete for 0.1.1. The measured OpenIDEA
-baseline and Phase 1–2 interactive acceptance remain open. The 0.1.1 publication
-is a native GPUI MVP release, not OpenIDEA parity or Phase 2 acceptance.
+Status: `0.1.2` release preparation. Static native architecture, targeted
+tests, formatting, Clippy and license inventory have passed locally. Interactive
+Phase 1–2 acceptance and comparative performance remain open. The release is a
+native GPUI MVP, not OpenIDEA parity.
 
-1. Keep the audit and feature inventory current; collect the measured OpenIDEA
-   baseline and record the results.
-2. Verify native window lifecycle, themes, editing, clipboard, undo/redo,
-   autosave, saving and reopening, real Chinese IME composition and large-file
-   responsiveness in an isolated GUI session. Check the process tree and linked
-   frameworks for WebView and browser processes.
-3. Re-run the locked macOS dependency license inventory after dependency
-   changes. Include `THIRD_PARTY_RUST_LICENSES.md`, the required notice files,
-   and the MPL-2.0 `option-ext` source in the app or distribution.
-4. Run workspace tests, formatting and Clippy on the release commit. Determine a
-   new patch version from remote tags and synchronize package and bundle versions.
-   Complete: macOS, Ubuntu 24.04 and Windows 2025 CI passed at
-   `bfadf41e47708ea3c48f887e5312584dd6e2e477`.
-5. Build the release app bundle, sign with a verified Developer ID Application
-   identity and hardened runtime, and verify the signature and timestamp.
-6. Submit the signed app archive to Apple with a validated notarytool profile;
-   wait for acceptance, staple and validate the ticket, then check Gatekeeper.
-   Complete: universal submission `0dd04501-d29a-429e-8491-ceedc1111566`
-   was accepted; signature, ticket and Gatekeeper checks passed.
-7. Produce the final archive from the stapled app, compute SHA-256, push the
-   verified commit and a new tag without overwriting any existing tag, and create
-   a stable GitHub Release with accurate Phase 0–2 limitations. Asset SHA-256:
-   `1d75b913ad430f9cb526187d2672db5717c236f558e6ffe455d0e1dca325e4ea`.
-8. Verify the remote commit, tag, stable Release, downloadable asset and digest.
+1. Keep `RUSTIDEA_MIGRATION_AUDIT.md`, `RUSTIDEA_FEATURE_PARITY.md` and
+   `RUSTIDEA_ARCHITECTURE.md` accurate. Do not describe placeholders as
+   completed features.
+2. Run `scripts/update-license-bundle.sh` after the final `Cargo.lock`. Retain
+   `LICENSE`, `NOTICE`, `THIRD_PARTY_LICENSES.md`,
+   `THIRD_PARTY_RUST_LICENSES.md` and all `THIRD_PARTY_SOURCES/` entries in the
+   app bundle.
+3. Verify `cargo fmt --all --check`, targeted tests and Clippy on the exact
+   release commit. Run the macOS, Ubuntu 24.04 and Windows 2025 CI matrix and
+   follow it until every job is green.
+4. Confirm the new patch tag does not exist remotely. `v0.1.1` must not move or
+   be overwritten; the intended tag is `v0.1.2`.
+5. Validate the notary profile in the current session:
 
-Reference: `/Users/guofeng/.codex/skills/macos-github-release/SKILL.md` and
+   ```sh
+   xcrun notarytool history --keychain-profile agentspace-notary
+   ```
+
+6. Build arm64 and x86_64 release binaries, create a universal executable,
+   package `RustIdea.app` with `assets/RustIdea.icns`, sign with Developer ID
+   Application and hardened runtime, and verify the signature/timestamp.
+7. Submit the signed archive to Apple, wait for `Accepted`, staple and validate
+   the ticket, then run `spctl --assess --type execute`.
+8. Produce the final universal zip from the stapled app, record its SHA-256 and
+   run `otool -L` plus dependency checks for hidden WebView/browser frameworks.
+9. Push the verified commit and tag without force, create a stable GitHub
+   Release (not prerelease), upload the universal archive and include the
+   SHA-256, install instructions, limitations and no-WebView statement.
+10. Verify the remote commit, immutable tag, stable Release, downloadable asset
+    and digest. Report the GitHub commit/Release links and absolute artifact
+    paths.
+
+Reference: `/Users/guofeng/.codex/skills/macos-github-release/SKILL.md` and the
+verified signing/notarization approach in
 `/Users/guofeng/Code/solo/TypeDown/scripts/build-release.sh`. The latter is a
-Tauri project and is a signing/notarization reference only, not an architecture
-to import into RustIdea. Local Keychain profile `agentspace-notary` successfully
-returned submission history on 2026-11-24; validate it again when releasing.
+Tauri project and is a release reference only; none of its WebView
+architecture is imported into RustIdea.

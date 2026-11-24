@@ -1,0 +1,2637 @@
+//! The Codex shim against codex transcripts: frames recorded from the real
+//! `codex app-server` (`record_codex_fixtures`, ignored) or written by hand where a
+//! recording isn't possible, played back by a fake codex.
+//!
+//! A transcript is JSONL: a `{"type":"meta",…}` line, then `{"dir":"out","frame":…}` for
+//! each frame the shim sent and `{"dir":"in","frame":…}` for each frame codex sent.
+
+use super::translate::*;
+use super::*;
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+
+struct ModelPages {
+    pages: Mutex<VecDeque<Result<Value, (i64, String)>>>,
+    cursors: Mutex<Vec<Value>>,
+}
+
+impl Handler for ModelPages {
+    fn on_notification(&self, _: &str, _: Value) {}
+
+    fn on_request(&self, method: &str, params: Value) -> Result<Value, (i64, String)> {
+        assert_eq!(
+            method, "model/list",
+            "listing models must never start a thread or turn"
+        );
+        self.cursors.lock().push(params["cursor"].clone());
+        self.pages
+            .lock()
+            .pop_front()
+            .expect("another expected page")
+    }
+}
+
+fn model_peer(pages: Arc<ModelPages>) -> (Peer, Peer) {
+    let (ours, theirs) = tokio::io::duplex(1 << 16);
+    let (read, write) = tokio::io::split(theirs);
+    let server = Peer::connect_framed(read, write, pages, Framing::Lines);
+    let (read, write) = tokio::io::split(ours);
+    (
+        Peer::connect_framed(
+            read,
+            write,
+            Arc::new(ide_jsonrpc::NoopHandler),
+            Framing::Lines,
+        ),
+        server,
+    )
+}
+
+#[tokio::test]
+async fn model_pagination_failure_does_not_cache_an_incomplete_catalog() {
+    let first = json!({ "data": [{ "id": "first" }], "nextCursor": "next" });
+    let pages = Arc::new(ModelPages {
+        pages: Mutex::new(VecDeque::from([
+            Ok(first.clone()),
+            Err((-32000, "authentication expired".into())),
+            Ok(first),
+            Ok(json!({ "data": [{ "id": "second" }], "nextCursor": null })),
+        ])),
+        cursors: Mutex::default(),
+    });
+    let (peer, server) = model_peer(pages.clone());
+    let shim = CodexShim {
+        runtime: tokio::runtime::Handle::current(),
+        codex: OnceLock::from(peer.clone()),
+        client: OnceLock::new(),
+        state: Mutex::default(),
+        models: tokio::sync::Mutex::new(None),
+        skills: tokio::sync::Mutex::new(()),
+    };
+    assert_eq!(
+        shim.models().await.unwrap_err().message,
+        "authentication expired"
+    );
+    let models = shim.models().await.unwrap();
+    assert_eq!(
+        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert_eq!(shim.models().await.unwrap().len(), 2);
+    assert_eq!(
+        *pages.cursors.lock(),
+        [Value::Null, json!("next"), Value::Null, json!("next")]
+    );
+    peer.kill();
+    server.kill();
+}
+
+#[tokio::test]
+async fn repeated_or_invalid_model_cursors_and_malformed_pages_are_failures() {
+    for pages in [
+        vec![
+            json!({ "data": [], "nextCursor": "a" }),
+            json!({ "data": [], "nextCursor": "a" }),
+        ],
+        vec![
+            json!({ "data": [], "nextCursor": "a" }),
+            json!({ "data": [], "nextCursor": "b" }),
+            json!({ "data": [], "nextCursor": "a" }),
+        ],
+        vec![json!({ "data": [], "nextCursor": 7 })],
+        vec![json!({ "nextCursor": null })],
+        vec![json!({ "data": [{}], "nextCursor": null })],
+    ] {
+        let pages = Arc::new(ModelPages {
+            pages: Mutex::new(pages.into_iter().map(Ok).collect()),
+            cursors: Mutex::default(),
+        });
+        let (peer, server) = model_peer(pages);
+        assert!(list_models(&peer).await.is_err());
+        peer.kill();
+        server.kill();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_discovery_only_initializes_and_pages_models_then_stops_the_process() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let script = tmp.path().join("fake-codex");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+pathlib.Path('pid').write_text(str(os.getpid()))
+for line in sys.stdin:
+    request = json.loads(line)
+    with pathlib.Path('requests').open('a') as f:
+        f.write(json.dumps(request) + '\n')
+    method = request['method']
+    if method == 'initialized':
+        continue
+    if method == 'initialize':
+        result = {}
+    elif method == 'model/list':
+        cursor = request['params']['cursor']
+        model = 'one' if cursor is None else 'two'
+        result = {'data': [{'id': model, 'isDefault': cursor is None,
+            'defaultReasoningEffort': 'low', 'supportedReasoningEfforts': [{'reasoningEffort': 'low'}]}],
+            'nextCursor': 'second-page' if cursor is None else None}
+    else:
+        raise RuntimeError('must not create a thread or prompt: ' + method)
+    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let spec = ProviderSpec {
+        id: "codex".into(),
+        name: "Codex".into(),
+        driver: crate::provider::Driver::Codex,
+        command: script.to_string_lossy().into_owned(),
+        args: Vec::new(),
+        env: Vec::new(),
+        login_hint: String::new(),
+        source: crate::AgentSource::Builtin,
+    };
+    let found = discover(spec, tmp.path().to_path_buf()).await.unwrap();
+    let models: Vec<_> = found
+        .config
+        .iter()
+        .filter(|o| o.category.as_deref() == Some("model"))
+        .flat_map(|o| o.values.iter().map(|v| v.value.as_str()))
+        .collect();
+    assert_eq!(models, ["one", "two"]);
+    assert_eq!(
+        found.levels.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["one", "two"]
+    );
+    let requests = std::fs::read_to_string(tmp.path().join("requests")).unwrap();
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["initialize", "initialized", "model/list", "model/list"]
+    );
+    assert_eq!(requests[2]["params"]["cursor"], Value::Null);
+    assert_eq!(requests[3]["params"]["cursor"], "second-page");
+    let pid = std::fs::read_to_string(tmp.path().join("pid")).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .output()
+                .unwrap()
+                .status
+                .success();
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("discovery must kill and reap its child");
+}
+
+// ---- Pure translations -------------------------------------------------------------
+
+fn models() -> Vec<ModelInfo> {
+    models_of(&json!({"data": [
+        {"id": "big", "model": "big", "displayName": "Big", "description": "d", "hidden": false, "isDefault": true,
+         "defaultReasoningEffort": "low",
+         "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "fast"}, {"reasoningEffort": "xhigh", "description": ""}]},
+        {"id": "plain", "model": "plain-slug", "displayName": "", "description": "", "hidden": false, "isDefault": false,
+         "supportedReasoningEfforts": []},
+        {"id": "secret", "model": "secret", "displayName": "S", "description": "", "hidden": true, "isDefault": false,
+         "supportedReasoningEfforts": []}
+    ]}))
+}
+
+#[test]
+fn settings_follow_the_thread_and_the_models() {
+    let models = models();
+    let result = json!({"model": "big", "reasoningEffort": null, "approvalPolicy": "untrusted",
+        "sandbox": {"type": "workspaceWrite"}});
+    let mut s = Settings::of(&result, &models);
+    assert_eq!(
+        s,
+        Settings {
+            model: "big".into(),
+            effort: Some("low".into()),
+            mode: Mode::Ask,
+            collaboration_mode: DEFAULT_COLLABORATION_MODE.into(),
+            collaboration_mode_override: None,
+        }
+    );
+
+    let options = config_options(&models, &s);
+    let ids: Vec<&str> = options
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [MODEL, EFFORT, MODE, COLLABORATION_MODE]);
+    assert_eq!(
+        options[0]["options"].as_array().unwrap().len(),
+        2,
+        "hidden models are left out"
+    );
+    assert_eq!(options[1]["category"], "thought_level");
+    assert_eq!(options[1]["options"][1]["name"], "Extra high");
+    assert_eq!(options[2]["currentValue"], "ask");
+    assert_eq!(options[3]["currentValue"], "default");
+
+    // A model without efforts drops the option; its slug is what codex gets.
+    s.set(&models, MODEL, "plain").unwrap();
+    assert_eq!(
+        (s.effort.as_deref(), s.model_slug(&models).as_str()),
+        (None, "plain-slug")
+    );
+    assert_eq!(config_options(&models, &s).as_array().unwrap().len(), 3);
+    assert!(s.set(&models, EFFORT, "low").is_err());
+    assert!(s.set(&models, MODEL, "nope").is_err());
+    s.set(&models, MODE, "full-access").unwrap();
+    assert_eq!(
+        (s.mode.approval_policy(), s.mode.sandbox_policy()),
+        ("never", json!({"type": "dangerFullAccess"}))
+    );
+    s.set(&models, COLLABORATION_MODE, PLAN_COLLABORATION_MODE)
+        .unwrap();
+    assert_eq!(
+        collaboration_mode(&s, &models)["mode"],
+        PLAN_COLLABORATION_MODE
+    );
+    s.set(&models, COLLABORATION_MODE, DEFAULT_COLLABORATION_MODE)
+        .unwrap();
+    assert_eq!(
+        collaboration_mode(&s, &models)["mode"],
+        DEFAULT_COLLABORATION_MODE
+    );
+
+    // A model codex runs that it doesn't list is still offered.
+    let s = Settings::of(
+        &json!({"model": "custom", "sandbox": {"type": "readOnly"}}),
+        &models,
+    );
+    assert_eq!(s.mode, Mode::ReadOnly);
+    let options = config_options(&models, &s);
+    assert_eq!(
+        options[0]["options"][2],
+        json!({"value": "custom", "name": "custom"})
+    );
+}
+
+#[test]
+fn prompts_become_user_input() {
+    let input = user_input(&json!([
+        {"type": "text", "text": "fix it"},
+        {"type": "resource", "resource": {"uri": "file:///p/a%20b.rs", "text": "fn x() {}"}},
+        {"type": "resource_link", "uri": "file:///p/big.bin", "name": "big.bin"},
+        {"type": "image", "mimeType": "image/jpeg", "data": "AAA"},
+        {"type": "audio", "data": "x"}
+    ]));
+    assert_eq!(
+        input,
+        vec![
+            json!({"type": "text", "text": "fix it"}),
+            json!({"type": "text", "text": "<file path=\"/p/a b.rs\">\nfn x() {}\n</file>"}),
+            json!({"type": "text", "text": "/p/big.bin"}),
+            json!({"type": "image", "url": "data:image/jpeg;base64,AAA"}),
+        ]
+    );
+}
+
+#[test]
+fn compact_is_recognized_with_completion_whitespace_and_attachments() {
+    // Completion leaves trailing whitespace and images can remain in the prompt. The first
+    // text block still names the command; unknown slash-shaped text continues normally.
+    assert_eq!(
+        commands::parse(&text("/compact")).unwrap().command,
+        BuiltinCommand::Compact
+    );
+    assert_eq!(
+        commands::parse(&text("  /compact \n")).unwrap().command,
+        BuiltinCommand::Compact
+    );
+    assert_eq!(commands::parse(&text("/compact now")).unwrap().rest, "now");
+    let prompt = json!([{"type": "text", "text": "/compact"}, {"type": "image", "data": "AA=="}]);
+    assert_eq!(
+        commands::parse(&prompt).unwrap().command,
+        BuiltinCommand::Compact
+    );
+    assert!(commands::parse(&text("x/compact")).is_none());
+}
+
+#[test]
+fn commands_are_titled_by_what_they_do() {
+    let cmd = |actions: Value| {
+        json!({"id": "c", "type": "commandExecution", "command": "/bin/zsh -lc 'x'", "cwd": "/p",
+            "status": "inProgress", "commandActions": actions})
+    };
+    let call = tool_call(
+        &cmd(json!([{"type": "read", "command": "cat a.rs", "name": "a.rs", "path": "/p/a.rs"}])),
+        false,
+        Some("/p"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        (call["title"].as_str(), call["kind"].as_str()),
+        (Some("Read a.rs"), Some("read"))
+    );
+    assert_eq!(call["locations"], json!([{"path": "/p/a.rs"}]));
+    let call = tool_call(
+        &cmd(json!([{"type": "search", "command": "rg x src", "query": "x", "path": "/p/src"}])),
+        false,
+        Some("/p"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(call["title"], "Search x in src");
+    let call = tool_call(
+        &cmd(json!([{"type": "unknown", "command": "cargo test"}])),
+        false,
+        None,
+        Some("ok"),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            call["title"].as_str(),
+            call["kind"].as_str(),
+            call["status"].as_str()
+        ),
+        (Some("cargo test"), Some("execute"), Some("in_progress"))
+    );
+    assert_eq!(call["content"][0]["content"]["text"], "ok");
+
+    let mut done = cmd(json!([]));
+    done["status"] = json!("declined");
+    done["exitCode"] = json!(1);
+    let call = tool_call(&done, true, None, None).unwrap();
+    assert_eq!(
+        (call["sessionUpdate"].as_str(), call["status"].as_str()),
+        (Some("tool_call_update"), Some("failed"))
+    );
+    assert_eq!(call["title"], "/bin/zsh -lc 'x'");
+    assert_eq!(call["rawOutput"], json!({"exitCode": 1}));
+}
+
+#[test]
+fn file_changes_carry_diffs() {
+    let item = json!({"id": "f", "type": "fileChange", "status": "completed", "changes": [
+        {"path": "/p/new.txt", "kind": {"type": "add"}, "diff": "hello\n"},
+        {"path": "/p/a.rs", "kind": {"type": "update", "move_path": null},
+         "diff": "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n@@ -9 +9,2 @@\n-z\n+y\n+w\n\\ No newline at end of file\n"},
+        {"path": "/p/old.rs", "kind": {"type": "delete"}, "diff": "gone\n"}
+    ]});
+    let call = tool_call(&item, true, Some("/p"), None).unwrap();
+    assert_eq!(
+        (
+            call["title"].as_str(),
+            call["kind"].as_str(),
+            call["status"].as_str()
+        ),
+        (Some("Edit 3 files"), Some("edit"), Some("completed"))
+    );
+    assert_eq!(
+        call["content"],
+        json!([
+            {"type": "diff", "path": "/p/new.txt", "oldText": "", "newText": "hello\n"},
+            {"type": "diff", "path": "/p/a.rs", "oldText": "a\nb\nc\nz\n", "newText": "a\nB\nc\ny\nw\n"},
+            {"type": "diff", "path": "/p/old.rs", "oldText": "gone\n", "newText": ""}
+        ])
+    );
+    let one = json!({"id": "f", "type": "fileChange", "status": "inProgress", "changes": [
+        {"path": "/p/a.rs", "kind": {"type": "update", "move_path": "/p/b.rs"}, "diff": "@@ -1 +1 @@\n-x\n+y\n"}]});
+    let call = tool_call(&one, false, Some("/p"), None).unwrap();
+    assert_eq!(
+        (call["title"].as_str(), call["kind"].as_str()),
+        (Some("Move a.rs to b.rs"), Some("move"))
+    );
+    assert_eq!(call["content"][0]["path"], "/p/b.rs");
+    assert_eq!(
+        file_approval_title(Some(&one), Some("/p")),
+        "Move a.rs to b.rs"
+    );
+}
+
+#[test]
+fn other_items() {
+    let search = json!({"id": "w", "type": "webSearch", "query": "", "action": null});
+    assert_eq!(
+        tool_call(&search, false, None, None).unwrap()["title"],
+        "Search the web"
+    );
+    let search = json!({"id": "w", "type": "webSearch", "query": "rust", "action": {"type": "search", "query": "rust"}});
+    let call = tool_call(&search, true, None, None).unwrap();
+    assert_eq!(
+        (
+            call["title"].as_str(),
+            call["status"].as_str(),
+            call["kind"].as_str()
+        ),
+        (
+            Some("Search the web: rust"),
+            Some("completed"),
+            Some("fetch")
+        )
+    );
+    let mcp = json!({"id": "m", "type": "mcpToolCall", "server": "gh", "tool": "issue", "status": "failed",
+        "arguments": {"n": 1}, "result": {"content": [{"type": "text", "text": "partial"}]}, "error": {"message": "boom"}});
+    let call = tool_call(&mcp, true, None, None).unwrap();
+    assert_eq!(call["title"], "gh: issue");
+    assert_eq!(call["content"][1]["content"]["text"], "boom");
+    assert_eq!(call["rawInput"], json!({"n": 1}));
+    for skipped in [
+        "agentMessage",
+        "reasoning",
+        "userMessage",
+        "subAgentActivity",
+    ] {
+        assert!(tool_call(&json!({"id": "x", "type": skipped}), false, None, None).is_none());
+    }
+    let spawn = json!({"id": "x", "type": "collabAgentToolCall", "tool": "spawnAgent", "status": "completed"});
+    assert!(tool_call(&spawn, true, None, None).is_none());
+
+    let plan = plan(
+        &json!({"plan": [{"step": "a", "status": "completed"}, {"step": "b", "status": "inProgress"}]}),
+    );
+    assert_eq!(
+        plan["entries"][1],
+        json!({"content": "b", "priority": "medium", "status": "in_progress"})
+    );
+    let u = usage(
+        &json!({"tokenUsage": {"last": {"totalTokens": 20}, "total": {"totalTokens": 99}, "modelContextWindow": 1000}}),
+    );
+    assert_eq!(
+        u,
+        Some(json!({"sessionUpdate": "usage_update", "used": 20, "size": 1000}))
+    );
+    assert!(
+        usage(&json!({"tokenUsage": {"last": {"totalTokens": 20}, "modelContextWindow": null}}))
+            .is_none()
+    );
+    assert_eq!(
+        reasoning_text(&json!({"summary": ["a", "b"], "content": ["raw"]})),
+        "a\n\nb"
+    );
+    assert!(tail(&"é".repeat(MAX_OUTPUT)).starts_with('…'));
+}
+
+#[test]
+fn failures_are_classified() {
+    let limits = json!({"primary": {"usedPercent": 100, "resetsAt": 1_800_000_000}, "secondary": {"usedPercent": 40, "resetsAt": 1_900_000_000}});
+    let e =
+        json!({"message": "You've hit your usage limit.", "codexErrorInfo": "usageLimitExceeded"});
+    assert_eq!(
+        classify(&e, Some(&limits)),
+        Failure::UsageLimit(Some(1.8e12))
+    );
+    assert_eq!(classify(&e, None), Failure::UsageLimit(None));
+    let e = json!({"message": "x", "codexErrorInfo": {"responseTooManyFailedAttempts": {"httpStatusCode": 429}}});
+    assert_eq!(classify(&e, None), Failure::UsageLimit(None));
+    assert_eq!(
+        classify(
+            &json!({"message": "x", "codexErrorInfo": "unauthorized"}),
+            None
+        ),
+        Failure::Auth
+    );
+    let e = json!({"message": "unexpected status 401 Unauthorized: Missing bearer", "codexErrorInfo": "other"});
+    assert_eq!(classify(&e, None), Failure::Auth);
+    assert_eq!(
+        classify(
+            &json!({"message": "no", "codexErrorInfo": "cyberPolicy"}),
+            None
+        ),
+        Failure::Refusal
+    );
+    assert_eq!(
+        classify(
+            &json!({"message": "too long", "codexErrorInfo": "contextWindowExceeded"}),
+            None
+        ),
+        Failure::Other
+    );
+    assert_eq!(
+        error_message(&json!({"message": "Failed", "additionalDetails": "because"})),
+        "Failed\nbecause"
+    );
+
+    let usage_limit = stop_reason(
+        &json!({"status": "failed", "error": null}),
+        Some(json!({"message": "limit", "codexErrorInfo": "usageLimitExceeded"})),
+        Some(&limits),
+    )
+    .unwrap_err();
+    assert_eq!(
+        usage_limit.data,
+        Some(json!({"openidea": {"usageLimit": {"resetsAtMs": 1.8e12}}}))
+    );
+    assert_eq!(
+        stop_reason(&json!({"status": "interrupted"}), None, None).unwrap(),
+        json!({"stopReason": "cancelled"})
+    );
+}
+
+#[test]
+fn approvals_offer_what_codex_offers_and_always_a_decline() {
+    let params = json!({"availableDecisions": ["accept",
+        {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["/bin/bash", "-lc", "make"]}},
+        {"applyNetworkPolicyAmendment": {"network_policy_amendment": {"host": "crates.io", "action": "allow"}}},
+        "cancel"]});
+    let choices = decisions(&params, true);
+    let options: Vec<(&str, &str, &str)> = choices
+        .iter()
+        .map(|c| {
+            (
+                c.option["optionId"].as_str().unwrap(),
+                c.option["name"].as_str().unwrap(),
+                c.option["kind"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        options,
+        [
+            ("accept", "Allow once", "allow_once"),
+            (
+                "acceptWithExecpolicyAmendment",
+                "Always allow `make`",
+                "allow_always"
+            ),
+            (
+                "applyNetworkPolicyAmendment:allow:crates.io",
+                "Always allow crates.io",
+                "allow_always"
+            ),
+            ("decline", "Decline", "reject_once"),
+            ("cancel", "Decline and stop", "reject_once"),
+        ]
+    );
+    let selected = |id: &str| json!({"outcome": {"outcome": "selected", "optionId": id}});
+    let decline = json!({"decision": "decline"});
+    assert_eq!(
+        answer_of(
+            &choices,
+            &selected("acceptWithExecpolicyAmendment"),
+            decline.clone()
+        ),
+        json!({"decision": params["availableDecisions"][1]})
+    );
+    assert_eq!(
+        answer_of(
+            &choices,
+            &json!({"outcome": {"outcome": "cancelled"}}),
+            decline.clone()
+        ),
+        decline
+    );
+    assert_eq!(
+        answer_of(&choices, &selected("zzz"), decline.clone()),
+        decline
+    );
+    let ids: Vec<Value> = decisions(&json!({}), false)
+        .iter()
+        .map(|c| c.option["optionId"].clone())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            json!("accept"),
+            json!("acceptForSession"),
+            json!("decline"),
+            json!("cancel")
+        ]
+    );
+    assert_eq!(
+        command_approval_title(
+            &json!({"command": "/bin/zsh -lc 'ls'", "commandActions": [{"type": "unknown", "command": "touch b"}]}),
+            None
+        ),
+        "Run ls"
+    );
+}
+
+#[test]
+fn approval_title_shows_the_script_inside_a_shell_wrapper() {
+    let title = |command: &str| command_approval_title(&json!({ "command": command }), None);
+    assert_eq!(
+        title(r#"/bin/zsh -lc "python3 -c 'import pathlib\np = pathlib.Path(\"a.txt\")'""#),
+        "Run python3 -c 'import pathlib\\np = pathlib.Path(\"a.txt\")'"
+    );
+    assert_eq!(title(r#"bash -lc 'echo '\''hi'\'''"#), "Run echo 'hi'");
+    assert_eq!(title("/bin/zsh -lc ls"), "Run /bin/zsh -lc ls");
+    assert_eq!(
+        title("/bin/zsh -lc 'ls' && rm x"),
+        "Run /bin/zsh -lc 'ls' && rm x"
+    );
+    assert_eq!(title("python3 -c 'print(1)'"), "Run python3 -c 'print(1)'");
+}
+
+#[test]
+fn approval_command_uses_its_request_and_matching_item_only() {
+    let command =
+        "python3 -c 'import pathlib\np = pathlib.Path(\"note.txt\")\np.write_text(\"hi\\n\")'";
+    let pending_read = json!({"id": "read", "type": "commandExecution", "command": "ls",
+        "commandActions": [{"type": "listFiles", "path": "."}]});
+    let request = json!({"itemId": "write", "command": command});
+    assert_eq!(
+        command_approval_title(&request, Some(&pending_read)),
+        format!("Run {command}")
+    );
+    let item = json!({"id": "write", "command": command});
+    let request = json!({"itemId": "write"});
+    assert_eq!(
+        command_approval_title(&request, Some(&item)),
+        format!("Run {command}")
+    );
+    assert_eq!(
+        command_approval_title(&request, Some(&pending_read)),
+        "Run a command"
+    );
+    assert_eq!(command_approval_title(&request, None), "Run a command");
+}
+
+#[test]
+fn history_replays_turns() {
+    let thread = json!({"turns": [{"id": "t", "status": "completed", "items": [
+        {"type": "userMessage", "id": "u", "content": [{"type": "text", "text": "hi"}]},
+        {"type": "reasoning", "id": "r", "summary": ["think"]},
+        {"type": "agentMessage", "id": "a", "text": "hello"},
+        {"type": "commandExecution", "id": "c", "command": "ls", "cwd": "/p", "status": "completed",
+         "commandActions": [], "aggregatedOutput": "a.txt\n", "exitCode": 0}
+    ]}]});
+    let updates = history(&thread, Some("/p"));
+    let kinds: Vec<&str> = updates
+        .iter()
+        .map(|u| u["sessionUpdate"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "user_message_chunk",
+            "agent_thought_chunk",
+            "agent_message_chunk",
+            "tool_call",
+            "tool_call_update"
+        ]
+    );
+    assert_eq!(updates[4]["status"], "completed");
+}
+
+// ---- Transcripts ---------------------------------------------------------------------
+
+/// The ACP client: records updates and answers permission requests in order.
+#[derive(Default)]
+struct Client {
+    updates: Mutex<Vec<Value>>,
+    warnings: Mutex<Vec<Value>>,
+    asked: Mutex<Vec<Value>>,
+    /// Option ids to choose; `None` (or none left) cancels.
+    answers: Mutex<VecDeque<Option<&'static str>>>,
+}
+
+impl Handler for Client {
+    fn on_notification(&self, method: &str, params: Value) {
+        if method == "session/update" {
+            self.updates.lock().push(params);
+        } else if method == "_openidea/warning" {
+            self.warnings.lock().push(params);
+        }
+    }
+
+    fn on_request(&self, method: &str, params: Value) -> Result<Value, (i64, String)> {
+        assert_eq!(method, "session/request_permission");
+        self.asked.lock().push(params);
+        Ok(match self.answers.lock().pop_front().flatten() {
+            Some(id) => json!({ "outcome": { "outcome": "selected", "optionId": id } }),
+            None => json!({ "outcome": { "outcome": "cancelled" } }),
+        })
+    }
+}
+
+impl Client {
+    /// The updates of `session`, as `(sessionUpdate, update)`.
+    fn of(&self, session: &str) -> Vec<Value> {
+        self.updates
+            .lock()
+            .iter()
+            .filter(|u| u["sessionId"] == session)
+            .map(|u| u["update"].clone())
+            .collect()
+    }
+
+    /// The text of the `kind` chunks of `session`.
+    fn text(&self, session: &str, kind: &str) -> String {
+        self.of(session)
+            .iter()
+            .filter(|u| u["sessionUpdate"] == kind)
+            .filter_map(|u| {
+                u.pointer("/content/text")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn questions_share_one_card_and_keep_their_ids() {
+    let client = Arc::new(Client::default());
+    client.answers.lock().extend([
+        Some(r#"{"first":["One"],"second":["Two","Custom"]}"#),
+        None,
+        Some("invalid"),
+    ]);
+    let (ours, theirs) = tokio::io::duplex(1 << 16);
+    let (read, write) = tokio::io::split(theirs);
+    let codex = Peer::connect_framed(
+        read,
+        write,
+        Arc::new(ide_jsonrpc::NoopHandler),
+        Framing::Lines,
+    );
+    let acp = attach(client.clone(), |events| {
+        let (read, write) = tokio::io::split(ours);
+        Ok(Peer::connect_framed(read, write, events, Framing::Lines))
+    })
+    .unwrap();
+    let params = json!({"threadId": "s", "itemId": "q", "questions": [
+        {"id": "first", "question": "Which?", "options": [{"label": "One", "description": "First"}]},
+        {"id": "second", "question": "Which?", "multiSelect": true, "options": [{"label": "Two"}]}
+    ]});
+    for expected in [
+        json!({"first": {"answers": ["One"]}, "second": {"answers": ["Two", "Custom"]}}),
+        json!({}),
+        json!({}),
+    ] {
+        let reply: Value = codex
+            .request("item/tool/requestUserInput", params.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(reply, json!({"answers": expected}));
+    }
+    let asked = client.asked.lock();
+    assert_eq!(asked.len(), 3);
+    let questions = &asked[0]["toolCall"]["_meta"]["questions"];
+    assert_eq!(questions.as_array().unwrap().len(), 2);
+    assert_eq!(questions[0]["answerKey"], "first");
+    assert_eq!(questions[1]["answerKey"], "second");
+    assert_eq!(questions[0]["options"][0]["description"], "First");
+    acp.kill();
+    codex.kill();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Scenario {
+    AuthFailure,
+    Command(&'static str),
+    Compact,
+    PlanThenPrompt,
+    PlanToggleThenPrompt,
+    Interrupt,
+    Resume,
+    Steer,
+    Simple,
+    MultiTurn,
+    Approvals,
+    UsageLimit,
+    Subagent,
+}
+
+impl Scenario {
+    fn file(self) -> &'static str {
+        match self {
+            Scenario::AuthFailure => "auth_failure",
+            Scenario::Command(_) => "simple",
+            Scenario::Compact => "simple",
+            Scenario::PlanThenPrompt => "simple",
+            Scenario::PlanToggleThenPrompt => "simple",
+            Scenario::Interrupt => "interrupt",
+            Scenario::Resume => "resume",
+            Scenario::Steer => "steer",
+            Scenario::Simple => "simple",
+            Scenario::MultiTurn => "multi_turn",
+            Scenario::Approvals => "approvals",
+            Scenario::UsageLimit => "usage_limit",
+            Scenario::Subagent => "subagent",
+        }
+    }
+}
+
+/// What a scenario's ACP requests returned, by label.
+type Results = Vec<(&'static str, Result<Value, RpcError>)>;
+
+fn result<'a>(results: &'a Results, label: &str) -> &'a Result<Value, RpcError> {
+    &results
+        .iter()
+        .find(|(l, _)| *l == label)
+        .unwrap_or_else(|| panic!("no {label}"))
+        .1
+}
+
+async fn request(acp: &Peer, method: &str, params: Value) -> Result<Value, RpcError> {
+    acp.request(method, params, None).await
+}
+
+fn text(t: &str) -> Value {
+    json!([{ "type": "text", "text": t }])
+}
+
+/// Drives the shim over ACP. `thread` is the thread a resume loads.
+async fn drive(
+    scenario: Scenario,
+    acp: &Peer,
+    client: &Client,
+    cwd: &str,
+    thread: Option<&str>,
+) -> Results {
+    let mut out: Results = Vec::new();
+    out.push((
+        "initialize",
+        request(
+            acp,
+            "initialize",
+            json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+        )
+        .await,
+    ));
+    if scenario == Scenario::Resume {
+        let thread = thread.expect("a thread to resume");
+        out.push((
+            "load",
+            request(
+                acp,
+                "session/load",
+                json!({ "sessionId": thread, "cwd": cwd, "mcpServers": [] }),
+            )
+            .await,
+        ));
+        out.push((
+            "fork",
+            request(
+                acp,
+                "session/fork",
+                json!({ "sessionId": thread, "cwd": cwd, "mcpServers": [] }),
+            )
+            .await,
+        ));
+        out.push((
+            "rollback",
+            request(
+                acp,
+                "_openidea/rollback",
+                json!({ "sessionId": thread, "turns": 1 }),
+            )
+            .await,
+        ));
+        out.push((
+            "close",
+            request(acp, "session/close", json!({ "sessionId": thread })).await,
+        ));
+        return out;
+    }
+    let new = request(acp, "session/new", json!({ "cwd": cwd, "mcpServers": [] })).await;
+    let session = new
+        .as_ref()
+        .ok()
+        .and_then(|v| v["sessionId"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    out.push(("new", new));
+    let prompt = |t: &str| json!({ "sessionId": session, "prompt": text(t) });
+    let set =
+        |id: &str, value: &str| json!({ "sessionId": session, "configId": id, "value": value });
+    match scenario {
+        Scenario::AuthFailure | Scenario::Simple | Scenario::UsageLimit | Scenario::Subagent => {
+            out.push((
+                "prompt",
+                request(
+                    acp,
+                    "session/prompt",
+                    prompt("Reply with the single word: hi"),
+                )
+                .await,
+            ));
+        }
+        Scenario::Compact => {
+            out.push((
+                "prompt",
+                request(acp, "session/prompt", prompt("/compact")).await,
+            ));
+        }
+        Scenario::Command(command) => {
+            out.push((
+                "prompt",
+                request(acp, "session/prompt", prompt(command)).await,
+            ));
+        }
+        Scenario::PlanThenPrompt => {
+            out.push((
+                "plan",
+                request(acp, "session/prompt", prompt("/plan")).await,
+            ));
+            out.push((
+                "prompt",
+                request(
+                    acp,
+                    "session/prompt",
+                    prompt("Reply with the single word: hi"),
+                )
+                .await,
+            ));
+        }
+        Scenario::PlanToggleThenPrompt => {
+            out.push((
+                "plan",
+                request(acp, "session/prompt", prompt("/plan")).await,
+            ));
+            out.push((
+                "default",
+                request(acp, "session/prompt", prompt("/plan")).await,
+            ));
+            out.push((
+                "prompt",
+                request(
+                    acp,
+                    "session/prompt",
+                    prompt("Reply with the single word: hi"),
+                )
+                .await,
+            ));
+        }
+        Scenario::Interrupt => {
+            out.push((
+                "mode",
+                request(acp, "session/set_config_option", set(MODE, "read-only")).await,
+            ));
+            let running = {
+                let (acp, p) = (acp.clone(), prompt("Count to five."));
+                tokio::spawn(async move { request(&acp, "session/prompt", p).await })
+            };
+            acp.notify("session/cancel", json!({ "sessionId": session }))
+                .unwrap();
+            out.push(("prompt", running.await.unwrap()));
+        }
+        Scenario::Steer => {
+            let running = {
+                let (acp, p) = (acp.clone(), prompt("Count to five."));
+                tokio::spawn(async move { request(&acp, "session/prompt", p).await })
+            };
+            let mut steered = Err(RpcError::Timeout);
+            for _ in 0..200 {
+                steered = request(
+                    acp,
+                    "_openidea/steer",
+                    json!({ "sessionId": session, "prompt": text("Count to three instead.") }),
+                )
+                .await;
+                match &steered {
+                    Err(RpcError::Server { message, .. }) if message.contains("no turn") => {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    _ => break,
+                }
+            }
+            out.push(("steer", steered));
+            acp.notify("session/cancel", json!({ "sessionId": session }))
+                .unwrap();
+            out.push(("prompt", running.await.unwrap()));
+        }
+        Scenario::MultiTurn => {
+            out.push((
+                "first",
+                request(acp, "session/prompt", prompt("Reply with: one")).await,
+            ));
+            out.push((
+                "model",
+                request(acp, "session/set_config_option", set(MODEL, "gpt-5.5")).await,
+            ));
+            out.push((
+                "effort",
+                request(acp, "session/set_config_option", set(EFFORT, "high")).await,
+            ));
+            out.push((
+                "second",
+                request(acp, "session/prompt", prompt("Reply with: two")).await,
+            ));
+        }
+        Scenario::Approvals => {
+            client.answers.lock().extend([Some("accept"), None]);
+            out.push((
+                "prompt",
+                request(
+                    acp,
+                    "session/prompt",
+                    prompt("Run `touch b.txt`, then write a.txt."),
+                )
+                .await,
+            ));
+        }
+        Scenario::Resume => unreachable!(),
+    }
+    out
+}
+
+struct Transcript {
+    meta: Value,
+    /// `(sent by the shim, frame)`.
+    frames: Vec<(bool, Value)>,
+}
+
+fn fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex")
+}
+
+fn load(name: &str) -> Transcript {
+    let text = std::fs::read_to_string(fixture_dir().join(format!("{name}.jsonl"))).unwrap();
+    let mut lines = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap());
+    let meta = lines.next().unwrap();
+    assert_eq!(meta["type"], "meta");
+    let frames = lines
+        .map(|l| (l["dir"] == "out", l["frame"].clone()))
+        .collect();
+    Transcript { meta, frames }
+}
+
+/// The simple fixture through session setup. Local commands add only the app-server calls
+/// they need after it; turn commands keep the fixture's turn notifications.
+fn command_transcript(calls: &[(&'static str, Value)]) -> Transcript {
+    let mut transcript = load(Scenario::Simple.file());
+    let prompt = transcript
+        .frames
+        .iter()
+        .position(|(out, frame)| *out && frame["method"] == "turn/start")
+        .expect("the scenario starts a turn");
+    transcript.frames.truncate(prompt);
+    transcript
+        .frames
+        .push((true, json!({ "id": 4, "method": "skills/list" })));
+    transcript
+        .frames
+        .push((false, json!({ "id": 4, "result": { "data": [] } })));
+    for (index, (method, result)) in calls.iter().enumerate() {
+        let id = 10 + index;
+        transcript
+            .frames
+            .push((true, json!({ "id": id, "method": method })));
+        transcript
+            .frames
+            .push((false, json!({ "id": id, "result": result })));
+    }
+    transcript
+}
+
+fn turn_command_transcript(method: &str) -> Transcript {
+    let mut transcript = load(Scenario::Simple.file());
+    let start = transcript
+        .frames
+        .iter_mut()
+        .find(|(out, frame)| *out && frame["method"] == "turn/start")
+        .expect("the scenario starts a turn");
+    start.1["method"] = json!(method);
+    transcript
+}
+
+/// Plays codex: waits for each frame the shim should send, sends what codex sent.
+/// Returns the frames the shim sent.
+async fn play<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    t: &Transcript,
+    read: R,
+    mut write: W,
+) -> (Vec<Value>, R, W) {
+    let mut lines = BufReader::new(read).lines();
+    let mut ids: HashMap<String, Value> = HashMap::new();
+    let mut sent = Vec::new();
+    for (out, frame) in &t.frames {
+        if *out {
+            let actual: Value = loop {
+                let line = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                    .await
+                    .unwrap_or_else(|_| panic!("the shim didn't send {frame}"))
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("the shim closed before {frame}"));
+                let actual: Value = serde_json::from_str(&line).unwrap();
+                // Older recordings predate config inspection, skill discovery and thread naming; play an
+                // unsupported server.
+                let method = actual["method"].as_str().unwrap_or_default();
+                if matches!(method, "config/read" | "skills/list" | "thread/sample")
+                    && frame["method"] != method
+                {
+                    let reply = json!({ "id": actual["id"], "error": { "code": -32601, "message": "unsupported" } });
+                    write
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                break actual;
+            };
+            match frame.get("method") {
+                Some(method) => {
+                    assert_eq!(
+                        actual.get("method"),
+                        Some(method),
+                        "expected {frame}, got {actual}"
+                    );
+                    if let Some(id) = frame.get("id") {
+                        ids.insert(id.to_string(), actual["id"].clone());
+                    }
+                }
+                None => {
+                    assert_eq!(
+                        actual.get("id"),
+                        frame.get("id"),
+                        "expected {frame}, got {actual}"
+                    );
+                    assert_eq!(
+                        actual.get("result"),
+                        frame.get("result"),
+                        "expected {frame}, got {actual}"
+                    );
+                }
+            }
+            sent.push(actual);
+        } else {
+            let mut frame = frame.clone();
+            if frame.get("method").is_none()
+                && let Some(id) = frame.get("id").and_then(|id| ids.get(&id.to_string()))
+            {
+                frame["id"] = id.clone();
+            }
+            let mut line = serde_json::to_vec(&frame).unwrap();
+            line.push(b'\n');
+            write.write_all(&line).await.unwrap();
+        }
+    }
+    (sent, lines.into_inner().into_inner(), write)
+}
+
+/// Runs `scenario` against its transcript; returns the ACP results, the client and
+/// the frames the shim sent.
+async fn replay(scenario: Scenario) -> (Results, Arc<Client>, Vec<Value>, Value) {
+    let (results, client, sent, meta, _codex) =
+        replay_transcript(scenario, load(scenario.file())).await;
+    (results, client, sent, meta)
+}
+
+/// Both connections of a replay, which stay open while it is held.
+type CodexEnd = Box<dyn std::any::Any>;
+
+async fn replay_transcript(
+    scenario: Scenario,
+    t: Transcript,
+) -> (Results, Arc<Client>, Vec<Value>, Value, CodexEnd) {
+    let (ours, theirs) = tokio::io::duplex(1 << 20);
+    let (tr, tw) = tokio::io::split(theirs);
+    let client = Arc::new(Client::default());
+    let acp = attach(client.clone(), |events| {
+        let (or, ow) = tokio::io::split(ours);
+        Ok(Peer::connect_framed(or, ow, events, Framing::Lines))
+    })
+    .unwrap();
+    let meta = t.meta.clone();
+    let player = tokio::spawn(async move { play(&t, tr, tw).await });
+    let thread = meta["thread"].as_str();
+    let results = tokio::time::timeout(
+        Duration::from_secs(20),
+        drive(scenario, &acp, &client, "/work", thread),
+    )
+    .await
+    .expect("the scenario finished");
+    // Codex stays up until the scenario is over.
+    let (sent, read, write) = player.await.unwrap();
+    (results, client, sent, meta, Box::new((acp, read, write)))
+}
+
+fn sent<'a>(frames: &'a [Value], method: &str) -> Vec<&'a Value> {
+    frames.iter().filter(|f| f["method"] == method).collect()
+}
+
+fn session_of(results: &Results, label: &str) -> String {
+    result(results, label).as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configuration_warnings_before_a_session_and_runtime_warnings_reach_the_client() {
+    let mut transcript = load(Scenario::Simple.file());
+    transcript.frames.insert(
+        0,
+        (
+            false,
+            json!({"method": "configWarning", "params": {
+                "summary": "Project-local config is disabled until the project is trusted.",
+                "details": "Update the project's trust setting.", "path": "/work/.codex/config.toml"
+            }}),
+        ),
+    );
+    let at = transcript
+        .frames
+        .iter()
+        .position(|(out, f)| *out && f["method"] == "turn/start")
+        .unwrap();
+    transcript.frames.insert(
+        at,
+        (
+            false,
+            json!({"method": "warning", "params": {"message": "MCP server unavailable"}}),
+        ),
+    );
+    let (results, client, frames, _, _codex) =
+        replay_transcript(Scenario::Simple, transcript).await;
+    assert!(result(&results, "new").is_ok());
+    assert_eq!(
+        *client.warnings.lock(),
+        [
+            json!({"message": "Project-local config is disabled until the project is trusted.\n\nUpdate the project's trust setting.\n\n/work/.codex/config.toml"}),
+            json!({"message": "MCP server unavailable"}),
+        ]
+    );
+    assert!(sent(&frames, "config/value/write").is_empty());
+    assert!(sent(&frames, "config/batchWrite").is_empty());
+}
+
+struct TrustServer {
+    cwd: String,
+    disabled: bool,
+    other_project: bool,
+    write_error: bool,
+    overridden: bool,
+    calls: Mutex<Vec<(String, Value)>>,
+}
+
+impl Handler for TrustServer {
+    fn on_notification(&self, _: &str, _: Value) {}
+
+    fn on_request(&self, method: &str, params: Value) -> Result<Value, (i64, String)> {
+        self.calls.lock().push((method.to_owned(), params));
+        match method {
+            "initialize" => Ok(json!({})),
+            "model/list" => Ok(json!({"data": []})),
+            "config/read" => {
+                let cwd = if self.other_project {
+                    Path::new(&self.cwd).join("other")
+                } else {
+                    PathBuf::from(&self.cwd)
+                };
+                Ok(json!({"layers": [
+                    {"name": {"type": "user", "profile": null}, "version": "original"},
+                    {"name": {"type": "project", "dotCodexFolder": cwd.join(".codex")},
+                        "disabledReason": self.disabled.then_some("Project config is disabled until trusted.")}
+                ]}))
+            }
+            "config/value/write" if self.write_error => {
+                Err((-32001, "Config changed concurrently".into()))
+            }
+            "config/value/write" => {
+                Ok(json!({"status": if self.overridden {"okOverridden"} else {"ok"}}))
+            }
+            "thread/start" | "thread/resume" | "thread/fork" => {
+                Ok(json!({"thread": {"id": "s", "turns": []}, "cwd": self.cwd}))
+            }
+            "skills/list" => Ok(json!({"data": []})),
+            _ => Err((codes::METHOD_NOT_FOUND, method.to_owned())),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_trust_is_confirmed_before_new_resumed_and_forked_sessions() {
+    for method in ["session/new", "session/load", "session/fork"] {
+        for (answer, disabled, other_project, write_error, overridden) in [
+            (Some("codex-trust-project"), true, false, false, false),
+            (Some("codex-keep-untrusted"), true, false, false, false),
+            (None, true, false, false, false),
+            (Some("codex-trust-project"), false, false, false, false),
+            (Some("codex-trust-project"), true, true, false, false),
+            (Some("codex-trust-project"), true, false, true, false),
+            (Some("codex-trust-project"), true, false, false, true),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = tmp
+                .path()
+                .join("project.with.dots-项目")
+                .to_string_lossy()
+                .into_owned();
+            let server = Arc::new(TrustServer {
+                cwd: cwd.clone(),
+                disabled,
+                other_project,
+                write_error,
+                overridden,
+                calls: Mutex::default(),
+            });
+            let client = Arc::new(Client::default());
+            client.answers.lock().push_back(answer);
+            let (ours, theirs) = tokio::io::duplex(1 << 16);
+            let (read, write) = tokio::io::split(theirs);
+            let native = Peer::connect_framed(read, write, server.clone(), Framing::Lines);
+            let acp = attach(client.clone(), |events| {
+                let (read, write) = tokio::io::split(ours);
+                Ok(Peer::connect_framed(read, write, events, Framing::Lines))
+            })
+            .unwrap();
+            request(&acp, "initialize", json!({})).await.unwrap();
+            let params = json!({"cwd": cwd, "sessionId": "source", "mcpServers": []});
+            request(&acp, method, params.clone()).await.unwrap();
+            // The same connection must not ask repeatedly after a decline.
+            request(&acp, method, params).await.unwrap();
+            let approved = answer == Some("codex-trust-project") && disabled && !other_project;
+            {
+                let asked = client.asked.lock();
+                assert_eq!(asked.len(), usize::from(disabled && !other_project));
+                if let Some(permission) = asked.first() {
+                    assert!(
+                        permission["toolCall"]["title"]
+                            .as_str()
+                            .unwrap()
+                            .contains(&cwd)
+                    );
+                    assert_eq!(
+                        permission["toolCall"]["kind"], "edit",
+                        "side conversations must deny persistent trust changes"
+                    );
+                    assert_eq!(
+                        permission["options"][0]["kind"], "allow_always",
+                        "task bypass must not grant permanent trust"
+                    );
+                }
+                let calls = server.calls.lock();
+                let writes: Vec<_> = calls
+                    .iter()
+                    .filter(|(m, _)| m == "config/value/write")
+                    .collect();
+                assert_eq!(writes.len(), usize::from(approved));
+                if let Some((_, write)) = writes.first() {
+                    assert_eq!(
+                        *write,
+                        json!({"keyPath": format!("projects.{}.trust_level", json!(cwd)), "value": "trusted", "mergeStrategy": "replace", "expectedVersion": "original"})
+                    );
+                    let written = calls
+                        .iter()
+                        .position(|(m, _)| m == "config/value/write")
+                        .unwrap();
+                    let started = calls
+                        .iter()
+                        .position(|(m, _)| m.starts_with("thread/"))
+                        .unwrap();
+                    assert!(
+                        written < started,
+                        "the session must load config after the write"
+                    );
+                }
+            }
+            // Drain notifications sent before the last response.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if approved && (write_error || overridden) {
+                assert!(!client.warnings.lock().is_empty());
+            }
+            acp.kill();
+            native.kill();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_failure_names_auth() {
+    let (results, _client, frames, _) = replay(Scenario::AuthFailure).await;
+    let init = result(&results, "initialize").as_ref().unwrap();
+    assert_eq!(init["agentCapabilities"]["loadSession"], true);
+    assert_eq!(
+        init["agentCapabilities"]["_meta"]["openidea"],
+        json!({"rollback": true, "steer": true})
+    );
+    assert!(init["agentCapabilities"]["sessionCapabilities"]["fork"].is_object());
+    let new = result(&results, "new").as_ref().unwrap();
+    let categories: Vec<&str> = new["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["category"].as_str().unwrap())
+        .collect();
+    // The model the user's codex config names; codex doesn't list it, so its efforts are unknown.
+    assert_eq!(categories, ["model", "mode", "collaboration_mode"]);
+    let model = new["configOptions"][0]["currentValue"].as_str().unwrap();
+    assert_eq!(model, "gpt-6-luna");
+    assert!(
+        new["configOptions"][0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["value"] == model)
+    );
+
+    match result(&results, "prompt") {
+        Err(RpcError::Server { code, message, .. }) => {
+            assert_eq!(*code, AUTH_REQUIRED);
+            assert!(message.to_lowercase().contains("auth"), "{message}");
+        }
+        r => panic!("expected an auth failure, got {r:?}"),
+    }
+    let start = sent(&frames, "turn/start")[0];
+    assert_eq!(start["params"]["model"], model);
+    assert!(
+        start["params"]["approvalPolicy"].is_string()
+            && start["params"]["sandboxPolicy"].is_object()
+    );
+    assert_eq!(
+        start["params"]["input"],
+        json!([{"type": "text", "text": "Reply with the single word: hi"}])
+    );
+    assert!(
+        start.get("jsonrpc").is_some(),
+        "codex accepts the jsonrpc field"
+    );
+}
+
+#[test]
+fn request_errors_classify_authentication_without_matching_author_or_protocol_errors() {
+    for (code, message, expected) in [
+        (
+            codes::INTERNAL_ERROR,
+            "Missing author field",
+            codes::INTERNAL_ERROR,
+        ),
+        (
+            codes::INTERNAL_ERROR,
+            "Unknown authority",
+            codes::INTERNAL_ERROR,
+        ),
+        (
+            codes::INTERNAL_ERROR,
+            "Authentication failed: expired token",
+            AUTH_REQUIRED,
+        ),
+        (codes::INTERNAL_ERROR, "Unauthorized", AUTH_REQUIRED),
+        (
+            codes::METHOD_NOT_FOUND,
+            "authentication method not found",
+            codes::METHOD_NOT_FOUND,
+        ),
+        (AUTH_REQUIRED, "Account is not eligible", AUTH_REQUIRED),
+    ] {
+        let response = from_codex(RpcError::Server {
+            code,
+            message: message.into(),
+            data: Some(json!({"detail": 1})),
+        });
+        assert_eq!(response.code, expected, "{message}");
+        assert_eq!(response.message, message);
+        assert_eq!(response.data, Some(json!({"detail": 1})));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_sent_right_after_the_prompt_interrupts_the_turn() {
+    let (results, _client, frames, _) = replay(Scenario::Interrupt).await;
+    let options = result(&results, "mode").as_ref().unwrap()["configOptions"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        options.iter().find(|o| o["id"] == MODE).unwrap()["currentValue"],
+        "read-only"
+    );
+    assert_eq!(
+        result(&results, "prompt").as_ref().unwrap(),
+        &json!({"stopReason": "cancelled"})
+    );
+    let start = sent(&frames, "turn/start")[0];
+    assert_eq!(
+        (
+            start["params"]["approvalPolicy"].as_str(),
+            &start["params"]["sandboxPolicy"]
+        ),
+        (Some("on-request"), &json!({"type": "readOnly"}))
+    );
+    let interrupt = sent(&frames, "turn/interrupt");
+    assert_eq!(interrupt.len(), 1);
+    assert!(
+        interrupt[0]["params"]["turnId"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_replays_history_then_forks_and_rolls_back() {
+    let (results, client, frames, meta) = replay(Scenario::Resume).await;
+    let thread = meta["thread"].as_str().unwrap();
+    assert!(result(&results, "load").as_ref().unwrap()["configOptions"].is_array());
+    assert_eq!(
+        client.text(thread, "user_message_chunk"),
+        meta["prompt"].as_str().unwrap()
+    );
+    let fork = session_of(&results, "fork");
+    assert_ne!(fork, thread);
+    assert_eq!(result(&results, "rollback").as_ref().unwrap(), &json!({}));
+    assert_eq!(
+        sent(&frames, "thread/rollback")[0]["params"],
+        json!({"threadId": thread, "numTurns": 1})
+    );
+    assert_eq!(
+        sent(&frames, "thread/unsubscribe")[0]["params"],
+        json!({"threadId": thread})
+    );
+}
+
+async fn rollback_replies(
+    turns: u32,
+    replies: Vec<(&str, Value)>,
+) -> (Result<Value, RpcError>, Vec<Value>) {
+    let frames = replies
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, (method, mut reply))| {
+            let id = i + 1;
+            reply["id"] = json!(id);
+            [
+                (true, json!({ "id": id, "method": method })),
+                (false, reply),
+            ]
+        })
+        .collect();
+    let transcript = Transcript {
+        meta: Value::Null,
+        frames,
+    };
+    let (ours, theirs) = tokio::io::duplex(1 << 16);
+    let acp = attach(Arc::new(Client::default()), |events| {
+        let (read, write) = tokio::io::split(ours);
+        Ok(Peer::connect_framed(read, write, events, Framing::Lines))
+    })
+    .unwrap();
+    let (read, write) = tokio::io::split(theirs);
+    let player = tokio::spawn(async move { play(&transcript, read, write).await });
+    let result = request(
+        &acp,
+        "_openidea/rollback",
+        json!({ "sessionId": "s", "turns": turns }),
+    )
+    .await;
+    let (sent, _read, _write) = player.await.unwrap();
+    acp.kill();
+    (result, sent)
+}
+
+fn removed_rollback() -> Value {
+    json!({ "error": { "code": -32600, "message": "Invalid request: unknown variant `thread/rollback`, expected one of `thread/revert`, `account/gatewayOAuth/read`, `getAuthStatus`" } })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removed_rollback_reverts_before_the_target_turn_across_pages() {
+    let (result, frames) = rollback_replies(
+        3,
+        vec![
+            ("thread/rollback", removed_rollback()),
+            (
+                "thread/turns/list",
+                json!({ "result": { "data": [{ "id": "last" }, { "id": "middle" }], "nextCursor": "older" } }),
+            ),
+            (
+                "thread/turns/list",
+                json!({ "result": { "data": [{ "id": "edited" }, { "id": "retained" }], "nextCursor": null } }),
+            ),
+            ("thread/revert", json!({ "result": { "thread": { "id": "s", "turns": [] } } })),
+        ],
+    )
+    .await;
+    assert_eq!(result.unwrap(), json!({}));
+    let pages = sent(&frames, "thread/turns/list");
+    assert_eq!(
+        pages[0]["params"],
+        json!({ "threadId": "s", "sortDirection": "desc", "limit": 3, "cursor": null })
+    );
+    assert_eq!(pages[1]["params"]["cursor"], "older");
+    assert_eq!(pages[1]["params"]["limit"], 1);
+    assert_eq!(
+        sent(&frames, "thread/revert")[0]["params"],
+        json!({ "threadId": "s", "beforeTurnId": "edited" })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn method_not_found_reverts_the_latest_turn() {
+    let (result, frames) = rollback_replies(
+        1,
+        vec![
+            (
+                "thread/rollback",
+                json!({ "error": { "code": -32601, "message": "Method not found" } }),
+            ),
+            (
+                "thread/turns/list",
+                json!({ "result": { "data": [{ "id": "last" }], "nextCursor": null } }),
+            ),
+            ("thread/revert", json!({ "result": {} })),
+        ],
+    )
+    .await;
+    assert_eq!(result.unwrap(), json!({}));
+    assert_eq!(
+        sent(&frames, "thread/revert")[0]["params"]["beforeTurnId"],
+        "last"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_refusals_are_not_retried_as_revert() {
+    let (result, frames) = rollback_replies(
+        1,
+        vec![(
+            "thread/rollback",
+            json!({ "error": { "code": -32600, "message": "a turn is still running" } }),
+        )],
+    )
+    .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("a turn is still running")
+    );
+    assert_eq!(frames.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incomplete_or_repeated_history_pages_do_not_revert_the_wrong_turn() {
+    for next in [Value::Null, json!("older")] {
+        let (result, frames) = rollback_replies(
+            3,
+            vec![
+                ("thread/rollback", removed_rollback()),
+                (
+                    "thread/turns/list",
+                    json!({ "result": { "data": [{ "id": "last" }], "nextCursor": "older" } }),
+                ),
+                (
+                    "thread/turns/list",
+                    json!({ "result": { "data": [], "nextCursor": next } }),
+                ),
+            ],
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("reload the task"));
+        assert!(sent(&frames, "thread/revert").is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn steering_adds_to_the_running_turn() {
+    let (results, _client, frames, _) = replay(Scenario::Steer).await;
+    let steer = sent(&frames, "turn/steer");
+    assert_eq!(steer.len(), 1);
+    assert_eq!(steer[0]["params"]["input"], text("Count to three instead."));
+    assert_eq!(
+        steer[0]["params"]["expectedTurnId"],
+        sent(&frames, "turn/interrupt")[0]["params"]["turnId"]
+    );
+    assert!(
+        result(&results, "steer").is_ok(),
+        "{:?}",
+        result(&results, "steer")
+    );
+    assert_eq!(
+        result(&results, "prompt").as_ref().unwrap(),
+        &json!({"stopReason": "cancelled"})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_simple_turn_streams_reasoning_text_and_usage() {
+    let (results, client, _frames, _) = replay(Scenario::Simple).await;
+    let session = session_of(&results, "new");
+    assert_eq!(
+        result(&results, "prompt").as_ref().unwrap(),
+        &json!({"stopReason": "end_turn"})
+    );
+    assert_eq!(
+        client.text(&session, "agent_thought_chunk"),
+        "**Answering**\n\nShort reply."
+    );
+    assert_eq!(client.text(&session, "agent_message_chunk"), "hi");
+    let kinds: Vec<String> = client
+        .of(&session)
+        .iter()
+        .map(|u| u["sessionUpdate"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(kinds.contains(&"usage_update".to_owned()));
+    let info = client
+        .of(&session)
+        .into_iter()
+        .find(|u| u["sessionUpdate"] == "session_info_update")
+        .unwrap();
+    assert_eq!(info["title"], "Say hi");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unnamed_thread_is_named_after_its_first_turn() {
+    let mut t = load(Scenario::Simple.file());
+    t.frames
+        .retain(|(_, f)| f["method"] != "thread/name/updated");
+    let thread = "01a18300-0000-7000-8000-000000000001";
+    t.frames.extend([
+        (true, json!({"id": 90, "method": "thread/sample"})),
+        (false, json!({"id": 90, "result": {"responseId": "r", "sourceTurnId": thread, "text": "\"Say hi.\"\n"}})),
+        (true, json!({"id": 91, "method": "thread/name/set"})),
+        (false, json!({"id": 91, "result": {}})),
+        (false, json!({"method": "thread/name/updated", "params": {"threadId": thread, "threadName": "Say hi"}})),
+    ]);
+    let (results, client, frames, _, _codex) = replay_transcript(Scenario::Simple, t).await;
+    let session = session_of(&results, "new");
+    let sample = &sent(&frames, "thread/sample")[0]["params"];
+    assert_eq!(
+        (
+            sample["threadId"].as_str(),
+            sample["expectedTurnId"].as_str()
+        ),
+        (Some(thread), Some(thread))
+    );
+    assert_eq!(
+        sent(&frames, "thread/name/set")[0]["params"],
+        json!({"threadId": thread, "name": "Say hi"})
+    );
+    let mut info = Vec::new();
+    for _ in 0..100 {
+        info = client
+            .of(&session)
+            .into_iter()
+            .filter(|u| u["sessionUpdate"] == "session_info_update")
+            .collect();
+        if !info.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        info.iter().map(|u| u["title"].clone()).collect::<Vec<_>>(),
+        [json!("Say hi")]
+    );
+}
+
+#[test]
+fn thread_names_are_the_first_line_of_the_reply() {
+    assert_eq!(
+        thread_name("  \n“修复登录表单。”\nmore").as_deref(),
+        Some("修复登录表单")
+    );
+    assert_eq!(
+        thread_name("**Fix the login form.**").as_deref(),
+        Some("Fix the login form")
+    );
+    assert_eq!(thread_name(" \n\"\" "), None);
+    assert_eq!(
+        thread_name(&"x".repeat(100)).map(|n| n.chars().count()),
+        Some(80)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_apply_to_the_next_turn() {
+    let (results, client, frames, _) = replay(Scenario::MultiTurn).await;
+    let session = session_of(&results, "new");
+    assert_eq!(
+        result(&results, "first").as_ref().unwrap(),
+        &json!({"stopReason": "end_turn"})
+    );
+    assert_eq!(
+        result(&results, "second").as_ref().unwrap(),
+        &json!({"stopReason": "end_turn"})
+    );
+    let options = &result(&results, "effort").as_ref().unwrap()["configOptions"];
+    assert_eq!(
+        (
+            options[0]["currentValue"].as_str(),
+            options[1]["currentValue"].as_str()
+        ),
+        (Some("gpt-5.5"), Some("high"))
+    );
+    let starts = sent(&frames, "turn/start");
+    assert_eq!(
+        (
+            starts[0]["params"]["model"].as_str(),
+            starts[0]["params"]["effort"].as_str()
+        ),
+        (Some("gpt-5.6-luna"), Some("medium"))
+    );
+    assert!(starts[0]["params"].get("collaborationMode").is_none());
+    assert_eq!(
+        (
+            starts[1]["params"]["model"].as_str(),
+            starts[1]["params"]["effort"].as_str()
+        ),
+        (Some("gpt-5.5"), Some("high"))
+    );
+    // Two messages of one turn are two paragraphs.
+    assert_eq!(
+        client.text(&session, "agent_message_chunk"),
+        "oneOn it.\n\ntwo"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn compact_is_started_through_its_app_server_method() {
+    // Play the ordinary-turn fixture with the request swapped: the notifications are the
+    // same, while this pins the user-visible command to `thread/compact/start`, not a prompt.
+    let mut transcript = load(Scenario::Simple.file());
+    let start = transcript
+        .frames
+        .iter_mut()
+        .find(|(out, frame)| *out && frame["method"] == "turn/start")
+        .expect("the scenario starts a turn");
+    start.1["method"] = json!("thread/compact/start");
+    let (results, _client, frames, _meta, _codex) =
+        replay_transcript(Scenario::Compact, transcript).await;
+
+    assert_eq!(
+        result(&results, "prompt").as_ref().unwrap(),
+        &json!({"stopReason": "end_turn"})
+    );
+    assert!(sent(&frames, "turn/start").is_empty());
+    assert_eq!(sent(&frames, "thread/compact/start").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_commands_start_the_matching_review_target() {
+    for (prompt, target) in [
+        ("/review", json!({ "type": "uncommittedChanges" })),
+        (
+            "/review focus on errors",
+            json!({ "type": "custom", "instructions": "focus on errors" }),
+        ),
+        (
+            "/review-branch origin/main",
+            json!({ "type": "baseBranch", "branch": "origin/main" }),
+        ),
+        (
+            "/review-commit abc123",
+            json!({ "type": "commit", "sha": "abc123", "title": null }),
+        ),
+    ] {
+        let (results, _client, frames, _meta, _codex) = replay_transcript(
+            Scenario::Command(prompt),
+            turn_command_transcript("review/start"),
+        )
+        .await;
+        assert_eq!(
+            result(&results, "prompt").as_ref().unwrap(),
+            &json!({ "stopReason": "end_turn" }),
+            "{prompt}"
+        );
+        assert!(sent(&frames, "turn/start").is_empty(), "{prompt}");
+        assert_eq!(
+            sent(&frames, "review/start")[0]["params"]["target"],
+            target,
+            "{prompt}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plan_toggles_collaboration_mode_and_updates_the_composer() {
+    let (results, client, _frames, _meta, _codex) =
+        replay_transcript(Scenario::Command("/plan"), command_transcript(&[])).await;
+    let session = session_of(&results, "new");
+    assert_eq!(
+        result(&results, "prompt").as_ref().unwrap(),
+        &json!({ "stopReason": "end_turn" })
+    );
+    let update = client
+        .of(&session)
+        .into_iter()
+        .find(|u| u["sessionUpdate"] == "config_option_update")
+        .unwrap();
+    let plan = update["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["category"] == "collaboration_mode")
+        .unwrap();
+    assert_eq!(plan["currentValue"], "plan");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plan_applies_to_the_next_normal_turn() {
+    let (results, _client, frames, _meta, _codex) =
+        replay_transcript(Scenario::PlanThenPrompt, load(Scenario::Simple.file())).await;
+    assert_eq!(
+        result(&results, "plan").as_ref().unwrap(),
+        &json!({ "stopReason": "end_turn" })
+    );
+    assert_eq!(
+        result(&results, "prompt").as_ref().unwrap(),
+        &json!({ "stopReason": "end_turn" })
+    );
+    let start = sent(&frames, "turn/start")[0];
+    assert_eq!(start["params"]["collaborationMode"]["mode"], "plan");
+    assert_eq!(
+        start["params"]["collaborationMode"]["settings"]["model"],
+        "gpt-5.6-luna"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn toggling_plan_off_sends_an_explicit_default_once() {
+    let (results, _client, frames, _meta, _codex) = replay_transcript(
+        Scenario::PlanToggleThenPrompt,
+        load(Scenario::Simple.file()),
+    )
+    .await;
+    assert_eq!(
+        result(&results, "default").as_ref().unwrap(),
+        &json!({ "stopReason": "end_turn" })
+    );
+    let start = sent(&frames, "turn/start")[0];
+    assert_eq!(start["params"]["collaborationMode"]["mode"], "default");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn informational_commands_report_skills_mcp_and_status() {
+    let skills = json!({ "data": [{ "skills": [
+        { "name": "review", "enabled": true, "description": "Review changes" },
+        { "name": "hidden", "enabled": false, "description": "Hidden" }
+    ] }] });
+    let servers = json!({ "data": [
+        { "name": "github", "runtimeStatus": "connected", "authStatus": "oAuth", "tools": { "search": {} } },
+        { "name": "docs", "runtimeStatus": "failed", "authStatus": "unknown", "tools": {} }
+    ] });
+    for (prompt, method, response, expected) in [
+        (
+            "/skills",
+            "skills/list",
+            skills,
+            "Available skills:\n- review: Review changes",
+        ),
+        (
+            "/mcp",
+            "mcpServerStatus/list",
+            servers,
+            "MCP servers:\n- github: connected, 1 tools\n- docs: failed, 0 tools",
+        ),
+        ("/status", "", Value::Null, "**Session:**"),
+    ] {
+        let calls: &[(&str, Value)] = if method.is_empty() {
+            &[]
+        } else {
+            &[(method, response)]
+        };
+        let calls: Vec<(&'static str, Value)> = calls
+            .iter()
+            .map(|(method, response)| {
+                let method = match *method {
+                    "skills/list" => "skills/list",
+                    "mcpServerStatus/list" => "mcpServerStatus/list",
+                    other => panic!("unexpected method {other}"),
+                };
+                (method, response.clone())
+            })
+            .collect();
+        let (results, client, _frames, _meta, _codex) =
+            replay_transcript(Scenario::Command(prompt), command_transcript(&calls)).await;
+        let session = session_of(&results, "new");
+        assert_eq!(
+            result(&results, "prompt").as_ref().unwrap(),
+            &json!({ "stopReason": "end_turn" })
+        );
+        assert!(
+            client
+                .text(&session, "agent_message_chunk")
+                .contains(expected),
+            "{prompt}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_and_logout_use_their_app_server_actions() {
+    let (results, client, frames, _meta, _codex) = replay_transcript(
+        Scenario::Command("/rename Better name"),
+        command_transcript(&[("thread/name/set", json!({}))]),
+    )
+    .await;
+    let session = session_of(&results, "new");
+    assert_eq!(
+        sent(&frames, "thread/name/set")[0]["params"],
+        json!({ "threadId": session, "name": "Better name" })
+    );
+    let info = client
+        .of(&session)
+        .into_iter()
+        .find(|u| u["sessionUpdate"] == "session_info_update")
+        .unwrap();
+    assert_eq!(
+        (info["title"].as_str(), info["userNamed"].as_bool()),
+        (Some("Better name"), Some(true))
+    );
+
+    let (results, client, frames, _meta, _codex) = replay_transcript(
+        Scenario::Command("/logout"),
+        command_transcript(&[("account/logout", json!({}))]),
+    )
+    .await;
+    let session = session_of(&results, "new");
+    assert_eq!(sent(&frames, "account/logout").len(), 1);
+    assert_eq!(
+        client.text(&session, "agent_message_chunk"),
+        "Logged out from Codex account."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_commands_set_pause_resume_and_clear_through_app_server() {
+    for (prompt, method, params, result) in [
+        (
+            "/goal fix the failing tests",
+            "thread/goal/set",
+            json!({ "threadId": "s", "objective": "fix the failing tests", "status": "active", "origin": "user" }),
+            json!({ "goal": { "status": "active" } }),
+        ),
+        (
+            "/goal pause",
+            "thread/goal/set",
+            json!({ "threadId": "s", "status": "paused", "origin": "user" }),
+            json!({ "goal": { "status": "paused" } }),
+        ),
+        (
+            "/goal resume",
+            "thread/goal/set",
+            json!({ "threadId": "s", "status": "active", "origin": "user" }),
+            json!({ "goal": { "status": "active" } }),
+        ),
+        (
+            "/goal clear",
+            "thread/goal/clear",
+            json!({ "threadId": "s" }),
+            json!({ "cleared": true }),
+        ),
+    ] {
+        let (results, _client, frames, _meta, _codex) = replay_transcript(
+            Scenario::Command(prompt),
+            command_transcript(&[(method, result)]),
+        )
+        .await;
+        let session = session_of(&results, "new");
+        let sent = sent(&frames, method);
+        assert_eq!(sent.len(), 1, "{prompt}");
+        let mut expected = params;
+        expected["threadId"] = json!(session);
+        assert_eq!(sent[0]["params"], expected, "{prompt}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_review_arguments_print_usage_without_starting_a_turn() {
+    for prompt in ["/review-branch", "/review-commit", "/rename", "/goal"] {
+        let (results, client, frames, _meta, _codex) =
+            replay_transcript(Scenario::Command(prompt), command_transcript(&[])).await;
+        let session = session_of(&results, "new");
+        assert_eq!(
+            result(&results, "prompt").as_ref().unwrap(),
+            &json!({ "stopReason": "end_turn" })
+        );
+        assert!(sent(&frames, "turn/start").is_empty());
+        assert!(
+            client
+                .text(&session, "agent_message_chunk")
+                .starts_with("Command \""),
+            "{prompt}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_reconnect_reloads_before_reporting_status() {
+    let servers = json!({ "data": [{ "name": "github", "runtimeStatus": "connected", "authStatus": "oAuth", "tools": {} }] });
+    let (results, client, frames, _meta, _codex) = replay_transcript(
+        Scenario::Command("/mcp reconnect"),
+        command_transcript(&[
+            ("config/mcpServer/reload", json!({})),
+            ("mcpServerStatus/list", servers),
+        ]),
+    )
+    .await;
+    let session = session_of(&results, "new");
+    assert_eq!(sent(&frames, "config/mcpServer/reload").len(), 1);
+    assert_eq!(sent(&frames, "mcpServerStatus/list").len(), 1);
+    assert!(
+        client
+            .text(&session, "agent_message_chunk")
+            .contains("github: connected")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approvals_are_asked_and_answered() {
+    let (results, client, frames, _) = replay(Scenario::Approvals).await;
+    let session = session_of(&results, "new");
+    assert_eq!(
+        result(&results, "prompt").as_ref().unwrap(),
+        &json!({"stopReason": "end_turn"})
+    );
+    let asked = client.asked.lock().clone();
+    assert_eq!(asked.len(), 2);
+    assert_eq!(asked[0]["toolCall"]["title"], "Run touch b.txt");
+    let ids: Vec<&str> = asked[0]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["optionId"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "accept",
+            "acceptWithExecpolicyAmendment",
+            "decline",
+            "cancel"
+        ]
+    );
+    assert_eq!(asked[1]["toolCall"]["title"], "Create a.txt");
+    assert_eq!(asked[1]["toolCall"]["content"][0]["newText"], "one\n");
+    // Allowed once, then the cancelled one declined (the fixture checks the answers codex got).
+    let answers: Vec<&Value> = frames
+        .iter()
+        .filter(|f| f.get("method").is_none())
+        .map(|f| &f["result"])
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            &json!({"decision": "accept"}),
+            &json!({"decision": "decline"})
+        ]
+    );
+
+    let updates = client.of(&session);
+    let tool = |id: &str| {
+        updates
+            .iter()
+            .filter(|u| u["toolCallId"] == id)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let cmd = tool("call_cmd");
+    assert_eq!(cmd[0]["sessionUpdate"], "tool_call");
+    assert!(
+        cmd.iter()
+            .any(|u| u.pointer("/content/0/content/text") == Some(&json!("touched\n")))
+    );
+    assert_eq!(cmd.last().unwrap()["status"], "completed");
+    let edit = tool("call_edit");
+    assert_eq!(edit.last().unwrap()["status"], "failed");
+    let plan = updates
+        .iter()
+        .find(|u| u["sessionUpdate"] == "plan")
+        .unwrap();
+    assert_eq!(plan["entries"][0]["status"], "completed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn usage_limits_fail_with_their_reset_time() {
+    let (results, _client, _frames, _) = replay(Scenario::UsageLimit).await;
+    match result(&results, "prompt") {
+        Err(RpcError::Server { message, data, .. }) => {
+            assert!(message.contains("usage limit"), "{message}");
+            assert_eq!(
+                data,
+                &Some(json!({"openidea": {"usageLimit": {"resetsAtMs": 1_793_200_000_000.0}}}))
+            );
+        }
+        r => panic!("expected a usage limit, got {r:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn subagents_are_sessions_of_their_own() {
+    let (results, client, _frames, meta) = replay(Scenario::Subagent).await;
+    let session = session_of(&results, "new");
+    let child = meta["child"].as_str().unwrap();
+    assert_eq!(
+        result(&results, "prompt").as_ref().unwrap(),
+        &json!({"stopReason": "end_turn"})
+    );
+    let parent = client.of(&session);
+    let cards: Vec<&Value> = parent
+        .iter()
+        .filter(|u| u["sessionUpdate"] == "subagent_update")
+        .collect();
+    assert_eq!(cards[0]["sessionId"], child);
+    assert_eq!(cards[0]["title"], "say_hello");
+    assert_eq!(
+        cards.last().unwrap()["state"],
+        json!({"state": "idle", "stopReason": "end_turn"})
+    );
+    let messages: Vec<&Value> = parent
+        .iter()
+        .filter(|u| u["sessionUpdate"] == "session_message")
+        .collect();
+    assert_eq!(
+        (
+            messages[0]["recipientSessionId"].as_str(),
+            messages[0]["content"][0]["text"].as_str()
+        ),
+        (Some(child), Some("Reply with: Hello"))
+    );
+    assert_eq!(
+        (
+            messages[1]["senderSessionId"].as_str(),
+            messages[1]["content"][0]["text"].as_str()
+        ),
+        (Some(child), Some("Hello."))
+    );
+    assert_eq!(client.text(child, "agent_message_chunk"), "Hello.");
+    assert_eq!(client.text(&session, "agent_message_chunk"), "Hello.");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_client_going_away_stops_codex_and_codex_exiting_closes_the_client() {
+    let (ours, theirs) = tokio::io::duplex(1 << 16);
+    let codex_side = Arc::new(Mutex::new(None::<Peer>));
+    let acp = attach(Arc::new(Client::default()), |events| {
+        let (or, ow) = tokio::io::split(ours);
+        let peer = Peer::connect_framed(or, ow, events, Framing::Lines);
+        *codex_side.lock() = Some(peer.clone());
+        Ok(peer)
+    })
+    .unwrap();
+    let codex = codex_side.lock().clone().unwrap();
+    acp.kill();
+    tokio::time::timeout(Duration::from_secs(5), codex.closed())
+        .await
+        .expect("codex is stopped");
+    drop(theirs);
+
+    let (ours, theirs) = tokio::io::duplex(1 << 16);
+    let acp = attach(Arc::new(Client::default()), |events| {
+        let (or, ow) = tokio::io::split(ours);
+        Ok(Peer::connect_framed(or, ow, events, Framing::Lines))
+    })
+    .unwrap();
+    drop(theirs);
+    tokio::time::timeout(Duration::from_secs(5), acp.closed())
+        .await
+        .expect("the client sees codex exit");
+}
+
+// ---- Recording -------------------------------------------------------------------------
+
+/// Records the scenarios codex can run here against the real `codex app-server`:
+/// `cargo test -p ide-agent record_codex_fixtures -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "runs the real codex"]
+async fn record_codex_fixtures() {
+    let only = std::env::var("CODEX_SCENARIO").ok();
+    let version = std::process::Command::new("codex")
+        .arg("--version")
+        .output()
+        .unwrap();
+    let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
+    for scenario in [
+        Scenario::AuthFailure,
+        Scenario::Interrupt,
+        Scenario::Steer,
+        Scenario::Resume,
+    ] {
+        if only.as_deref().is_some_and(|o| o != scenario.file()) {
+            continue;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let cwd_s = cwd.to_string_lossy().into_owned();
+        let mut meta = json!({ "type": "meta", "scenario": scenario.file(), "source": format!("recorded from {version}") });
+        let thread = if scenario == Scenario::Resume {
+            // A thread with one (stopped) turn, made by another codex process.
+            let prompt = "Count to five.";
+            let (client, acp, _log) = live(&cwd);
+            request(&acp, "initialize", json!({ "protocolVersion": 1 }))
+                .await
+                .unwrap();
+            let new = request(
+                &acp,
+                "session/new",
+                json!({ "cwd": cwd_s, "mcpServers": [] }),
+            )
+            .await
+            .unwrap();
+            let id = new["sessionId"].as_str().unwrap().to_owned();
+            let running = {
+                let (acp, p) = (
+                    acp.clone(),
+                    json!({ "sessionId": id, "prompt": text(prompt) }),
+                );
+                tokio::spawn(async move { request(&acp, "session/prompt", p).await })
+            };
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            acp.notify("session/cancel", json!({ "sessionId": id }))
+                .unwrap();
+            let _ = running.await;
+            drop(client);
+            acp.kill();
+            meta["thread"] = json!(id);
+            meta["prompt"] = json!(prompt);
+            Some(id)
+        } else {
+            None
+        };
+        let (client, acp, log) = live(&cwd);
+        let results = drive(scenario, &acp, &client, &cwd_s, thread.as_deref()).await;
+        println!(
+            "{}: {:?}",
+            scenario.file(),
+            results
+                .iter()
+                .map(|(l, r)| (l, r.as_ref().map(|_| ())))
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        acp.kill();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let mut out = serde_json::to_string(&meta).unwrap() + "\n";
+        for line in log.lock().iter() {
+            out.push_str(&scrub(line, &[(&cwd_s, "<workspace>"), (&home, "<home>")]));
+            out.push('\n');
+        }
+        std::fs::write(
+            fixture_dir().join(format!("{}.jsonl", scenario.file())),
+            out,
+        )
+        .unwrap();
+        let fork = results
+            .iter()
+            .find(|(l, _)| *l == "fork")
+            .and_then(|(_, r)| r.as_ref().ok());
+        if let Some(fork) = fork.and_then(|f| f["sessionId"].as_str()) {
+            // A fork is loaded by a fresh process.
+            let (client, acp, _log) = live(&cwd);
+            request(&acp, "initialize", json!({ "protocolVersion": 1 }))
+                .await
+                .unwrap();
+            let loaded = request(
+                &acp,
+                "session/load",
+                json!({ "sessionId": fork, "cwd": cwd_s, "mcpServers": [] }),
+            )
+            .await;
+            println!(
+                "fork {fork} loaded from a fresh process: {:?}",
+                loaded.map(|_| client.of(fork).len())
+            );
+            acp.kill();
+        }
+    }
+}
+
+/// The shim over a real codex, with a tap writing each frame to the returned log.
+fn live(cwd: &Path) -> (Arc<Client>, Peer, Arc<Mutex<Vec<String>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let client = Arc::new(Client::default());
+    let cwd = cwd.to_path_buf();
+    let tap = log.clone();
+    let acp = attach(client.clone(), move |events| {
+        let mut child = tokio::process::Command::new("codex")
+            .arg("app-server")
+            .current_dir(&cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let (mut stdin, stdout) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
+        let (ours, theirs) = tokio::io::duplex(1 << 20);
+        let (tr, mut tw) = tokio::io::split(theirs);
+        let out_log = tap.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(tr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                out_log
+                    .lock()
+                    .push(format!("{{\"dir\":\"out\",\"frame\":{line}}}"));
+                if stdin
+                    .write_all(format!("{line}\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            let _ = child.kill().await;
+        });
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tap.lock()
+                    .push(format!("{{\"dir\":\"in\",\"frame\":{line}}}"));
+                if tw.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (or, ow) = tokio::io::split(ours);
+        Ok(Peer::connect_framed(or, ow, events, Framing::Lines))
+    })
+    .unwrap();
+    (client, acp, log)
+}
+
+/// A transcript line without local paths or machine identifiers.
+fn scrub(line: &str, paths: &[(&str, &str)]) -> String {
+    let mut v: Value = serde_json::from_str(line).unwrap();
+    if let Some(p) = v
+        .pointer_mut("/frame/params")
+        .and_then(Value::as_object_mut)
+        && v_method(line) == Some("remoteControl/status/changed")
+    {
+        p.insert("serverName".into(), json!("<host>"));
+        p.insert("installationId".into(), json!("<installation>"));
+    }
+    let mut s = v.to_string();
+    for (from, to) in paths {
+        if !from.is_empty() {
+            s = s.replace(from, to);
+        }
+    }
+    s
+}
+
+fn v_method(line: &str) -> Option<&str> {
+    let at = line.find("\"method\":\"")? + 10;
+    line[at..].split('"').next()
+}
+
+#[test]
+fn session_mcp_servers_become_thread_configuration() {
+    assert!(mcp_config(&json!({"mcpServers":[]})).is_none());
+    assert_eq!(
+        mcp_config(
+            &json!({"mcpServers":[{"name":"OpenIDEA","command":"/app/openidea",
+        "args":["--mcp-stdio","--project","/project"],"env":[{"name":"K","value":"V"}]}]})
+        ),
+        Some(
+            json!({"mcp_servers":{"OpenIDEA":{"command":"/app/openidea","args":["--mcp-stdio","--project","/project"],"env":{"K":"V"}}}})
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_are_listed_for_sessions_and_refreshed_on_change() {
+    for (method, native) in [
+        ("session/new", "thread/start"),
+        ("session/load", "thread/resume"),
+        ("session/fork", "thread/fork"),
+    ] {
+        for initial in [
+            json!({"result": {"data": [{"cwd": "/work", "errors": [], "skills": [
+                {"name": "review", "enabled": true, "description": "Review", "path": "/work/SKILL.md", "scope": "repo"}
+            ]}]}}),
+            json!({"error": {"code": -32601, "message": "unsupported"}}),
+            json!({"result": {}}),
+        ] {
+            let listed = initial.pointer("/result/data").is_some();
+            let mut initial = initial;
+            initial["id"] = json!(4);
+            let transcript = Transcript {
+                meta: Value::Null,
+                frames: vec![
+                    (true, json!({"id": 1, "method": "initialize"})),
+                    (false, json!({"id": 1, "result": {}})),
+                    (true, json!({"method": "initialized"})),
+                    (true, json!({"id": 2, "method": "model/list"})),
+                    (false, json!({"id": 2, "result": {"data": []}})),
+                    (true, json!({"id": 3, "method": native})),
+                    (
+                        false,
+                        json!({"id": 3, "result": {"thread": {"id": "s", "cwd": "/work", "turns": []}, "cwd": "/work"}}),
+                    ),
+                    (true, json!({"id": 4, "method": "skills/list"})),
+                    (false, initial),
+                    (true, json!({"id": 5, "method": "turn/start"})),
+                    (
+                        false,
+                        json!({"id": 5, "error": {"code": -32602, "message": "no model in this test"}}),
+                    ),
+                    (false, json!({"method": "skills/changed", "params": {}})),
+                    (true, json!({"id": 6, "method": "skills/list"})),
+                    (
+                        false,
+                        json!({"id": 6, "result": {"data": [{"cwd": "/work", "skills": [], "errors": []}]}}),
+                    ),
+                    (false, json!({"method": "skills/changed", "params": {}})),
+                    (true, json!({"id": 7, "method": "skills/list"})),
+                    (
+                        false,
+                        json!({"id": 7, "error": {"code": -32603, "message": "listing failed"}}),
+                    ),
+                    (false, json!({"method": "skills/changed", "params": {}})),
+                    (true, json!({"id": 8, "method": "skills/list"})),
+                    (false, json!({"id": 8, "result": {"data": []}})),
+                ],
+            };
+            let (ours, theirs) = tokio::io::duplex(1 << 16);
+            let client = Arc::new(Client::default());
+            let acp = attach(client.clone(), |events| {
+                let (read, write) = tokio::io::split(ours);
+                Ok(Peer::connect_framed(read, write, events, Framing::Lines))
+            })
+            .unwrap();
+            let (read, write) = tokio::io::split(theirs);
+            let player = tokio::spawn(async move { play(&transcript, read, write).await });
+            request(&acp, "initialize", json!({})).await.unwrap();
+            request(&acp, method, json!({"sessionId": "s", "cwd": "/work"}))
+                .await
+                .unwrap();
+            let initial_updates = client.of("s");
+            assert_eq!(initial_updates.len(), usize::from(listed), "{method}");
+            if listed {
+                assert_eq!(
+                    initial_updates[0]["availableCommands"][0]["name"],
+                    "$review"
+                );
+                assert_eq!(
+                    initial_updates[0]["availableCommands"][0]["source"],
+                    "skill"
+                );
+            }
+            assert!(
+                request(
+                    &acp,
+                    "session/prompt",
+                    json!({"sessionId": "s", "prompt": text("/$review check this")})
+                )
+                .await
+                .is_err()
+            );
+            let (frames, _read, _write) = player.await.unwrap();
+            for frame in sent(&frames, "skills/list") {
+                assert_eq!(frame["params"], json!({"cwds": ["/work"]}));
+            }
+            assert_eq!(
+                sent(&frames, "turn/start")[0]["params"]["input"],
+                json!([{"type": "text", "text": "/$review check this"}])
+            );
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while client.of("s").len() < usize::from(listed) + 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let updates = client.of("s");
+            assert_eq!(updates.len(), usize::from(listed) + 2);
+            assert_eq!(updates.last().unwrap()["availableCommands"], json!([]));
+            acp.kill();
+        }
+    }
+}
+
+#[test]
+fn skills_become_commands_with_their_invocation_names() {
+    let update = skill_commands(&json!({"data": [{"skills": [
+        {"name": "review", "enabled": true, "description": "Long", "shortDescription": "Short"},
+        {"name": "review", "enabled": true, "description": "Duplicate"},
+        {"name": "hidden", "enabled": false, "description": "Disabled"},
+        {"name": "modern", "enabled": true, "description": "Long", "interface": {"shortDescription": "Modern"}},
+        {"name": "full", "enabled": true, "description": "Full description"},
+        {"name": "", "enabled": true}, {"description": "No name"}
+    ]}]}))
+    .unwrap();
+    assert_eq!(
+        update,
+        json!({"sessionUpdate": "available_commands_update", "availableCommands": [
+            {"name": "$review", "description": "Short", "source": "skill", "input": null},
+            {"name": "$modern", "description": "Modern", "source": "skill", "input": null},
+            {"name": "$full", "description": "Full description", "source": "skill", "input": null}
+        ]})
+    );
+    let commands = crate::config::commands_of(&update, "codex");
+    assert!(
+        commands
+            .iter()
+            .all(|c| c.source == crate::AgentCommandSource::Skill)
+    );
+    assert_eq!(commands[0].name, "$review");
+    assert!(
+        skill_commands(&json!({"data": []})).unwrap()["availableCommands"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(skill_commands(&json!({})).is_none());
+}

@@ -1,24 +1,31 @@
 mod app;
-mod backend;
+mod document_buffer;
+mod document_store;
 mod editor;
-mod project;
+mod native_host;
+mod project_tree;
 mod session;
+mod text_input;
 mod theme;
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use app::{
-    CloseTab, NewFile, NextTab, OpenFile, OpenFolder, PreviousTab, Quit, RustIdea, Save, SaveAs,
-    ToggleAutosave, ToggleTheme,
+    CloseGroup, CloseTab, CommandPalette, FormatDocument, GitCommit, GitRefresh, GoToDefinition,
+    GoToLine, NewFile, NewTerminal, NextTab, OpenFile, OpenFolder, PreviousTab, QuickOpen, Quit,
+    RefreshProject, RustIdea, Save, SaveAll, SaveAs, SearchEverywhere, ShowAgents, ShowDatabase,
+    ShowDebug, ShowGit, ShowPlugins, ShowProblems, ShowProject, ShowRemote, ShowRun, ShowSearch,
+    ShowSettings, ShowStructure, ShowTerminal, ShowTools, SplitDown, SplitRight, ToggleAutosave,
+    ToggleBottomPanel, ToggleLeftPanel, ToggleRightPanel, ToggleTheme, TrustProject,
 };
-use backend::LocalBackend;
 use gpui::{
     App, AppContext, Application, Bounds, Focusable, KeyBinding, Menu, MenuItem, SystemMenuType,
     TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
+use native_host::NativeHost;
 use session::SessionStore;
+use text_input::{Cancel as InputCancel, Submit as InputSubmit};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
@@ -40,10 +47,17 @@ fn main() {
         install_menus(cx);
         install_key_bindings(cx);
 
+        let host = match NativeHost::start() {
+            Ok(host) => host,
+            Err(error) => {
+                tracing::error!(%error, "failed to start the RustIdea backend");
+                eprintln!("RustIdea backend failed to start: {error:#}");
+                return;
+            }
+        };
         let session_store = SessionStore::discover();
         let session = session_store.load();
-        let backend = Arc::new(LocalBackend);
-        let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1400.0), px(900.0)), cx);
         let startup_path = startup_path.clone();
         let window = cx
             .open_window(
@@ -55,11 +69,12 @@ fn main() {
                         traffic_light_position: None,
                     }),
                     app_id: Some("RustIdea".into()),
-                    window_min_size: Some(size(px(720.0), px(480.0))),
+                    window_min_size: Some(size(px(900.0), px(600.0))),
                     ..Default::default()
                 },
                 |window, cx| {
-                    let app = cx.new(|cx| RustIdea::new(session_store, session, backend, cx));
+                    let host_for_app = host.clone();
+                    let app = cx.new(|cx| RustIdea::new(host_for_app, session_store, session, cx));
                     app.update(cx, |app, cx| {
                         if let Some(path) = startup_path {
                             app.open_startup_path(path, window, cx);
@@ -109,8 +124,12 @@ fn install_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Save", Save),
                 MenuItem::action("Save As…", SaveAs),
+                MenuItem::action("Save All", SaveAll),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
+                MenuItem::action("Close Split", CloseGroup),
+                MenuItem::separator(),
+                MenuItem::action("New Terminal", NewTerminal),
             ],
         },
         Menu {
@@ -123,13 +142,47 @@ fn install_menus(cx: &mut App) {
                 MenuItem::action("Copy", EditorCopy),
                 MenuItem::action("Paste", EditorPaste),
                 MenuItem::action("Select All", EditorSelectAll),
+                MenuItem::separator(),
+                MenuItem::action("Find in Files", ShowSearch),
+                MenuItem::action("Format Document", FormatDocument),
             ],
         },
         Menu {
             name: "View".into(),
             items: vec![
+                MenuItem::action("Project", ShowProject),
+                MenuItem::action("Version Control", ShowGit),
+                MenuItem::action("Structure", ShowStructure),
+                MenuItem::action("Problems", ShowProblems),
+                MenuItem::action("Database", ShowDatabase),
+                MenuItem::action("Agents", ShowAgents),
+                MenuItem::action("Remote Host", ShowRemote),
+                MenuItem::action("Plugins", ShowPlugins),
+                MenuItem::action("Tools", ShowTools),
+                MenuItem::separator(),
+                MenuItem::action("Terminal", ShowTerminal),
+                MenuItem::action("Run", ShowRun),
+                MenuItem::action("Debug", ShowDebug),
+                MenuItem::separator(),
+                MenuItem::action("Toggle Left Panel", ToggleLeftPanel),
+                MenuItem::action("Toggle Right Panel", ToggleRightPanel),
+                MenuItem::action("Toggle Bottom Panel", ToggleBottomPanel),
+                MenuItem::separator(),
                 MenuItem::action("Toggle Light/Dark Theme", ToggleTheme),
                 MenuItem::action("Toggle Autosave", ToggleAutosave),
+            ],
+        },
+        Menu {
+            name: "Navigate".into(),
+            items: vec![
+                MenuItem::action("Command Palette", CommandPalette),
+                MenuItem::action("Quick Open", QuickOpen),
+                MenuItem::action("Search Everywhere", SearchEverywhere),
+                MenuItem::separator(),
+                MenuItem::action("Go to Definition", GoToDefinition),
+                MenuItem::action("Go to Line", GoToLine),
+                MenuItem::separator(),
+                MenuItem::action("Settings", ShowSettings),
             ],
         },
         Menu {
@@ -137,6 +190,17 @@ fn install_menus(cx: &mut App) {
             items: vec![
                 MenuItem::action("Next Tab", NextTab),
                 MenuItem::action("Previous Tab", PreviousTab),
+                MenuItem::action("Split Right", SplitRight),
+                MenuItem::action("Split Down", SplitDown),
+            ],
+        },
+        Menu {
+            name: "Tools".into(),
+            items: vec![
+                MenuItem::action("Refresh Project", RefreshProject),
+                MenuItem::action("Trust Project", TrustProject),
+                MenuItem::action("Refresh Git", GitRefresh),
+                MenuItem::action("Commit", GitCommit),
             ],
         },
     ]);
@@ -146,6 +210,12 @@ fn install_key_bindings(cx: &mut App) {
     use editor::{
         Backspace, Copy, Cut, Delete, Down, End, Home, Left, Paste, Redo, Right, SelectAll,
         SelectDown, SelectLeft, SelectRight, SelectUp, ShowCharacterPalette, Undo, Up,
+    };
+    use text_input::{
+        Backspace as InputBackspace, Copy as InputCopy, Cut as InputCut, Delete as InputDelete,
+        End as InputEnd, Home as InputHome, Left as InputLeft, Paste as InputPaste,
+        Right as InputRight, SelectAll as InputSelectAll, SelectLeft as InputSelectLeft,
+        SelectRight as InputSelectRight,
     };
 
     cx.bind_keys([
@@ -159,6 +229,24 @@ fn install_key_bindings(cx: &mut App) {
         KeyBinding::new("cmd-shift-[", PreviousTab, None),
         KeyBinding::new("cmd-shift-l", ToggleTheme, None),
         KeyBinding::new("cmd-shift-a", ToggleAutosave, None),
+        KeyBinding::new("cmd-b", ToggleLeftPanel, None),
+        KeyBinding::new("cmd-alt-1", ToggleRightPanel, None),
+        KeyBinding::new("cmd-j", ToggleBottomPanel, None),
+        KeyBinding::new("cmd-0", ShowProject, None),
+        KeyBinding::new("cmd-shift-f", ShowSearch, None),
+        KeyBinding::new("cmd-p", QuickOpen, None),
+        KeyBinding::new("cmd-shift-p", CommandPalette, None),
+        KeyBinding::new("cmd-e", SearchEverywhere, None),
+        KeyBinding::new("cmd-shift-g", ShowGit, None),
+        KeyBinding::new("cmd-shift-d", ShowDatabase, None),
+        KeyBinding::new("cmd-shift-x", ShowAgents, None),
+        KeyBinding::new("cmd-alt-s", SaveAll, None),
+        KeyBinding::new("cmd-\\", SplitRight, None),
+        KeyBinding::new("cmd-shift-\\", SplitDown, None),
+        KeyBinding::new("cmd-shift-t", NewTerminal, None),
+        KeyBinding::new("f12", GoToDefinition, None),
+        KeyBinding::new("cmd-alt-g", GoToLine, None),
+        KeyBinding::new("cmd-alt-shift-f", FormatDocument, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("backspace", Backspace, Some("Editor")),
         KeyBinding::new("delete", Delete, Some("Editor")),
@@ -179,6 +267,20 @@ fn install_key_bindings(cx: &mut App) {
         KeyBinding::new("cmd-z", Undo, Some("Editor")),
         KeyBinding::new("cmd-shift-z", Redo, Some("Editor")),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("Editor")),
+        KeyBinding::new("backspace", InputBackspace, Some("TextInput")),
+        KeyBinding::new("delete", InputDelete, Some("TextInput")),
+        KeyBinding::new("left", InputLeft, Some("TextInput")),
+        KeyBinding::new("right", InputRight, Some("TextInput")),
+        KeyBinding::new("shift-left", InputSelectLeft, Some("TextInput")),
+        KeyBinding::new("shift-right", InputSelectRight, Some("TextInput")),
+        KeyBinding::new("home", InputHome, Some("TextInput")),
+        KeyBinding::new("end", InputEnd, Some("TextInput")),
+        KeyBinding::new("cmd-a", InputSelectAll, Some("TextInput")),
+        KeyBinding::new("cmd-c", InputCopy, Some("TextInput")),
+        KeyBinding::new("cmd-x", InputCut, Some("TextInput")),
+        KeyBinding::new("cmd-v", InputPaste, Some("TextInput")),
+        KeyBinding::new("enter", InputSubmit, Some("TextInput")),
+        KeyBinding::new("escape", InputCancel, Some("TextInput")),
     ]);
 }
 

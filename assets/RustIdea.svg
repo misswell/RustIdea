@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="shell" x1="150" y1="120" x2="880" y2="930" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#111c3b"/>
+      <stop offset="0.52" stop-color="#124a9a"/>
+      <stop offset="1" stop-color="#0875df"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="210" y1="140" x2="810" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.45"/>
+      <stop offset="0.55" stop-color="#8cc8ff" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="350" y1="260" x2="700" y2="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#cce9ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="22" stdDeviation="28" flood-color="#001231" flood-opacity="0.55"/>
+    </filter>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+    <clipPath id="rounded">
+      <rect x="70" y="70" width="884" height="884" rx="204"/>
+    </clipPath>
+  </defs>
+
+  <rect x="70" y="70" width="884" height="884" rx="204" fill="url(#shell)" filter="url(#shadow)"/>
+  <g clip-path="url(#rounded)">
+    <circle cx="825" cy="215" r="250" fill="#5eb6ff" opacity="0.22" filter="url(#glow)"/>
+    <circle cx="210" cy="820" r="260" fill="#061b3c" opacity="0.32" filter="url(#glow)"/>
+    <path d="M70 650 C300 560 710 600 954 470" stroke="#ffffff" stroke-opacity="0.08" stroke-width="3" fill="none"/>
+    <path d="M70 700 C310 610 700 650 954 520" stroke="#ffffff" stroke-opacity="0.06" stroke-width="2" fill="none"/>
+    <path d="M70 750 C320 660 690 700 954 570" stroke="#ffffff" stroke-opacity="0.04" stroke-width="2" fill="none"/>
+  </g>
+  <rect x="77.5" y="77.5" width="869" height="869" rx="196.5" fill="none" stroke="url(#rim)" stroke-width="5"/>
+
+  <path d="M275 385 L215 512 L275 639" fill="none" stroke="#8fd3ff" stroke-opacity="0.55" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M749 385 L809 512 L749 639" fill="none" stroke="#8fd3ff" stroke-opacity="0.55" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <text x="512" y="715" text-anchor="middle"
+        font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="492" font-weight="700"
+        fill="url(#mark)">R</text>
+
+  <rect x="392" y="785" width="240" height="18" rx="9" fill="#69c0ff" opacity="0.88"/>
+  <circle cx="354" cy="794" r="10" fill="#ffb454"/>
+  <circle cx="670" cy="794" r="10" fill="#5ae0b2"/>
+</svg>

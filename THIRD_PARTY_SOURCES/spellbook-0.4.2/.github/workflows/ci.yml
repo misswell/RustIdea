@@ -1,0 +1,84 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+env:
+  MSRV: "1.70"
+jobs:
+  check:
+    name: Check
+    strategy:
+      matrix:
+        toolchain:
+          - MSRV
+          - stable
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain == 'MSRV' && env.MSRV || 'stable' }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo check
+        run: |
+          rustc --version
+          cargo check
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "${{ env.MSRV }}"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check rust version
+        run: rustc --version
+
+      - name: Run cargo test
+        run: cargo test
+
+  lints:
+    name: Lints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "${{ env.MSRV }}"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check rust version
+        run: rustc --version
+
+      - name: Run cargo fmt
+        run: cargo fmt --check
+
+      - name: Run cargo clippy with default features
+        run: cargo clippy -- -D warnings
+
+      - name: Run cargo clippy with no default features
+        run: cargo clippy --no-default-features -- -D warnings
+
+      - name: Run cargo doc
+        run: cargo doc --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
