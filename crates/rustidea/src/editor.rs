@@ -50,6 +50,17 @@ const AUTOSAVE_DELAY: Duration = Duration::from_millis(700);
 
 static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
 
+pub fn create_document(path: Option<&Path>, text: &str) -> Document {
+    let mut document = Document::new(
+        DocumentId::new(NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed)),
+        text,
+    );
+    if let Some(path) = path {
+        document.set_path(path.to_path_buf());
+    }
+    document
+}
+
 #[derive(Clone, Debug)]
 struct LineLayout {
     line: u32,
@@ -93,19 +104,12 @@ pub struct Editor {
 impl Editor {
     pub fn new(
         path: Option<PathBuf>,
-        text: &str,
+        document: Document,
         backend: Arc<dyn RustIdeaBackend>,
         theme: Theme,
         autosave: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut document = Document::new(
-            DocumentId::new(NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed)),
-            text,
-        );
-        if let Some(path) = path.as_ref() {
-            document.set_path(path.clone());
-        }
         Self {
             focus_handle: cx.focus_handle(),
             document,
@@ -183,24 +187,32 @@ impl Editor {
             cx.notify();
             return;
         };
+        self.save_to(path, false, cx);
+    }
+
+    fn save_to(&mut self, path: PathBuf, retarget: bool, cx: &mut Context<Self>) {
         if self.saving {
             return;
         }
         let version = self.document.version();
-        let text = self.document.text_for_save();
+        let snapshot = self.document.snapshot();
         let backend = self.backend.clone();
         self.saving = true;
         self.error = None;
         self.status = Some("Saving…".into());
+        let write_path = path.clone();
         let save_task = cx
             .background_executor()
-            .spawn(async move { backend.write_text(&path, &text) });
+            .spawn(async move { backend.write_text(&write_path, &snapshot.text_for_save()) });
         cx.spawn(async move |this, cx| {
             let result = save_task.await;
             this.update(cx, |editor, cx| {
                 editor.saving = false;
                 match result {
                     Ok(()) => {
+                        if retarget {
+                            editor.set_path(path);
+                        }
                         if editor.document.mark_saved_if_version(version) {
                             editor.status = Some("Saved".into());
                             editor.error = None;
@@ -222,8 +234,12 @@ impl Editor {
     }
 
     pub fn save_as(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.set_path(path);
-        self.save(cx);
+        if self.saving {
+            self.status = Some("Wait for the current save before using Save As".into());
+            cx.notify();
+            return;
+        }
+        self.save_to(path, true, cx);
     }
 
     pub fn undo(&mut self, cx: &mut Context<Self>) {
@@ -511,7 +527,9 @@ impl Editor {
             source,
         )) {
             Ok(_) => {
-                let inserted_len = text.encode_utf16().count() as u32;
+                let inserted_len = ide_text::normalize_line_endings(text)
+                    .encode_utf16()
+                    .count() as u32;
                 let caret = range.start + inserted_len;
                 self.selection = Selection::caret(caret);
                 self.marked_range = None;
@@ -540,7 +558,9 @@ impl Editor {
             .map(|range| range_to_u32(range.clone()))
             .or_else(|| self.marked_range.clone().map(range_to_u32))
             .unwrap_or_else(|| self.selected_range());
-        let inserted_len = new_text.encode_utf16().count() as u32;
+        let inserted_len = ide_text::normalize_line_endings(new_text)
+            .encode_utf16()
+            .count() as u32;
         self.replace_utf16(
             range.clone(),
             new_text,

@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::backend::{RustIdeaBackend, display_name};
-use crate::editor::Editor;
+use crate::editor::{Editor, create_document};
 use crate::project::{ProjectTree, open_directory};
 use crate::session::{Session, SessionStore};
 use crate::theme::Theme;
@@ -32,6 +32,7 @@ actions!(
 struct Tab {
     editor: gpui::Entity<Editor>,
     label: String,
+    close_after_save: bool,
     _subscription: Subscription,
 }
 
@@ -120,10 +121,29 @@ impl RustIdea {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let subscription = cx.observe(&editor, |_, _, cx| cx.notify());
+        let subscription = cx.observe(&editor, |app, editor, cx| {
+            if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.editor == editor)
+                && let Some(path) = editor.read(cx).path()
+            {
+                tab.label = display_name(path);
+            }
+            if let Some(index) = app.tabs.iter().position(|tab| tab.editor == editor)
+                && app.tabs[index].close_after_save
+                && !editor.read(cx).is_saving()
+            {
+                if !editor.read(cx).is_dirty() && editor.read(cx).error().is_none() {
+                    app.remove_tab(index, cx);
+                } else {
+                    app.tabs[index].close_after_save = false;
+                    app.status = "File remains open: save failed or newer edits exist".into();
+                }
+            }
+            cx.notify();
+        });
         self.tabs.push(Tab {
             editor: editor.clone(),
             label,
+            close_after_save: false,
             _subscription: subscription,
         });
         self.active_tab = Some(self.tabs.len() - 1);
@@ -138,7 +158,16 @@ impl RustIdea {
         let theme = self.theme;
         let backend = self.backend.clone();
         let autosave = self.session.autosave;
-        let editor = cx.new(|cx| Editor::new(None, "", backend, theme, autosave, cx));
+        let editor = cx.new(|cx| {
+            Editor::new(
+                None,
+                create_document(None, ""),
+                backend,
+                theme,
+                autosave,
+                cx,
+            )
+        });
         self.add_editor(editor, label, window, cx);
         self.status = "New file — use Save As to choose a path".into();
     }
@@ -183,11 +212,12 @@ impl RustIdea {
             this.update_in(cx, |app, window, cx| {
                 match result {
                     Ok(Some(path)) => {
-                        let label = display_name(&path);
-                        editor.update(cx, |editor, cx| editor.save_as(path, cx));
-                        if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.editor == editor) {
-                            tab.label = label;
+                        if editor.read(cx).is_saving() {
+                            app.status = "Wait for the current save before using Save As".into();
+                            cx.notify();
+                            return;
                         }
+                        editor.update(cx, |editor, cx| editor.save_as(path, cx));
                         app.status = "Saving…".into();
                         window.focus(&editor.read(cx).focus_handle(cx));
                     }
@@ -272,9 +302,11 @@ impl RustIdea {
         }
         let backend = self.backend.clone();
         let read_path = path.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { backend.read_text(&read_path) });
+        let task = cx.background_executor().spawn(async move {
+            backend
+                .read_text(&read_path)
+                .map(|text| create_document(Some(&read_path), &text))
+        });
         self.status = format!("Opening {}…", display_name(&path));
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -290,12 +322,20 @@ impl RustIdea {
     fn finish_open_path(
         &mut self,
         path: PathBuf,
-        result: anyhow::Result<String>,
+        result: anyhow::Result<rustidea_editor::Document>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match result {
-            Ok(text) => {
+            Ok(document) => {
+                if let Some(index) = self
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.editor.read(cx).path() == Some(path.as_path()))
+                {
+                    self.activate_tab(index, window, cx);
+                    return;
+                }
                 if let Some(project) = self.project.as_mut() {
                     project.reveal(&path);
                 }
@@ -305,7 +345,7 @@ impl RustIdea {
                 let autosave = self.session.autosave;
                 let editor_path = path.clone();
                 let editor = cx.new(move |cx| {
-                    Editor::new(Some(editor_path), &text, backend, theme, autosave, cx)
+                    Editor::new(Some(editor_path), document, backend, theme, autosave, cx)
                 });
                 self.add_editor(editor, title, window, cx);
                 self.status = format!("Opened {}", path.display());
@@ -357,6 +397,11 @@ impl RustIdea {
             return;
         };
         let editor = tab.editor.clone();
+        if editor.read(cx).is_saving() {
+            self.status = "Wait for the current save before closing".into();
+            cx.notify();
+            return;
+        }
         let is_dirty = editor.read(cx).is_dirty();
         if !is_dirty {
             self.remove_tab(index, cx);
@@ -382,11 +427,11 @@ impl RustIdea {
                 if has_path {
                     match choice {
                         0 => {
-                            editor.update(cx, |editor, cx| editor.save(cx));
                             if let Some(current) =
                                 app.tabs.iter().position(|tab| tab.editor == editor)
                             {
-                                app.remove_tab(current, cx);
+                                app.tabs[current].close_after_save = true;
+                                editor.update(cx, |editor, cx| editor.save(cx));
                             }
                         }
                         1 => {

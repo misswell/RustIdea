@@ -9,10 +9,10 @@ CodeMirror, or Tauri.
 
 ## Status
 
-This repository is following the migration plan in `docs/`:
+This repository is following the migration plan in the root `RUSTIDEA_*.md` files:
 
-- Phase 0: migration audit, feature inventory, architecture, license audit and
-  performance baseline.
+- Phase 0: migration audit, feature inventory, architecture and license
+  inventory are documented; comparative performance measurements remain open.
 - Phase 1: standalone GPUI application shell, theme, menus, logging, services.
 - Phase 2: native editor minimum viable version.
 
@@ -31,5 +31,6 @@ cargo run -p rustidea
 cargo test --workspace
 ```
 
-Licensing details are in `THIRD_PARTY_LICENSES.md` and
-`docs/RUSTIDEA_LICENSE_AUDIT.md`.
+Licensing details are in `THIRD_PARTY_LICENSES.md`,
+`THIRD_PARTY_RUST_LICENSES.md`, `THIRD_PARTY_SOURCES/option-ext-0.2.0/`, and
+`RUSTIDEA_LICENSE_AUDIT.md`.

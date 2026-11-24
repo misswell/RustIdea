@@ -235,6 +235,10 @@ impl Document {
         self.text.text_for_save()
     }
 
+    pub fn snapshot(&self) -> TextDocument {
+        self.text.clone()
+    }
+
     pub fn line(&self, line: u32) -> Option<String> {
         self.text.line(line)
     }
@@ -306,12 +310,28 @@ impl Document {
             });
         }
         validate_changes(&transaction.changes, self.len_utf16())?;
+        for change in &transaction.changes {
+            for offset in [change.from, change.to] {
+                if self.byte_to_offset(self.offset_to_byte(offset)) != offset {
+                    return Err(DocumentError::InvalidUtf16Boundary(offset));
+                }
+            }
+        }
+        if transaction
+            .changes
+            .iter()
+            .all(|change| change.from == change.to && change.insert.is_empty())
+        {
+            return Ok(Vec::new());
+        }
         let mut delta: i64 = 0;
         let inverse: Vec<Change> = transaction
             .changes
             .iter()
             .map(|change| {
-                let inserted_len = change.insert.encode_utf16().count() as u32;
+                let inserted_len = ide_text::normalize_line_endings(&change.insert)
+                    .encode_utf16()
+                    .count() as u32;
                 let final_from = (change.from as i64 + delta) as u32;
                 let final_to = final_from + inserted_len;
                 let old_text = self.text.slice(change.from, change.to);
@@ -356,29 +376,35 @@ impl Document {
     }
 
     pub fn undo(&mut self) -> Result<bool, DocumentError> {
-        let Some(mut entry) = self.undo.pop_back() else {
+        let Some(entry) = self.undo.pop_back() else {
             return Ok(false);
         };
         let version = self.version();
-        self.apply(Transaction::new(
+        if let Err(error) = self.apply(Transaction::new(
             version,
-            std::mem::take(&mut entry.inverse),
+            entry.inverse.clone(),
             EditSource::Undo,
-        ))?;
+        )) {
+            self.undo.push_back(entry);
+            return Err(error);
+        }
         self.redo.push(entry);
         Ok(true)
     }
 
     pub fn redo(&mut self) -> Result<bool, DocumentError> {
-        let Some(mut entry) = self.redo.pop() else {
+        let Some(entry) = self.redo.pop() else {
             return Ok(false);
         };
         let version = self.version();
-        self.apply(Transaction::new(
+        if let Err(error) = self.apply(Transaction::new(
             version,
-            std::mem::take(&mut entry.forward),
+            entry.forward.clone(),
             EditSource::Redo,
-        ))?;
+        )) {
+            self.redo.push(entry);
+            return Err(error);
+        }
         self.undo.push_back(entry);
         Ok(true)
     }
@@ -492,6 +518,27 @@ mod tests {
         assert!(document.redo().unwrap());
         assert_eq!(document.text(), "1 two 3");
         assert_eq!(document.version(), 3);
+        assert!(document.undo().unwrap());
+        assert_eq!(document.text(), "one two three");
+        assert!(document.redo().unwrap());
+        assert_eq!(document.text(), "1 two 3");
+    }
+
+    #[test]
+    fn undo_redo_normalizes_pasted_line_endings() {
+        let mut document = doc("xy");
+        document
+            .apply(Transaction::new(
+                0,
+                vec![Change::insert(1, "a\r\nb\rc")],
+                EditSource::Local,
+            ))
+            .unwrap();
+        assert_eq!(document.text(), "xa\nb\ncy");
+        assert!(document.undo().unwrap());
+        assert_eq!(document.text(), "xy");
+        assert!(document.redo().unwrap());
+        assert_eq!(document.text(), "xa\nb\ncy");
     }
 
     #[test]
@@ -511,6 +558,37 @@ mod tests {
         assert_eq!(document.offset_for_line_col(0, 4), 4);
         assert_eq!(document.offset_to_byte(4), 8);
         assert_eq!(document.byte_to_offset(8), 4);
+    }
+
+    #[test]
+    fn rejects_edits_inside_surrogate_pairs_without_mutating() {
+        let mut document = doc("a😀b");
+        let error = document
+            .apply(Transaction::new(
+                0,
+                vec![Change::insert(2, "x")],
+                EditSource::Local,
+            ))
+            .unwrap_err();
+        assert!(matches!(error, DocumentError::InvalidUtf16Boundary(2)));
+        assert_eq!(document.text(), "a😀b");
+        assert_eq!(document.version(), 0);
+        assert!(!document.can_undo());
+    }
+
+    #[test]
+    fn empty_edit_does_not_dirty_document_or_add_history() {
+        let mut document = doc("");
+        document
+            .apply(Transaction::new(
+                0,
+                vec![Change::replace(0..0, "")],
+                EditSource::Local,
+            ))
+            .unwrap();
+        assert_eq!(document.version(), 0);
+        assert!(!document.is_dirty());
+        assert!(!document.can_undo());
     }
 
     #[test]
@@ -585,6 +663,21 @@ mod tests {
         assert!(document.is_dirty());
         assert!(document.mark_saved_if_version(document.version()));
         assert!(!document.is_dirty());
+    }
+
+    #[test]
+    fn save_snapshot_is_independent_of_later_edits() {
+        let mut document = doc("first\r\nline\r\n");
+        let snapshot = document.snapshot();
+        document
+            .apply(Transaction::new(
+                0,
+                vec![Change::replace(0..5, "second")],
+                EditSource::Local,
+            ))
+            .unwrap();
+        assert_eq!(snapshot.text_for_save(), "first\r\nline\r\n");
+        assert_eq!(document.text_for_save(), "second\r\nline\r\n");
     }
 
     #[test]

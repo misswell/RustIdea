@@ -44,24 +44,26 @@ impl RustIdeaBackend for LocalBackend {
     }
 
     fn write_text(&self, path: &Path, text: &str) -> Result<()> {
+        let resolved = if path.is_symlink() {
+            fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))?
+        } else {
+            path.to_path_buf()
+        };
+        let path = resolved.as_path();
         let parent = path.parent().context("document has no parent directory")?;
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("document");
-        let temporary = parent.join(format!(".{file_name}.rustidea-save-{}", std::process::id()));
-        {
-            let mut file = fs::File::create(&temporary)
-                .with_context(|| format!("creating {}", temporary.display()))?;
-            file.write_all(text.as_bytes())?;
-            file.sync_all()?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)
+            .with_context(|| format!("creating temporary file in {}", parent.display()))?;
+        if let Ok(metadata) = fs::metadata(path) {
+            temporary
+                .as_file()
+                .set_permissions(metadata.permissions())?;
         }
-        if let Err(error) = fs::rename(&temporary, path) {
-            let _ = fs::remove_file(&temporary);
-            return Err(error).with_context(|| format!("replacing {}", path.display()));
-        }
+        temporary.write_all(text.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(path)
+            .with_context(|| format!("replacing {}", path.display()))?;
         Ok(())
     }
 
@@ -125,6 +127,26 @@ mod tests {
         backend.write_text(&path, "first").unwrap();
         backend.write_text(&path, "second").unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), "second");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_preserves_permissions_and_symlink() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.txt");
+        let link = directory.path().join("link.txt");
+        fs::write(&target, "old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&target, &link).unwrap();
+        LocalBackend.write_text(&link, "new").unwrap();
+        assert!(link.is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
     }
 
     #[test]

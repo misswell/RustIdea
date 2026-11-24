@@ -16,6 +16,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 dirs.workspace = true
 gpui.workspace = true
+ide-text.workspace = true
 ignore.workspace = true
 rustidea-editor.workspace = true
 serde.workspace = true
@@ -24,6 +25,4 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 unicode-segmentation.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
