@@ -215,8 +215,8 @@ The dependency graph contains 507 crate records and 10 selected SPDX license ide
 - `icu_properties 2.4.0` — `Unicode-3.0`
 - `icu_properties_data 2.4.0` — `Unicode-3.0`
 - `icu_provider 2.4.0` — `Unicode-3.0`
-- `ide-core 0.1.0` — `Apache-2.0`
-- `ide-text 0.1.0` — `Apache-2.0`
+- `ide-core 0.1.1` — `Apache-2.0`
+- `ide-text 0.1.1` — `Apache-2.0`
 - `idna 1.1.0` — `MIT OR Apache-2.0`
 - `idna_adapter 1.2.2` — `Apache-2.0 OR MIT`
 - `ignore 0.4.35` — `Unlicense OR MIT`
@@ -353,8 +353,8 @@ The dependency graph contains 507 crate records and 10 selected SPDX license ide
 - `rustc-hash 1.1.0` — `Apache-2.0 OR MIT`
 - `rustc-hash 2.1.3` — `Apache-2.0 OR MIT`
 - `rustc_version 0.4.1` — `MIT OR Apache-2.0`
-- `rustidea 0.1.0` — `Apache-2.0`
-- `rustidea-editor 0.1.0` — `Apache-2.0`
+- `rustidea 0.1.1` — `Apache-2.0`
+- `rustidea-editor 0.1.1` — `Apache-2.0`
 - `rustix 0.38.44` — `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`
 - `rustix 1.1.6` — `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`
 - `rustls 0.23.46` — `Apache-2.0 OR ISC OR MIT`

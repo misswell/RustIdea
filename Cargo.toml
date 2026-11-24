@@ -14,6 +14,9 @@ rust-version = "1.96"
 license = "Apache-2.0"
 authors = ["RustIdea contributors"]
 
+[patch.crates-io]
+xattr = { path = "vendor/xattr-0.2.3" }
+
 [workspace.dependencies]
 ide-core = { path = "crates/ide-core" }
 ide-text = { path = "crates/ide-text" }

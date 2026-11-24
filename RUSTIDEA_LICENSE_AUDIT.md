@@ -39,6 +39,13 @@ This preserves the corresponding source for the MPL-covered runtime crate.
 It is not a runtime dependency. The same locked-graph inventory records the
 other selected licenses, including BSD, ISC, Unicode and Zlib license texts.
 
+The locked graph also uses `xattr 0.2.3` through `zed-async-tar`. Its upstream
+Linux cfg references `libc::ENOATTR`, which does not exist on Linux. The source
+is retained under `vendor/xattr-0.2.3` with its MIT/Apache license texts and a
+small platform fix mapping Linux/Android `ENOATTR` to `ENODATA`. The local
+`[patch.crates-io]` entry makes this fix reproducible without changing the
+crate version or behavior on macOS/BSD.
+
 ## Distribution requirements and limits
 
 Include `THIRD_PARTY_RUST_LICENSES.md` and

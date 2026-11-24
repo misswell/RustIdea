@@ -2,3 +2,6 @@
 THIRD_PARTY_RUST_LICENSES.md whitespace=-blank-at-eol
 THIRD_PARTY_SOURCES/option-ext-0.2.0/LICENSE.txt whitespace=-blank-at-eol
 THIRD_PARTY_SOURCES/option-ext-0.2.0/README.md whitespace=-blank-at-eol
+vendor/xattr-0.2.3/LICENSE-APACHE whitespace=-blank-at-eol
+vendor/xattr-0.2.3/LICENSE-MIT whitespace=-blank-at-eol
+vendor/xattr-0.2.3/README.md whitespace=-blank-at-eol
