@@ -1,11 +1,12 @@
 # macOS release checklist
 
 Status: static code verification and dependency notice inventory are complete.
-Measured performance baseline and Phase 1–2 GUI acceptance remain open, so the
-formal release is still pending. Do not describe this build as OpenIDEA parity.
+Cross-platform builds, the measured performance baseline and Phase 1–2
+interactive acceptance remain open, so the formal release is still pending. Do
+not describe this build as OpenIDEA parity or Phase 2 acceptance.
 
 1. Keep the audit and feature inventory current; collect the measured OpenIDEA
-   baseline or explicitly defer its acceptance with recorded limitations.
+   baseline and record the results.
 2. Verify native window lifecycle, themes, editing, clipboard, undo/redo,
    autosave, saving and reopening, real Chinese IME composition and large-file
    responsiveness in an isolated GUI session. Check the process tree and linked

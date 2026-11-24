@@ -34,3 +34,6 @@ cargo test --workspace
 Licensing details are in `THIRD_PARTY_LICENSES.md`,
 `THIRD_PARTY_RUST_LICENSES.md`, `THIRD_PARTY_SOURCES/option-ext-0.2.0/`, and
 `RUSTIDEA_LICENSE_AUDIT.md`.
+
+Verification evidence and remaining acceptance work are tracked in
+`RUSTIDEA_REGRESSION_REPORT.md` and `RUSTIDEA_PERFORMANCE_REPORT.md`.

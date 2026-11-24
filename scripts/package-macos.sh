@@ -3,17 +3,19 @@ set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 app_version="${APP_VERSION:-0.1.1}"
+app_binary="${RUSTIDEA_APP_BINARY:-$repo_root/target/release/rustidea}"
 app_bundle="$repo_root/dist/RustIdea.app"
 contents="$app_bundle/Contents"
 
-if [[ ! -x "$repo_root/target/release/rustidea" ]]; then
-  echo "Missing target/release/rustidea; run cargo build --release -p rustidea first." >&2
+if [[ ! -x "$app_binary" ]]; then
+  echo "Missing app binary: $app_binary" >&2
+  echo "Run cargo build --release -p rustidea first, or set RUSTIDEA_APP_BINARY." >&2
   exit 1
 fi
 
 rm -rf "$app_bundle"
 mkdir -p "$contents/MacOS" "$contents/Resources"
-cp "$repo_root/target/release/rustidea" "$contents/MacOS/rustidea"
+cp "$app_binary" "$contents/MacOS/rustidea"
 cp "$repo_root/LICENSE" "$repo_root/NOTICE" \
   "$repo_root/THIRD_PARTY_LICENSES.md" \
   "$repo_root/THIRD_PARTY_RUST_LICENSES.md" "$contents/Resources/"
