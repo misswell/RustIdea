@@ -18,7 +18,7 @@ index 837d083..7aeeb62 100644
 @@ -442,7 +442,7 @@ fn extract_declarations_from_tree(
          let mut name_range: Option<Range<usize>> = None;
          let mut has_item_range = false;
- 
+
 -        for capture in query_match.captures() {
 +        for capture in query_match.captures {
              let range = capture.node.byte_range();
@@ -41,7 +41,7 @@ index bfed8e4..53d0b30 100644
          &mut self,
          action: &ConfirmCompletion,
 diff --git a/crates/editor/src/editor.rs b/crates/editor/src/editor.rs
-index afaa963..1b218b7 100644
+index afaa963..d80e75a 100644
 --- a/crates/editor/src/editor.rs
 +++ b/crates/editor/src/editor.rs
 @@ -1616,6 +1616,16 @@ pub struct RenameTarget {
@@ -61,6 +61,20 @@ index afaa963..1b218b7 100644
  #[doc(hidden)]
  pub struct RenameState {
      pub range: Range<Anchor>,
+@@ -3312,6 +3322,13 @@ impl Editor {
+         self.semantics_provider = provider;
+     }
+
++    pub fn set_code_action_provider(&mut self, provider: Option<Rc<dyn CodeActionProvider>>) {
++        self.code_action_providers.clear();
++        if let Some(provider) = provider {
++            self.code_action_providers.push(provider);
++        }
++    }
++
+     pub fn placeholder_text(&self, cx: &mut App) -> Option<String> {
+         self.placeholder_display_map
+             .as_ref()
 diff --git a/crates/editor/src/jsx_tag_auto_close.rs b/crates/editor/src/jsx_tag_auto_close.rs
 index b6f79cc..8866fe6 100644
 --- a/crates/editor/src/jsx_tag_auto_close.rs

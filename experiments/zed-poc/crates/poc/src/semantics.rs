@@ -26,16 +26,11 @@ impl OpenIdeaSemanticsProvider {
         Self { backend }
     }
 
-    fn position(
-        &self,
-        buffer: &Entity<Buffer>,
-        position: Anchor,
-        cx: &App,
-    ) -> (u32, u32) {
+    fn position(&self, buffer: &Entity<Buffer>, position: Anchor, cx: &App) -> (u32, u32) {
         let snapshot = buffer.read(cx).snapshot();
         let byte = position.to_offset(&snapshot);
         let point = snapshot.offset_to_point_utf16(byte);
-        (point.row as u32, point.column as u32)
+        (point.row, point.column)
     }
 }
 
@@ -89,12 +84,7 @@ impl SemanticsProvider for OpenIdeaSemanticsProvider {
         Vec::new()
     }
 
-    fn invalidate_inlay_hints(
-        &self,
-        _for_buffers: &HashSet<language::BufferId>,
-        _cx: &mut App,
-    ) {
-    }
+    fn invalidate_inlay_hints(&self, _for_buffers: &HashSet<language::BufferId>, _cx: &mut App) {}
 
     fn inlay_hints(
         &self,
@@ -125,11 +115,30 @@ impl SemanticsProvider for OpenIdeaSemanticsProvider {
 
     fn document_highlights(
         &self,
-        _buffer: &Entity<Buffer>,
-        _position: Anchor,
-        _cx: &mut App,
+        buffer: &Entity<Buffer>,
+        position: Anchor,
+        cx: &mut App,
     ) -> Option<Task<anyhow::Result<Vec<DocumentHighlight>>>> {
-        None
+        let (line, column) = self.position(buffer, position, cx);
+        let snapshot = buffer.read(cx).snapshot();
+        let backend = self.backend.clone();
+        Some(cx.spawn(async move |_cx| {
+            let highlights = backend
+                .document_highlights(line, column)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            Ok(highlights
+                .into_iter()
+                .map(|highlight| DocumentHighlight {
+                    range: anchor_range(&snapshot, &highlight.range),
+                    kind: match highlight.kind {
+                        ide_lsp::types::HighlightKind::Text => lsp::DocumentHighlightKind::TEXT,
+                        ide_lsp::types::HighlightKind::Read => lsp::DocumentHighlightKind::READ,
+                        ide_lsp::types::HighlightKind::Write => lsp::DocumentHighlightKind::WRITE,
+                    },
+                })
+                .collect())
+        }))
     }
 
     fn definitions(
@@ -207,14 +216,10 @@ impl SemanticsProvider for OpenIdeaSemanticsProvider {
                 .await
                 .map_err(|error| anyhow::anyhow!(error.message))?;
             Ok(range.map(|range| {
-                let start = snapshot.anchor_before(text::PointUtf16::new(
-                    range.start.line,
-                    range.start.col,
-                ));
-                let end = snapshot.anchor_before(text::PointUtf16::new(
-                    range.end.line,
-                    range.end.col,
-                ));
+                let start = snapshot
+                    .anchor_before(text::PointUtf16::new(range.start.line, range.start.col));
+                let end =
+                    snapshot.anchor_before(text::PointUtf16::new(range.end.line, range.end.col));
                 RenameTarget::new(start..end, None)
             }))
         })
@@ -238,4 +243,9 @@ impl SemanticsProvider for OpenIdeaSemanticsProvider {
             Ok(ProjectTransaction::default())
         }))
     }
+}
+
+fn anchor_range(snapshot: &language::BufferSnapshot, range: &ide_core::Range) -> Range<Anchor> {
+    snapshot.anchor_before(text::PointUtf16::new(range.start.line, range.start.col))
+        ..snapshot.anchor_after(text::PointUtf16::new(range.end.line, range.end.col))
 }

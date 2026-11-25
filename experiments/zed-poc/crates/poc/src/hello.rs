@@ -19,16 +19,18 @@ impl Render for Hello {
 }
 
 fn main() {
-    application().with_assets(assets::Assets).run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(800.), px(600.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_, cx| cx.new(|_| Hello),
-        )
-        .unwrap();
-        cx.activate(true);
-    });
+    application()
+        .with_assets(assets::Assets)
+        .run(|cx: &mut App| {
+            let bounds = Bounds::centered(None, size(px(800.), px(600.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |_, cx| cx.new(|_| Hello),
+            )
+            .unwrap();
+            cx.activate(true);
+        });
 }

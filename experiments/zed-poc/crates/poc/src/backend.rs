@@ -5,6 +5,7 @@ use anyhow::{Context as _, Result};
 use ide_core::{ChangeSet, DocId, IdeEvent, IdeResult, SharedSink};
 use ide_host::{Host, HostConfig};
 use ide_language::{LanguageRegistry, Syntax};
+use ide_run::{OutputChunk, RunConfig, RunInfo};
 use ide_workspace::DocumentInfo;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -68,7 +69,7 @@ impl OpenIdeaBridge {
             syntax,
             sink_for: Box::new(move |_| {
                 let event_tx = event_tx.clone();
-                let sink = Arc::new(move |event: IdeEvent| {
+                Arc::new(move |event: IdeEvent| {
                     if let IdeEvent::LanguageServer {
                         name,
                         status,
@@ -79,8 +80,7 @@ impl OpenIdeaBridge {
                         eprintln!("OPENIDEA_LSP {name} {status:?} {message:?}");
                     }
                     let _ = event_tx.send(event);
-                }) as SharedSink;
-                sink
+                }) as SharedSink
             }),
             owner: same_window,
             runtime: runtime.handle().clone(),
@@ -119,7 +119,9 @@ impl OpenIdeaBridge {
         let host = self.host.clone();
         let doc = self.doc;
         self.runtime
-            .spawn(async move { ide_host::ops::doc::edit(&host, WINDOW, doc, base_version, changes) })
+            .spawn(
+                async move { ide_host::ops::doc::edit(&host, WINDOW, doc, base_version, changes) },
+            )
             .await
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
@@ -180,11 +182,7 @@ impl OpenIdeaBridge {
         self.runtime.block_on(self.hover(line, column))
     }
 
-    pub async fn hover(
-        &self,
-        line: u32,
-        column: u32,
-    ) -> IdeResult<Option<ide_lsp::types::Hover>> {
+    pub async fn hover(&self, line: u32, column: u32) -> IdeResult<Option<ide_lsp::types::Hover>> {
         let host = self.host.clone();
         let doc = self.doc;
         self.runtime
@@ -200,6 +198,89 @@ impl OpenIdeaBridge {
             })
             .await
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub async fn document_highlights(
+        &self,
+        line: u32,
+        column: u32,
+    ) -> IdeResult<Vec<ide_lsp::types::Highlight>> {
+        let host = self.host.clone();
+        let doc = self.doc;
+        self.runtime
+            .spawn(async move {
+                ide_host::ops::lsp::lsp_document_highlights(
+                    &host,
+                    WINDOW,
+                    doc,
+                    ide_core::Pos::new(line, column),
+                )
+                .await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn document_highlights_blocking(
+        &self,
+        line: u32,
+        column: u32,
+    ) -> IdeResult<Vec<ide_lsp::types::Highlight>> {
+        self.runtime
+            .block_on(self.document_highlights(line, column))
+    }
+
+    pub async fn code_actions(
+        &self,
+        range: ide_core::Range,
+    ) -> IdeResult<Vec<ide_lsp::types::CodeAction>> {
+        let host = self.host.clone();
+        let doc = self.doc;
+        self.runtime
+            .spawn(async move {
+                ide_host::ops::lsp::lsp_code_actions(&host, WINDOW, doc, range, Vec::new()).await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn code_actions_blocking(
+        &self,
+        range: ide_core::Range,
+    ) -> IdeResult<Vec<ide_lsp::types::CodeAction>> {
+        self.runtime.block_on(self.code_actions(range))
+    }
+
+    pub async fn apply_code_action(&self, action: ide_lsp::types::CodeAction) -> IdeResult<()> {
+        let host = self.host.clone();
+        let doc = self.doc;
+        self.runtime
+            .spawn(async move {
+                ide_host::ops::lsp::lsp_apply_code_action(&host, WINDOW, doc, action).await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub async fn resolve_completion(
+        &self,
+        item: ide_lsp::types::CompletionItem,
+    ) -> IdeResult<ide_lsp::types::CompletionItem> {
+        let host = self.host.clone();
+        let doc = self.doc;
+        self.runtime
+            .spawn(async move {
+                ide_host::ops::lsp::lsp_resolve_completion(&host, WINDOW, doc, item).await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn resolve_completion_blocking(
+        &self,
+        item: ide_lsp::types::CompletionItem,
+    ) -> IdeResult<ide_lsp::types::CompletionItem> {
+        self.runtime.block_on(self.resolve_completion(item))
     }
 
     pub async fn definition(
@@ -263,12 +344,7 @@ impl OpenIdeaBridge {
         self.runtime.block_on(self.prepare_rename(line, column))
     }
 
-    pub async fn rename(
-        &self,
-        line: u32,
-        column: u32,
-        new_name: String,
-    ) -> IdeResult<()> {
+    pub async fn rename(&self, line: u32, column: u32, new_name: String) -> IdeResult<()> {
         let host = self.host.clone();
         let doc = self.doc;
         self.runtime
@@ -296,12 +372,7 @@ impl OpenIdeaBridge {
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
 
-    pub fn rename_blocking(
-        &self,
-        line: u32,
-        column: u32,
-        new_name: String,
-    ) -> IdeResult<()> {
+    pub fn rename_blocking(&self, line: u32, column: u32, new_name: String) -> IdeResult<()> {
         self.runtime.block_on(self.rename(line, column, new_name))
     }
 
@@ -324,5 +395,58 @@ impl OpenIdeaBridge {
     pub fn close(&self) {
         let _ = ide_host::ops::doc::close(&self.host, WINDOW, self.doc);
         self.host.close_project_detached(WINDOW);
+    }
+
+    pub fn run_configs(&self) -> IdeResult<Vec<RunConfig>> {
+        ide_host::ops::run::configs(&self.host, WINDOW)
+    }
+
+    pub fn run_to_completion(
+        &self,
+        config: RunConfig,
+        timeout: std::time::Duration,
+    ) -> IdeResult<(RunInfo, String, Option<i32>)> {
+        let mut events = self
+            .take_events()
+            .ok_or_else(|| ide_core::IdeError::internal("run events already taken"))?;
+        self.runtime.block_on(async move {
+            let (out_tx, mut out_rx) = unbounded_channel::<OutputChunk>();
+            let emit: ide_host::ops::Emit<OutputChunk> = Arc::new(move |chunk| {
+                let _ = out_tx.send(chunk);
+            });
+            let info = ide_host::ops::run::start(&self.host, WINDOW, config, emit)
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.message))?;
+            let deadline = std::time::Instant::now() + timeout;
+            let mut output = String::new();
+            let mut exit_code = None;
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                tokio::select! {
+                    Some(chunk) = out_rx.recv() => {
+                        let text = match chunk {
+                            OutputChunk::Stdout { text }
+                            | OutputChunk::Stderr { text }
+                            | OutputChunk::System { text } => text,
+                        };
+                        output.push_str(&text);
+                    }
+                    Some(IdeEvent::RunExited { run, code }) = events.recv() => {
+                        if run == info.id {
+                            exit_code = code;
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(remaining) => break,
+                }
+            }
+            if exit_code.is_none() {
+                let _ = ide_host::ops::run::stop(&self.host, WINDOW, info.id);
+            }
+            Ok((info, output, exit_code))
+        })
     }
 }

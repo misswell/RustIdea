@@ -1,4 +1,5 @@
 mod backend;
+mod code_actions;
 mod completion;
 mod semantics;
 
@@ -7,18 +8,19 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use backend::OpenIdeaBridge;
+use code_actions::OpenIdeaCodeActionProvider;
 use completion::OpenIdeaCompletionProvider;
-use semantics::OpenIdeaSemanticsProvider;
 use editor::Editor;
-use ide_core::IdeEvent;
 use gpui::{
     App, AppContext as _, Bounds, Context, Focusable as _, KeyBinding, Subscription, Window,
     WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
 use gpui_platform::application;
+use ide_core::IdeEvent;
 use language::{
     Buffer, BufferEvent, Diagnostic, DiagnosticEntry, DiagnosticMessage, DiagnosticSet,
 };
+use semantics::OpenIdeaSemanticsProvider;
 use settings::SettingsStore;
 use theme::LoadThemes;
 
@@ -36,32 +38,34 @@ struct PocApp {
     applying_backend_patch: bool,
     save_requested: bool,
     status: gpui::SharedString,
+    diagnostic_servers: std::collections::HashMap<String, lsp::LanguageServerId>,
+    next_diagnostic_server: usize,
     _subscriptions: Vec<Subscription>,
 }
 
 impl PocApp {
-    fn new(
-        backend: Arc<OpenIdeaBridge>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(backend: Arc<OpenIdeaBridge>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let text = backend.text.clone();
         let buffer = cx.new(|cx| Buffer::local(text, cx));
         let version = buffer.read(cx).snapshot().version().clone();
         let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
         let provider = OpenIdeaCompletionProvider::new(backend.clone());
         let semantics = OpenIdeaSemanticsProvider::new(backend.clone());
+        let code_actions = OpenIdeaCodeActionProvider::new(backend.clone());
         editor.update(cx, |editor, _| {
             editor.set_completion_provider(Some(Rc::new(provider)));
             editor.set_semantics_provider(Some(Rc::new(semantics)));
+            editor.set_code_action_provider(Some(Rc::new(code_actions)));
         });
         let second_editor = std::env::var_os("RUSTIDEA_POC_MULTIVIEW").map(|_| {
             let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
             let provider = OpenIdeaCompletionProvider::new(backend.clone());
             let semantics = OpenIdeaSemanticsProvider::new(backend.clone());
+            let code_actions = OpenIdeaCodeActionProvider::new(backend.clone());
             editor.update(cx, |editor, _| {
                 editor.set_completion_provider(Some(Rc::new(provider)));
                 editor.set_semantics_provider(Some(Rc::new(semantics)));
+                editor.set_code_action_provider(Some(Rc::new(code_actions)));
             });
             editor
         });
@@ -95,6 +99,8 @@ impl PocApp {
             applying_backend_patch: false,
             save_requested: false,
             status: status.into(),
+            diagnostic_servers: Default::default(),
+            next_diagnostic_server: 1,
             _subscriptions: vec![subscription],
         }
     }
@@ -213,37 +219,41 @@ impl PocApp {
             return;
         }
         let snapshot = self.buffer.read(cx).snapshot();
+        let server_id = *self
+            .diagnostic_servers
+            .entry(source.clone())
+            .or_insert_with(|| {
+                let id = lsp::LanguageServerId(self.next_diagnostic_server);
+                self.next_diagnostic_server += 1;
+                id
+            });
         let entries: Vec<DiagnosticEntry<text::PointUtf16>> = items
             .into_iter()
             .map(|diagnostic| {
-                let range = text::PointUtf16::new(
-                    diagnostic.range.start.line,
-                    diagnostic.range.start.col,
-                )
-                    ..text::PointUtf16::new(
-                        diagnostic.range.end.line,
-                        diagnostic.range.end.col,
-                    );
-                let mut zed = Diagnostic::default();
-                zed.source = Some(source.clone());
-                zed.severity = match diagnostic.severity {
-                    ide_core::Severity::Error => lsp::DiagnosticSeverity::ERROR,
-                    ide_core::Severity::Warning => lsp::DiagnosticSeverity::WARNING,
-                    ide_core::Severity::Info => lsp::DiagnosticSeverity::INFORMATION,
-                    ide_core::Severity::Hint => lsp::DiagnosticSeverity::HINT,
+                let range =
+                    text::PointUtf16::new(diagnostic.range.start.line, diagnostic.range.start.col)
+                        ..text::PointUtf16::new(
+                            diagnostic.range.end.line,
+                            diagnostic.range.end.col,
+                        );
+                let zed = Diagnostic {
+                    source: Some(source.clone()),
+                    severity: match diagnostic.severity {
+                        ide_core::Severity::Error => lsp::DiagnosticSeverity::ERROR,
+                        ide_core::Severity::Warning => lsp::DiagnosticSeverity::WARNING,
+                        ide_core::Severity::Info => lsp::DiagnosticSeverity::INFORMATION,
+                        ide_core::Severity::Hint => lsp::DiagnosticSeverity::HINT,
+                    },
+                    message: DiagnosticMessage::plain(diagnostic.message),
+                    ..Default::default()
                 };
-                zed.message = DiagnosticMessage::plain(diagnostic.message);
                 DiagnosticEntry::new(range, zed)
             })
             .collect();
         let set = DiagnosticSet::new(entries, &snapshot);
-        eprintln!(
-            "POC_DIAGNOSTICS source={} count={}",
-            source,
-            set.len()
-        );
+        eprintln!("POC_DIAGNOSTICS source={} count={}", source, set.len());
         self.buffer.update(cx, |buffer, cx| {
-            buffer.update_diagnostics(lsp::LanguageServerId(1), set, cx);
+            buffer.update_diagnostics(server_id, set, cx);
         });
         cx.notify();
     }
@@ -371,9 +381,9 @@ fn main() {
                     }
                 }
                 let ready = !servers.is_empty()
-                    && servers.iter().all(|server| {
-                        server.status == ide_core::event::ServerStatus::Ready
-                    });
+                    && servers
+                        .iter()
+                        .all(|server| server.status == ide_core::event::ServerStatus::Ready);
                 if ready {
                     stable_ready += 1;
                     if stable_ready >= 3 {
@@ -404,6 +414,41 @@ fn main() {
             Ok(Some(hover)) => eprintln!("POC_LSP_HOVER {:?}", hover.contents.value),
             Ok(None) => eprintln!("POC_LSP_HOVER none"),
             Err(error) => eprintln!("POC_LSP_HOVER_ERROR {}", error.message),
+        }
+        match backend.document_highlights_blocking(line, column.saturating_sub(5)) {
+            Ok(highlights) => {
+                eprintln!("POC_LSP_HIGHLIGHTS count={}", highlights.len());
+                for highlight in highlights.iter().take(8) {
+                    eprintln!(
+                        "POC_LSP_HIGHLIGHT {:?} {}:{}..{}:{}",
+                        highlight.kind,
+                        highlight.range.start.line,
+                        highlight.range.start.col,
+                        highlight.range.end.line,
+                        highlight.range.end.col
+                    );
+                }
+            }
+            Err(error) => eprintln!("POC_LSP_HIGHLIGHTS_ERROR {}", error.message),
+        }
+        let code_action_position = std::env::var("RUSTIDEA_POC_CODE_ACTION_POS")
+            .ok()
+            .and_then(|position| {
+                let (line, column) = position.split_once(':')?;
+                Some((line.parse().ok()?, column.parse().ok()?))
+            })
+            .unwrap_or((line, column.saturating_sub(5)));
+        match backend.code_actions_blocking(ide_core::Range::point(ide_core::Pos::new(
+            code_action_position.0,
+            code_action_position.1,
+        ))) {
+            Ok(actions) => {
+                eprintln!("POC_LSP_CODE_ACTIONS count={}", actions.len());
+                for action in actions.iter().take(8) {
+                    eprintln!("POC_LSP_CODE_ACTION {:?} {}", action.kind, action.title);
+                }
+            }
+            Err(error) => eprintln!("POC_LSP_CODE_ACTIONS_ERROR {}", error.message),
         }
         match backend.definition_blocking(
             line,
@@ -440,6 +485,19 @@ fn main() {
                     for item in list.items.iter().take(8) {
                         eprintln!("POC_LSP_ITEM {}", item.label);
                     }
+                    for item in list.items.iter().filter(|item| item.data.is_some()).take(3) {
+                        match backend.resolve_completion_blocking(item.clone()) {
+                            Ok(resolved) => eprintln!(
+                                "POC_LSP_RESOLVED {} documentation={} additional_edits={}",
+                                resolved.label,
+                                resolved.documentation.is_some(),
+                                resolved.additional_edits.len()
+                            ),
+                            Err(error) => {
+                                eprintln!("POC_LSP_RESOLVE_ERROR {}", error.message)
+                            }
+                        }
+                    }
                     return;
                 }
                 Ok(_) => std::thread::sleep(std::time::Duration::from_secs(1)),
@@ -450,6 +508,34 @@ fn main() {
             }
         }
         eprintln!("POC_LSP_FAILED no completions after retries");
+        return;
+    }
+    if std::env::var_os("RUSTIDEA_POC_RUN_TEST").is_some() {
+        let configs = backend
+            .run_configs()
+            .unwrap_or_else(|error| panic!("list OpenIDEA run configs: {}", error.message));
+        for config in &configs {
+            eprintln!(
+                "POC_RUN_CONFIG {} {} {}",
+                config.id, config.kind, config.name
+            );
+        }
+        let wanted =
+            std::env::var("RUSTIDEA_POC_RUN_CONFIG").unwrap_or_else(|_| "maven:package".to_owned());
+        let config = configs
+            .into_iter()
+            .find(|config| config.id == wanted || config.id.ends_with(&wanted))
+            .unwrap_or_else(|| panic!("run config {wanted:?} not detected"));
+        match backend.run_to_completion(config, std::time::Duration::from_secs(120)) {
+            Ok((info, output, code)) => {
+                eprintln!("POC_RUN_STARTED {} pid={:?}", info.name, info.pid);
+                for line in output.lines() {
+                    eprintln!("POC_RUN_OUTPUT {line}");
+                }
+                eprintln!("POC_RUN_EXIT {:?}", code);
+            }
+            Err(error) => eprintln!("POC_RUN_FAILED {}", error.message),
+        }
         return;
     }
     let backend = Arc::new(backend);
@@ -536,19 +622,10 @@ fn main() {
                                     eprintln!("POC_SAVE_FAILED {}", app.status);
                                 }
                                 if let Some(second) = app.second_editor.clone() {
-                                    let first_text = app
-                                        .editor
-                                        .read(cx)
-                                        .buffer()
-                                        .read(cx)
-                                        .snapshot(cx)
-                                        .text();
-                                    let second_text = second
-                                        .read(cx)
-                                        .buffer()
-                                        .read(cx)
-                                        .snapshot(cx)
-                                        .text();
+                                    let first_text =
+                                        app.editor.read(cx).buffer().read(cx).snapshot(cx).text();
+                                    let second_text =
+                                        second.read(cx).buffer().read(cx).snapshot(cx).text();
                                     eprintln!(
                                         "POC_MULTIVIEW equal={} first_len={} second_len={}",
                                         first_text == second_text,
@@ -569,4 +646,52 @@ fn main() {
                 .expect("activate window");
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    fn init(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn editor_types_and_exposes_shared_buffer(cx: &mut TestAppContext) {
+        init(cx);
+        let buffer = cx.new(|cx| Buffer::local("start\n", cx));
+        let first = cx.add_window(|window, cx| {
+            let first = Editor::for_buffer(buffer.clone(), None, window, cx);
+            window.focus(&first.focus_handle(cx), cx);
+            first
+        });
+        let second =
+            cx.add_window(|window, cx| Editor::for_buffer(buffer.clone(), None, window, cx));
+        cx.simulate_keystrokes(first.into(), "h e l l o");
+        cx.run_until_parked();
+        let first_text = first
+            .update(cx, |editor, _, cx| {
+                editor.buffer().read(cx).snapshot(cx).text()
+            })
+            .unwrap();
+        let second_text = second
+            .update(cx, |editor, _, cx| {
+                editor.buffer().read(cx).snapshot(cx).text()
+            })
+            .unwrap();
+        let buffer_text = buffer.read_with(cx, |buffer, _cx| buffer.snapshot().text());
+        eprintln!(
+            "POC_TEST_TEXT first={first_text:?} second={second_text:?} buffer={buffer_text:?}"
+        );
+        assert_eq!(first_text, second_text);
+        assert_eq!(first_text, buffer_text);
+        assert!(buffer_text.contains("hello"));
+    }
 }

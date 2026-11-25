@@ -25,6 +25,7 @@ ide-core.workspace = true
 ide-host.workspace = true
 ide-language.workspace = true
 ide-lsp.workspace = true
+ide-run = { path = "../../../../crates/ide-run" }
 ide-workspace.workspace = true
 language.workspace = true
 multi_buffer.workspace = true
@@ -32,6 +33,7 @@ lsp.workspace = true
 project.workspace = true
 release_channel.workspace = true
 semver.workspace = true
+serde_json = "1"
 settings.workspace = true
 text.workspace = true
 theme.workspace = true
@@ -40,3 +42,9 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 util.workspace = true
+
+[dev-dependencies]
+editor = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+language = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }

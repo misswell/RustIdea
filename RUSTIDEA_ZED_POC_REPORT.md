@@ -26,15 +26,18 @@ The POC binary is `rustidea-zed-poc`. It builds and runs with:
 - `OpenIdeaCompletionProvider`, installed with
   `Editor::set_completion_provider`, which maps `ide_host::ops::lsp::lsp_completion`
   results (including snippet defaults and replacement ranges) into Zed's native
-  completion menu.
+  completion menu, and maps documentation, completion resolve and
+  `additionalTextEdits`.
 - `OpenIdeaSemanticsProvider`, installed with
   `Editor::set_semantics_provider`, which maps `ide_host::ops::lsp::lsp_hover`
   results into Zed's hover blocks and same-file `lsp_goto` results into Zed
   `LocationLink`s. Rename uses OpenIdea `lsp_prepare_rename` plus
-  `lsp_rename`/`apply_workspace_edit`. Cross-file definitions, highlights,
-  inlay hints and semantic tokens are explicit empty stubs in this POC.
+  `lsp_rename`/`apply_workspace_edit`; document highlights use
+  `lsp_document_highlights`. Inlay hints and semantic tokens remain explicit
+  empty stubs in this POC.
 - An OpenIdea event pump that converts `IdeEvent::Diagnostics` into a Zed
-  `DiagnosticSet` and calls `Buffer::update_diagnostics`.
+  `DiagnosticSet` and calls `Buffer::update_diagnostics`, with one stable Zed
+  language-server id per OpenIdea diagnostic producer.
 - Two `Editor` views can be constructed over the same `language::Buffer`
   (`Editor::for_buffer`), so the same-file multi-view requirement is structurally
   satisfied.
@@ -194,11 +197,11 @@ Diagnostics bridge test with an intentional TypeScript type error:
 POC_DIAGNOSTICS source=typescript-language-server count=2
 ```
 
-Two OpenIdea diagnostics were converted and applied to the Zed buffer. Visual
-underline rendering still needs GUI inspection; the POC currently maps every
-source to one synthetic language-server id, so multiple diagnostic producers
-will overwrite rather than merge until the final DiagnosticsBridge keeps a
-source-to-id map.
+Two OpenIdea diagnostics were converted and applied to the Zed buffer. At the
+time of that first test the POC mapped every source to one synthetic
+language-server id. The current code keeps a source-to-id map (see Phase 3
+additions below), so separate producers have separate Zed diagnostic sets.
+Visual underline rendering still needs GUI inspection.
 
 Multi-view test with two Zed editors over one Buffer:
 
@@ -223,16 +226,83 @@ patch when the Zed clock differs from the confirmed clock and keeps local text;
 that conflict path has not yet been exercised by an interactive test. Files
 outside the project root are not watched by this POC.
 
+## Phase 3 additions (2026-11-25)
+
+- `OpenIdeaSemanticsProvider` now maps
+  `ide_host::ops::lsp::lsp_document_highlights` into Zed `DocumentHighlight`s.
+- Diagnostics now use a stable source-to-`LanguageServerId` map, so separate
+  OpenIdea producers replace only their own Zed diagnostic set instead of
+  overwriting one synthetic `LanguageServerId(1)` set.
+- `OpenIdeaCompletionProvider` now supplies documentation, LSP source metadata,
+  completion resolve through `ide_host::ops::lsp::lsp_resolve_completion`,
+  `additionalTextEdits` (applied after accept through a confirm callback) and
+  commit-character data. Completion resolve is proven at the backend boundary;
+  the visual menu and post-accept edit path still need onscreen interaction.
+- `OpenIdeaCodeActionProvider` is installed through a minimal Zed fork entry
+  point, `Editor::set_code_action_provider`. It asks
+  `ide_host::ops::lsp::lsp_code_actions` for actions and applies a chosen action
+  through `lsp_apply_code_action`, keeping OpenIdea as the edit authority.
+- The POC has a headless Java/Maven end-to-end run mode using the same OpenIdea
+  Host, project, document and LSP services.
+
+Automated GPUI input test:
+
+```text
+test tests::editor_types_and_exposes_shared_buffer ... ok
+POC_TEST_TEXT first="hellostart\n" second="hellostart\n" buffer="hellostart\n"
+```
+
+The test creates two real Zed `Editor` views over one `language::Buffer` in two
+GPUI test windows, focuses the first editor, sends `h e l l o` through GPUI's
+`simulate_keystrokes`, and verifies that both editor snapshots and the shared
+buffer contain the inserted text.
+
+Java end-to-end evidence (small Maven project, managed `jdtls` 1.63.0):
+
+```text
+OPENIDEA_LSP jdtls Ready
+POC_LSP_HOVER "```java\nGreeter greeter - com.example.App.main(String[])\n```"
+POC_LSP_HIGHLIGHTS count=2
+POC_LSP_CODE_ACTIONS count=6
+POC_LSP_OK count=20
+POC_LSP_ITEM greet
+POC_LSP_RESOLVED equals documentation=true
+POC_LSP_RESOLVED greet documentation=false
+POC_RUN_CONFIG maven:package maven mvn package
+POC_RUN_OUTPUT ... Compiling 1 source file ...
+POC_RUN_OUTPUT ... BUILD SUCCESS ...
+POC_RUN_EXIT Some(0)
+```
+
+An unresolved `ArrayList` completion in a Java file without the import returned
+through the same resolve bridge as:
+
+```text
+POC_LSP_ITEM ArrayList
+POC_LSP_RESOLVED ArrayList documentation=true additional_edits=1
+```
+
+This proves that the OpenIdea completion item, its lazily resolved documentation
+and its import `additionalTextEdits` survive into the Zed completion object.
+Accepting the item in the visual menu and observing the post-accept import edit
+still requires the onscreen GUI acceptance noted below.
+
+The Java save path was also exercised through the actual Zed buffer:
+
+```text
+POC_SAVE_OK // rustidea java save marker 1795599999
+```
+
+The first line of
+`/tmp/rustidea-java-run/src/main/java/com/example/App.java` was the marker after
+the process exited, proving Zed buffer edit -> OpenIdea incremental edit ->
+OpenIdea Host save for Java. The Java project was then packaged successfully
+through the OpenIdea run service (`mvn package`, exit 0).
+
 ## Not yet done
 
 - License confirmation and the repository license change to
   GPL-3.0-or-later. No GPL release is produced from this branch.
-- Highlights provider wiring and multi-source diagnostics. Hover, same-file
-  and cross-file definitions, rename and
-  completion are wired; diagnostics already update the Zed buffer for one source.
-- Completion documentation, `additionalTextEdits`, commit characters and
-  completion resolve are not mapped yet.
-- Multi-source diagnostic merging (the POC uses one synthetic server id).
 - Replacing the existing RustIdea `Editor`/`DocumentBuffer` workbench entry with
   the Zed entity across tabs and splits.
 - Real window keyboard, Chinese IME, clipboard and visual verification on an
@@ -241,5 +311,9 @@ outside the project root are not watched by this POC.
 - External-change reload/conflict handling in the Zed Buffer path (the POC only
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
+- OpenIdea Agents, MCP, plugins, remote filesystem, notebook, database, HTTP,
+  debugger, terminal VT screen and the rest of the workbench UI are not yet
+  integrated into this Zed-hosted application. The POC only proves the editor,
+  document, LSP, run and save bridge.
 
 This document is a POC report, not a claim of OpenIdea parity.

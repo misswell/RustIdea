@@ -3,12 +3,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use editor::{CompletionContext, CompletionProvider, Editor};
-use gpui::{AppContext as _, Context, Entity, Task, Window};
+use gpui::{App, AppContext as _, Context, Entity, Task, Window};
 use language::{Anchor, Buffer, BufferSnapshot, CodeLabel};
-use project::{Completion, CompletionDisplayOptions, CompletionResponse, CompletionSource};
+use project::lsp_store::CompletionDocumentation;
+use project::{
+    Completion, CompletionDisplayOptions, CompletionIntent, CompletionResponse, CompletionSource,
+};
 use text::ToOffset;
 
 use crate::backend::OpenIdeaBridge;
+
+type CompletionConfirm = Arc<dyn Send + Sync + Fn(CompletionIntent, &mut Window, &mut App) -> bool>;
 
 /// Feeds Zed's own completions menu from the OpenIdea language-server service.
 pub struct OpenIdeaCompletionProvider {
@@ -21,6 +26,80 @@ impl OpenIdeaCompletionProvider {
     }
 }
 
+fn completion_documentation(
+    item: &ide_lsp::types::CompletionItem,
+) -> Option<CompletionDocumentation> {
+    item.documentation.as_ref().map(|markup| {
+        if markup.kind == "markdown" {
+            CompletionDocumentation::MultiLineMarkdown(markup.value.clone().into())
+        } else if markup.value.contains('\n') {
+            CompletionDocumentation::MultiLinePlainText(markup.value.clone().into())
+        } else {
+            CompletionDocumentation::SingleLine(markup.value.clone().into())
+        }
+    })
+}
+
+fn raw_lsp_completion(item: &ide_lsp::types::CompletionItem) -> lsp::CompletionItem {
+    lsp::CompletionItem {
+        label: item.label.clone(),
+        insert_text: Some(item.insert_text.clone()),
+        filter_text: item.filter_text.clone(),
+        detail: item.detail.clone(),
+        commit_characters: (!item.commit_characters.is_empty())
+            .then(|| item.commit_characters.clone()),
+        data: serde_json::to_value(item).ok(),
+        ..Default::default()
+    }
+}
+
+fn additional_edits_confirm(
+    buffer: Entity<Buffer>,
+    item: &ide_lsp::types::CompletionItem,
+    snapshot: &BufferSnapshot,
+) -> Option<CompletionConfirm> {
+    if item.additional_edits.is_empty() {
+        return None;
+    }
+    let additional_edits: Vec<(std::ops::Range<Anchor>, String)> = item
+        .additional_edits
+        .iter()
+        .map(|edit| {
+            let start = snapshot.point_utf16_to_offset(text::PointUtf16::new(
+                edit.range.start.line,
+                edit.range.start.col,
+            ));
+            let end = snapshot.point_utf16_to_offset(text::PointUtf16::new(
+                edit.range.end.line,
+                edit.range.end.col,
+            ));
+            (
+                snapshot.anchor_before(start)..snapshot.anchor_after(end),
+                edit.new_text.clone(),
+            )
+        })
+        .collect();
+    Some(Arc::new(
+        move |_intent: CompletionIntent, _window: &mut Window, cx: &mut App| {
+            let snapshot = buffer.read(cx).snapshot();
+            let edits = additional_edits
+                .iter()
+                .map(|(range, text)| {
+                    (
+                        range.start.to_offset(&snapshot)..range.end.to_offset(&snapshot),
+                        text.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            drop(snapshot);
+            buffer.update(cx, |buffer, cx| {
+                buffer.edit(edits, None, cx);
+            });
+            false
+        },
+    ))
+}
+
 impl CompletionProvider for OpenIdeaCompletionProvider {
     fn completions(
         &self,
@@ -31,12 +110,13 @@ impl CompletionProvider for OpenIdeaCompletionProvider {
         cx: &mut Context<Editor>,
     ) -> Task<anyhow::Result<Vec<CompletionResponse>>> {
         let backend = self.backend.clone();
+        let buffer_entity = buffer.clone();
         let snapshot = buffer.read(cx).snapshot();
         let byte = buffer_position.to_offset(&snapshot);
         let point = snapshot.offset_to_point_utf16(byte);
         let fallback_range = word_range_at(&snapshot, byte);
-        let line = point.row as u32;
-        let column = point.column as u32;
+        let line = point.row;
+        let column = point.column;
         cx.background_spawn(async move {
             let list = backend
                 .completion(line, column, None)
@@ -49,16 +129,18 @@ impl CompletionProvider for OpenIdeaCompletionProvider {
                     let new_text = if item.is_snippet {
                         ide_lsp::snippet_text(&item.insert_text)
                     } else {
-                        item.insert_text
+                        item.insert_text.clone()
                     };
                     let replace_range = match item.replace_range {
                         Some(range) => {
-                            let start = snapshot.point_utf16_to_offset(
-                                text::PointUtf16::new(range.start.line, range.start.col),
-                            );
-                            let end = snapshot.point_utf16_to_offset(
-                                text::PointUtf16::new(range.end.line, range.end.col),
-                            );
+                            let start = snapshot.point_utf16_to_offset(text::PointUtf16::new(
+                                range.start.line,
+                                range.start.col,
+                            ));
+                            let end = snapshot.point_utf16_to_offset(text::PointUtf16::new(
+                                range.end.line,
+                                range.end.col,
+                            ));
                             snapshot.anchor_before(start)..snapshot.anchor_after(end)
                         }
                         None => {
@@ -66,18 +148,27 @@ impl CompletionProvider for OpenIdeaCompletionProvider {
                                 ..snapshot.anchor_after(fallback_range.end)
                         }
                     };
+                    let documentation = completion_documentation(&item);
+                    let confirm = additional_edits_confirm(buffer_entity.clone(), &item, &snapshot);
+                    let lsp_completion = raw_lsp_completion(&item);
                     Completion {
                         replace_range,
                         new_text,
                         label: CodeLabel::plain(item.label, item.filter_text.as_deref()),
-                        documentation: None,
-                        source: CompletionSource::Custom,
+                        documentation,
+                        source: CompletionSource::Lsp {
+                            insert_range: None,
+                            server_id: lsp::LanguageServerId(item.server.0 as usize),
+                            lsp_completion: Box::new(lsp_completion),
+                            lsp_defaults: None,
+                            resolved: false,
+                        },
                         icon_path: None,
                         icon_color: None,
                         match_start: None,
                         snippet_deduplication_key: None,
                         insert_text_mode: None,
-                        confirm: None,
+                        confirm,
                         group: None,
                     }
                 })
@@ -93,12 +184,61 @@ impl CompletionProvider for OpenIdeaCompletionProvider {
 
     fn resolve_completions(
         &self,
-        _buffer: Entity<Buffer>,
-        _completion_indices: Vec<usize>,
-        _completions: Rc<RefCell<Box<[Completion]>>>,
-        _cx: &mut Context<Editor>,
+        buffer: Entity<Buffer>,
+        completion_indices: Vec<usize>,
+        completions: Rc<RefCell<Box<[Completion]>>>,
+        cx: &mut Context<Editor>,
     ) -> Task<anyhow::Result<bool>> {
-        Task::ready(Ok(false))
+        let backend = self.backend.clone();
+        cx.spawn(async move |_editor, cx| {
+            let mut resolved_any = false;
+            for index in completion_indices {
+                let item = {
+                    let guard = completions.borrow();
+                    let Some(completion) = guard.get(index) else {
+                        continue;
+                    };
+                    let CompletionSource::Lsp { lsp_completion, .. } = &completion.source else {
+                        continue;
+                    };
+                    let Some(data) = lsp_completion.data.clone() else {
+                        continue;
+                    };
+                    serde_json::from_value::<ide_lsp::types::CompletionItem>(data).ok()
+                };
+                let Some(item) = item else {
+                    continue;
+                };
+                let resolved = backend
+                    .resolve_completion(item)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                let snapshot = cx.read_entity(&buffer, |buffer, _| buffer.snapshot());
+                let new_text = if resolved.is_snippet {
+                    ide_lsp::snippet_text(&resolved.insert_text)
+                } else {
+                    resolved.insert_text.clone()
+                };
+                let documentation = completion_documentation(&resolved);
+                let confirm = additional_edits_confirm(buffer.clone(), &resolved, &snapshot);
+                let lsp_completion = raw_lsp_completion(&resolved);
+                let mut guard = completions.borrow_mut();
+                if let Some(completion) = guard.get_mut(index) {
+                    completion.new_text = new_text;
+                    completion.documentation = documentation;
+                    completion.confirm = confirm;
+                    completion.source = CompletionSource::Lsp {
+                        insert_range: None,
+                        server_id: lsp::LanguageServerId(resolved.server.0 as usize),
+                        lsp_completion: Box::new(lsp_completion),
+                        lsp_defaults: None,
+                        resolved: true,
+                    };
+                    resolved_any = true;
+                }
+            }
+            Ok(resolved_any)
+        })
     }
 
     fn is_completion_trigger(
