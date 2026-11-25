@@ -8216,7 +8216,13 @@ impl Workbench {
             );
             for (match_index, line) in file.matches.iter().take(20).enumerate() {
                 let path = file.path.0.clone();
-                let open_app = cx.entity();
+                let line_index = line.line;
+                let column = line.text_offset
+                    + line
+                        .ranges
+                        .first()
+                        .map(|(start, _)| *start)
+                        .unwrap_or_default();
                 let line_number = line.line + 1;
                 results = results.child(
                     div()
@@ -8231,11 +8237,9 @@ impl Workbench {
                         .text_color(theme.text)
                         .cursor_pointer()
                         .hover(|style| style.bg(theme.panel_alt))
-                        .on_click(move |_: &ClickEvent, _, cx| {
-                            open_app.update(cx, |app, cx| {
-                                app.open_path(path.clone(), cx);
-                            });
-                        })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_or_goto(path.clone(), line_index, column, window, cx);
+                        }))
                         .child(
                             div()
                                 .w(px(34.))
