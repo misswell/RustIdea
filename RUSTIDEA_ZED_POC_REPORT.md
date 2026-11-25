@@ -366,12 +366,14 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - Cmd-P opens a native quick-open overlay backed by
   `ops::nav::find_files`; typing re-queries the project index and clicking or
   submitting opens the selected file;
-- Cmd-Shift-P opens a native command palette with 33 commands covering file
+- Cmd-Shift-P opens a native command palette with 34 commands covering file
   save/close, splits, every sidebar and bottom panel, run/build/rebuild and
   backend refreshes; filtering is local and execution uses the same methods as
   the buttons;
 - Cmd-Shift-O opens Go to Symbol, backed by `ops::nav::find_symbols`; results
   show container/path and navigate to the symbol's file/line;
+- Alt-F7 / "Find usages at cursor" calls `ops::lsp::lsp_references` for the
+  active document position and shows a clickable usage list;
 - the bottom panel also has a Build tool window backed by
   `ops::build::build_model` / `ops::build::build_run`: it streams build
   `Started`, `Step`, `Output`, `Message` and `Progress` events and shows the
@@ -408,8 +410,9 @@ Panel coverage at this commit:
 |---|---|---|
 | Project tree | working | `ops::fs::read_dir` |
 | Quick Open (Cmd-P) | working | `ops::nav::find_files` |
-| Command Palette (Cmd-Shift-P) | working (33 commands) | local dispatch |
+| Command Palette (Cmd-Shift-P) | working (34 commands) | local dispatch |
 | Go to Symbol (Cmd-Shift-O) | working | `ops::nav::find_symbols` |
+| Find Usages (Alt-F7) | working | `ops::lsp::lsp_references` |
 | Find in Files | working | `ops::search` |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
@@ -516,6 +519,12 @@ Go-to-symbol smoke:
 
 ```text
 symbols=1 symbol_first="App · src/main/java/com/example/App.java"
+```
+
+Find-usages smoke on a Java helper:
+
+```text
+references=1 references_status=1 usages
 ```
 
 Settings smoke in an isolated config root:

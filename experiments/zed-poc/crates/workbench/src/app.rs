@@ -60,6 +60,7 @@ enum Command {
     ToggleSplit,
     QuickOpen,
     GoToSymbol,
+    FindUsages,
     ShowProject,
     ShowSearch,
     ShowGit,
@@ -91,12 +92,13 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 33] = [
+    const ALL: [Command; 34] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
         Command::QuickOpen,
         Command::GoToSymbol,
+        Command::FindUsages,
         Command::ShowProject,
         Command::ShowSearch,
         Command::ShowGit,
@@ -134,6 +136,7 @@ impl Command {
             Command::ToggleSplit => "Toggle split editor",
             Command::QuickOpen => "Quick open file",
             Command::GoToSymbol => "Go to symbol",
+            Command::FindUsages => "Find usages at cursor",
             Command::ShowProject => "Show Project",
             Command::ShowSearch => "Show Find in Files",
             Command::ShowGit => "Show Version Control",
@@ -505,6 +508,10 @@ pub struct Workbench {
     symbol_selected: usize,
     symbol_status: gpui::SharedString,
     _symbol_subscription: Subscription,
+    references_open: bool,
+    references: Vec<ide_core::Location>,
+    references_selected: usize,
+    references_status: gpui::SharedString,
     plugins: Vec<ide_host::plugins::PluginInfo>,
     plugins_status: gpui::SharedString,
     market_plugins: Vec<ide_host::plugins::MarketPlugin>,
@@ -925,6 +932,10 @@ impl Workbench {
             symbol_selected: 0,
             symbol_status: "Type a symbol name".into(),
             _symbol_subscription: symbol_subscription,
+            references_open: false,
+            references: Vec::new(),
+            references_selected: 0,
+            references_status: "Find usages at cursor".into(),
             plugins: Vec::new(),
             plugins_status: "Select PLUGINS to load installed plugins".into(),
             market_plugins: Vec::new(),
@@ -3114,6 +3125,52 @@ impl Workbench {
         );
     }
 
+    fn find_usages_at_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.active else {
+            self.references_status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let Some(editor) = self.editors.get(&(doc, false)).cloned() else {
+            self.references_status = "The active file has no editor".into();
+            cx.notify();
+            return;
+        };
+        let point = editor.update(cx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            editor.selections.newest_adjusted(&snapshot).head()
+        });
+        let pos = ide_core::Pos::new(point.row, point.column);
+        let host = self.host.clone();
+        self.references_open = true;
+        self.references.clear();
+        self.references_selected = 0;
+        self.references_status = "Finding usages…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.lsp_references(doc, pos).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(locations) => {
+                            app.references_status = format!("{} usages", locations.len()).into();
+                            app.references = locations;
+                        }
+                        Err(error) => {
+                            app.references_status =
+                                format!("Find usages failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn filtered_commands(&self) -> Vec<Command> {
         let query = self.command_palette_query.to_lowercase();
         Command::ALL
@@ -3173,6 +3230,7 @@ impl Workbench {
                 let focus = self.symbol_input.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
+            Command::FindUsages => self.find_usages_at_cursor(cx),
             Command::ShowProject => self.select_sidebar(SidebarMode::Project, cx),
             Command::ShowSearch => self.select_sidebar(SidebarMode::Search, cx),
             Command::ShowGit => self.select_sidebar(SidebarMode::Git, cx),
@@ -4090,6 +4148,27 @@ impl Workbench {
             .unwrap_or_default()
     }
 
+    pub fn smoke_find_usages(
+        &mut self,
+        line: u32,
+        column: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(doc) = self.active {
+            self.goto_position(doc, line, column, window, cx);
+        }
+        self.find_usages_at_cursor(cx);
+    }
+
+    pub fn reference_count(&self) -> usize {
+        self.references.len()
+    }
+
+    pub fn references_status(&self) -> &gpui::SharedString {
+        &self.references_status
+    }
+
     pub fn smoke_settings_toggle(&mut self, cx: &mut Context<Self>) {
         self.select_sidebar(SidebarMode::Settings, cx);
         let current = self.settings_data.editor.show_whitespace;
@@ -4722,6 +4801,98 @@ impl Workbench {
                     .text_size(px(9.5))
                     .text_color(theme.faint)
                     .child(self.symbol_status.clone()),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
+    fn render_references(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if !self.references_open {
+            return div().into_any_element();
+        }
+        let theme = self.theme;
+        let mut rows = div()
+            .id("references-list")
+            .flex_1()
+            .min_h(px(0.))
+            .max_h(px(360.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, location) in self.references.iter().take(200).enumerate() {
+            let selected = index == self.references_selected;
+            let path = location.path.0.clone();
+            let line = location.range.start.line;
+            let column = location.range.start.col;
+            let file = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            rows = rows.child(
+                div()
+                    .id(("reference", index))
+                    .h(px(24.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.5))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.references_selected = index;
+                        this.references_open = false;
+                        this.open_or_goto(path.clone(), line, column, window, cx);
+                    }))
+                    .child(format!("{file}:{}:{}", line + 1, column + 1)),
+            );
+        }
+        div()
+            .absolute()
+            .top(px(70.))
+            .left(px(280.))
+            .w(px(600.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .h(px(32.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .child(self.references_status.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("references-close")
+                            .text_size(px(10.))
+                            .text_color(theme.faint)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.references_open = false;
+                                cx.notify();
+                            }))
+                            .child("close"),
+                    ),
             )
             .child(rows)
             .into_any_element()
@@ -7858,6 +8029,7 @@ impl Render for Workbench {
         let quick_open = self.render_quick_open(cx);
         let command_palette = self.render_command_palette(cx);
         let symbol_search = self.render_symbol_search(cx);
+        let references = self.render_references(cx);
         let setting_editor = self.render_setting_editor(cx);
         let agent_form_answer = self.render_agent_form_answer(cx);
         let notebook_editor = self.render_notebook_editor(cx);
@@ -7895,6 +8067,9 @@ impl Render for Workbench {
                     this.toggle_symbol_search(window, cx);
                 }),
             )
+            .on_action(cx.listener(|this, _: &crate::FindUsages, _, cx| {
+                this.find_usages_at_cursor(cx);
+            }))
             .child(
                 div()
                     .flex_1()
@@ -7987,6 +8162,7 @@ impl Render for Workbench {
             .child(quick_open)
             .child(command_palette)
             .child(symbol_search)
+            .child(references)
             .child(setting_editor)
             .child(agent_form_answer)
             .child(notebook_editor)

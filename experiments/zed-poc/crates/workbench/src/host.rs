@@ -1002,6 +1002,30 @@ impl NativeHost {
         .await
     }
 
+    pub async fn lsp_references(
+        &self,
+        doc: DocId,
+        pos: ide_core::Pos,
+    ) -> IdeResult<Vec<ide_core::Location>> {
+        self.run(move |host| async move {
+            let partial = ide_host::ops::Channel::new(|_| {});
+            ide_host::ops::lsp::lsp_references(
+                &host,
+                MAIN_WINDOW,
+                ide_core::RequestId::next(),
+                doc,
+                pos,
+                true,
+                false,
+                false,
+                partial,
+            )
+            .await
+            .map(|references| references.locations)
+        })
+        .await
+    }
+
     pub async fn git_status(&self) -> IdeResult<Vec<ide_vcs::FileStatus>> {
         self.run(move |host| async move { ide_host::ops::vcs::status(&host, MAIN_WINDOW).await })
             .await

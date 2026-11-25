@@ -35,7 +35,8 @@ actions!(
         ToggleSplit,
         ToggleQuickOpen,
         ToggleCommandPalette,
-        ToggleSymbolSearch
+        ToggleSymbolSearch,
+        FindUsages
     ]
 );
 
@@ -121,6 +122,7 @@ fn main() {
                 KeyBinding::new("cmd-p", ToggleQuickOpen, None),
                 KeyBinding::new("cmd-shift-p", ToggleCommandPalette, None),
                 KeyBinding::new("cmd-shift-o", ToggleSymbolSearch, None),
+                KeyBinding::new("alt-f7", FindUsages, None),
             ]);
             {
                 use text_input::{
@@ -220,6 +222,7 @@ fn main() {
                 let smoke_command_execute =
                     std::env::var("RUSTIDEA_ZED_SMOKE_COMMAND_EXEC").ok();
                 let smoke_symbol = std::env::var("RUSTIDEA_ZED_SMOKE_SYMBOL").ok();
+                let smoke_usages = std::env::var("RUSTIDEA_ZED_SMOKE_USAGES").ok();
                 let smoke_settings =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_SETTINGS_TOGGLE").is_some();
                 let smoke_settings_string =
@@ -298,6 +301,13 @@ fn main() {
                                 if let Some(query) = &smoke_symbol {
                                     app.smoke_symbol_search(query.clone(), window, cx);
                                 }
+                                if let Some(position) = &smoke_usages
+                                    && let Some((line, column)) = position.split_once(':')
+                                    && let (Ok(line), Ok(column)) =
+                                        (line.parse(), column.parse())
+                                {
+                                    app.smoke_find_usages(line, column, window, cx);
+                                }
                                 if smoke_settings {
                                     app.smoke_settings_toggle(cx);
                                 }
@@ -319,7 +329,7 @@ fn main() {
                                 if let Some((line, column)) = completion_position {
                                     app.smoke_request_completion(line, column, cx);
                                 }
-                                if !smoke_notebook_edit {
+                                if !smoke_notebook_edit && smoke_usages.is_none() {
                                     app.smoke_insert_marker(&marker, cx);
                                 }
                             })
@@ -328,7 +338,7 @@ fn main() {
                                 .timer(std::time::Duration::from_secs(3))
                                 .await;
                             this.update_in(cx, |app, window, cx| {
-                                if !smoke_notebook_edit {
+                                if !smoke_notebook_edit && smoke_usages.is_none() {
                                     app.smoke_save_active(cx);
                                 }
                                 if smoke_notebook_edit {
@@ -347,7 +357,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} build_status={} build={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -392,6 +402,8 @@ fn main() {
                                     app.sidebar_mode_name(),
                                     app.symbol_count(),
                                     app.symbol_first(),
+                                    app.reference_count(),
+                                    app.references_status(),
                                     app.settings_row_count(),
                                     app.settings_whitespace(),
                                     app.settings_font_family(),
