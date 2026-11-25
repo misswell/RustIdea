@@ -352,7 +352,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   lists MCP status, and the dedicated MCP panel manages stdio servers through
   `mcp_list`/`mcp_save`/`mcp_remove`/`mcp_set_enabled`; permission entries
   render their option buttons and cancel action through
-  `ops::agent::respond`; Tools lists
+  `ops::agent::respond`; subagent entries open their own timeline with a back
+  action; Tools lists
   language-server/debug-adapter status through `ops::tools::tools_list` and can
   install a selected tool (86 tools on this machine);
 - Settings shows the effective OpenIDEA settings as a filterable, flattened
@@ -568,8 +569,8 @@ documents/project/sync/host: 24 passed; 0 failed
 - Process-tree memory/performance comparison and three-platform CI.
 - Plugin live UI contributions and per-capability consent UI, full debugger
   session UI, notebook cell editing, remote file editing (browsing/preview
-  exists), agent subagent drill-down/AskUserQuestion-form answers are not yet
-  integrated. MCP add/update/remove is wired for stdio servers; HTTP/SSE editing
+  exists), AskUserQuestion/form answers and live-subagent verification are not
+  yet integrated. MCP add/update/remove is wired for stdio servers; HTTP/SSE editing
   still lives in settings. Settings edits booleans and JSON scalars; structured
   list/map editors are missing. Database/HTTP have working execution paths but no
   source/request editors of their own. The Terminal now has a real VT screen

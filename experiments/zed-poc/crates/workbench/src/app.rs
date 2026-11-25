@@ -456,6 +456,8 @@ pub struct Workbench {
     agent_tasks: Vec<ide_agent::AgentTask>,
     agent_selected_task: Option<String>,
     agent_entries: HashMap<String, BTreeMap<u32, ide_agent::AgentEntry>>,
+    agent_subentries: HashMap<String, BTreeMap<u32, ide_agent::AgentEntry>>,
+    agent_viewing_subagent: Option<String>,
     agent_task_status: gpui::SharedString,
     mcp_servers: Vec<ide_agent::McpServer>,
     mcp_status: gpui::SharedString,
@@ -839,6 +841,8 @@ impl Workbench {
             agent_tasks: Vec::new(),
             agent_selected_task: None,
             agent_entries: HashMap::default(),
+            agent_subentries: HashMap::default(),
+            agent_viewing_subagent: None,
             agent_task_status: "No agent tasks".into(),
             mcp_servers: Vec::new(),
             mcp_status: "No MCP servers".into(),
@@ -1786,6 +1790,8 @@ impl Workbench {
             ide_agent::AgentEvent::Removed { id } => {
                 self.agent_tasks.retain(|task| task.id != id);
                 self.agent_entries.remove(&id);
+                self.agent_subentries.clear();
+                self.agent_viewing_subagent = None;
                 if self.agent_selected_task.as_deref() == Some(id.as_str()) {
                     self.agent_selected_task = self.agent_tasks.first().map(|task| task.id.clone());
                 }
@@ -1800,14 +1806,20 @@ impl Workbench {
                 subagent,
                 index,
                 entry,
-            } => {
-                if subagent.is_none() {
+            } => match subagent {
+                Some(subagent) => {
+                    self.agent_subentries
+                        .entry(subagent)
+                        .or_default()
+                        .insert(index, entry);
+                }
+                None => {
                     self.agent_entries
                         .entry(task)
                         .or_default()
                         .insert(index, entry);
                 }
-            }
+            },
             ide_agent::AgentEvent::Append {
                 task,
                 subagent,
@@ -1815,9 +1827,11 @@ impl Workbench {
                 from,
                 text,
             } => {
-                if subagent.is_none()
-                    && let Some(entry) = self.agent_entries.entry(task).or_default().get_mut(&index)
-                {
+                let entries = match subagent {
+                    Some(subagent) => self.agent_subentries.entry(subagent).or_default(),
+                    None => self.agent_entries.entry(task).or_default(),
+                };
+                if let Some(entry) = entries.get_mut(&index) {
                     append_agent_entry_text(entry, from, &text);
                 }
             }
@@ -5417,6 +5431,7 @@ impl Workbench {
                     .hover(|style| style.bg(theme.panel_alt))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.agent_selected_task = Some(task_id.clone());
+                        this.agent_viewing_subagent = None;
                         cx.notify();
                     }))
                     .child(div().truncate().child(task.title.clone()))
@@ -5476,9 +5491,32 @@ impl Workbench {
             .flex()
             .flex_col()
             .gap(px(4.));
-        if let Some(task_id) = &self.agent_selected_task
-            && let Some(entries) = self.agent_entries.get(task_id)
-        {
+        if self.agent_viewing_subagent.is_some() {
+            timeline = timeline.child(
+                div()
+                    .id("subagent-back")
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_size(px(9.5))
+                    .text_color(theme.muted)
+                    .bg(theme.panel_alt)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.agent_viewing_subagent = None;
+                        cx.notify();
+                    }))
+                    .child("← Back to task"),
+            );
+        }
+        let selected_entries = self.agent_selected_task.as_ref().map(|task_id| {
+            if let Some(subagent) = &self.agent_viewing_subagent {
+                (task_id.clone(), self.agent_subentries.get(subagent))
+            } else {
+                (task_id.clone(), self.agent_entries.get(task_id))
+            }
+        });
+        if let Some((task_id, Some(entries))) = selected_entries {
             let task_id = task_id.clone();
             for (_, entry) in entries.iter().take(500) {
                 let (role, text) = agent_entry_display(entry);
@@ -5554,6 +5592,35 @@ impl Workbench {
                             .child("Cancel"),
                     );
                     row = row.child(actions);
+                }
+                if let ide_agent::AgentEntry::Subagent {
+                    id,
+                    title,
+                    description,
+                    ..
+                } = entry
+                {
+                    let id = id.clone();
+                    let label = title
+                        .clone()
+                        .or_else(|| description.clone())
+                        .unwrap_or_else(|| "subagent".into());
+                    row = row.child(
+                        div()
+                            .id(SharedString::from(format!("open-subagent-{id}")))
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(theme.panel_alt)
+                            .text_size(px(9.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.agent_viewing_subagent = Some(id.clone());
+                                cx.notify();
+                            }))
+                            .child(format!("Open subagent · {label}")),
+                    );
                 }
                 timeline = timeline.child(row);
             }
