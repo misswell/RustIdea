@@ -82,6 +82,7 @@ enum LogcatEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Save,
+    SaveAs,
     CloseTab,
     ToggleSplit,
     QuickOpen,
@@ -133,8 +134,9 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 49] = [
+    const ALL: [Command; 50] = [
         Command::Save,
+        Command::SaveAs,
         Command::CloseTab,
         Command::ToggleSplit,
         Command::QuickOpen,
@@ -188,6 +190,7 @@ impl Command {
     fn label(self) -> &'static str {
         match self {
             Command::Save => "Save file",
+            Command::SaveAs => "Save a copy…",
             Command::CloseTab => "Close tab",
             Command::ToggleSplit => "Toggle split editor",
             Command::QuickOpen => "Quick open file",
@@ -604,6 +607,9 @@ pub struct Workbench {
     next_diagnostic_server: usize,
     theme: Theme,
     status: gpui::SharedString,
+    save_as: bool,
+    save_as_input: Entity<TextInput>,
+    _save_as_subscription: Subscription,
     diagnostics: HashMap<PathBuf, usize>,
     window_handle: Option<gpui::WindowHandle<Workbench>>,
     run_configs: Vec<ide_run::RunConfig>,
@@ -889,6 +895,24 @@ impl Workbench {
                 }
                 _ => {}
             });
+        let save_as_input = cx.new(|cx| {
+            TextInput::new(
+                "Save as path… (relative to the project root)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let save_as_subscription = cx.subscribe(&save_as_input, |app, _, event, cx| match event {
+            TextInputEvent::Submit(_) => app.perform_save_as(cx),
+            TextInputEvent::Cancel => {
+                app.save_as = false;
+                cx.notify();
+            }
+            _ => {}
+        });
         let git_message_input = cx.new(|cx| {
             TextInput::new(
                 "Commit message…",
@@ -1292,6 +1316,9 @@ impl Workbench {
             next_diagnostic_server: 1,
             theme,
             status: status.into(),
+            save_as: false,
+            save_as_input,
+            _save_as_subscription: save_as_subscription,
             diagnostics: HashMap::default(),
             window_handle,
             run_configs,
@@ -4243,6 +4270,7 @@ impl Workbench {
                     self.save_document(doc, cx);
                 }
             }
+            Command::SaveAs => self.open_save_as(window, cx),
             Command::CloseTab => {
                 if let Some(doc) = self.active {
                     self.close_tab(doc, cx);
@@ -4525,6 +4553,87 @@ impl Workbench {
                 .update(cx, |app, cx| {
                     app.running_run = None;
                     app.run_status = "Process finished".into();
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(doc) = self.active else {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let path = self
+            .documents
+            .get(&doc)
+            .map(|document| document.path.clone());
+        self.save_as_input.update(cx, |input, cx| {
+            input.set_content(
+                path.as_deref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                cx,
+            );
+        });
+        self.save_as = true;
+        let focus = self.save_as_input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn perform_save_as(&mut self, cx: &mut Context<Self>) {
+        if !self.save_as {
+            return;
+        }
+        let Some(doc) = self.active else {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let raw = self.save_as_input.read(cx).content().trim().to_owned();
+        if raw.is_empty() {
+            self.status = "Enter a save path".into();
+            cx.notify();
+            return;
+        }
+        let path = PathBuf::from(raw);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.root.join(path)
+        };
+        let Some(text) = self
+            .documents
+            .get(&doc)
+            .map(|document| document.buffer.read(cx).snapshot().text())
+        else {
+            return;
+        };
+        let host = self.host.clone();
+        self.save_as = false;
+        self.status = format!("Saving a copy as {}…", path.display()).into();
+        cx.spawn(async move |this, cx| {
+            let result = host.save_file_copy(path.clone(), text).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(()) => {
+                            eprintln!("WORKBENCH_SAVE_COPY ok path={}", path.display());
+                            app.record_recent_file(&path, cx);
+                            app.status = format!("Saved a copy as {}", path.display()).into();
+                        }
+                        Err(error) => {
+                            eprintln!("WORKBENCH_SAVE_COPY failed {}", error.message);
+                            app.status = format!("Save copy failed: {}", error.message).into();
+                        }
+                    }
                     cx.notify();
                     app.window_handle
                 })
@@ -6521,6 +6630,25 @@ impl Workbench {
             .unwrap_or_default()
     }
 
+    pub fn smoke_save_as(&mut self, path: String, cx: &mut Context<Self>) {
+        self.save_as_input.update(cx, |input, cx| {
+            input.set_content(path, cx);
+        });
+        self.save_as = true;
+        self.perform_save_as(cx);
+    }
+
+    pub fn active_path(&self) -> String {
+        self.active
+            .and_then(|doc| self.documents.get(&doc))
+            .map(|document| document.path.display().to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn status_text(&self) -> String {
+        self.status.to_string()
+    }
+
     pub fn smoke_has_language(&self, cx: &gpui::App) -> bool {
         self.active
             .and_then(|doc| self.documents.get(&doc))
@@ -6851,6 +6979,91 @@ impl Workbench {
                     .child(self.fast_open_status.clone()),
             )
             .child(results)
+            .into_any_element()
+    }
+
+    fn render_save_as(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if !self.save_as {
+            return div().into_any_element();
+        }
+        let theme = self.theme;
+        div()
+            .absolute()
+            .top(px(90.))
+            .left(px(360.))
+            .w(px(520.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(11.))
+                    .text_color(theme.text)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child("Save a copy"),
+            )
+            .child(
+                div()
+                    .h(px(34.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.save_as_input.clone()),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("save-as-confirm")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.perform_save_as(cx);
+                            }))
+                            .child("Save"),
+                    )
+                    .child(
+                        div()
+                            .id("save-as-cancel")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.save_as = false;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child("Enter saves · Esc cancels"),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -12726,6 +12939,7 @@ impl Render for Workbench {
         let tabs = self.render_tabs(cx).into_any_element();
         let run_panel = self.render_bottom_panel(window, cx);
         let quick_open = self.render_quick_open(cx);
+        let save_as = self.render_save_as(cx);
         let command_palette = self.render_command_palette(cx);
         let symbol_search = self.render_symbol_search(cx);
         let references = self.render_references(cx);
@@ -12744,6 +12958,9 @@ impl Render for Workbench {
                 if let Some(doc) = this.active {
                     this.save_document(doc, cx);
                 }
+            }))
+            .on_action(cx.listener(|this, _: &crate::SaveDocumentAs, window, cx| {
+                this.open_save_as(window, cx);
             }))
             .on_action(cx.listener(|this, _: &crate::CloseTab, _, cx| {
                 if let Some(doc) = this.active {
@@ -12862,6 +13079,7 @@ impl Render for Workbench {
                     )),
             )
             .child(quick_open)
+            .child(save_as)
             .child(command_palette)
             .child(symbol_search)
             .child(references)

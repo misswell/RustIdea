@@ -378,7 +378,7 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - Cmd-P opens a native quick-open overlay backed by
   `ops::nav::find_files`; typing re-queries the project index and clicking or
   submitting opens the selected file;
-- Cmd-Shift-P opens a native command palette with 49 commands covering file
+- Cmd-Shift-P opens a native command palette with 50 commands covering file
   save/close, splits, every sidebar and bottom panel, run/build/rebuild and
   backend refreshes; filtering is local and execution uses the same methods as
   the buttons;
@@ -428,7 +428,7 @@ Panel coverage at this commit:
 | Project tree | working | `ops::fs::read_dir` |
 | Quick Open (Cmd-P) | working | `ops::nav::find_files` |
 | Zed default macOS keymap | loaded (603 bindings) | `settings::KeymapFile` |
-| Command Palette (Cmd-Shift-P) | working (49 commands) | local dispatch |
+| Command Palette (Cmd-Shift-P) | working (50 commands) | local dispatch |
 | Go to Symbol (Cmd-Shift-O) | working | `ops::nav::find_symbols` |
 | Find Usages (Alt-F7) | working | `ops::lsp::lsp_references` |
 | Find in Files | regex/case/whole-word + navigation | `ops::search` |
@@ -445,6 +445,7 @@ Panel coverage at this commit:
 | Logcat | adb devices, streaming threadtime log, level/text filters | `adb` process |
 | Scratch | list/create/edit scratch files in the app data directory | local workspace + `ops::doc` |
 | Recent Files | per-project MRU list persisted in app config | local store |
+| Save a Copy | writes the active unsaved buffer text to a chosen path | `save_file_copy` |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
@@ -710,6 +711,13 @@ recent_files=1 recent_status=1 recent files
 recent_first="/private/tmp/rustidea-bookmark-smoke/src/main.rs"
 ```
 
+Save-a-copy smoke:
+
+```text
+WORKBENCH_SAVE_COPY ok path=/tmp/rustidea-saveas-smoke/copy.txt
+disk: copy.txt contains the active buffer text
+```
+
 Build smoke on the Maven project:
 
 ```text
@@ -769,7 +777,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent:
   missing. Logcat lists devices, streams and filters threadtime output, but the
   Android Studio query grammar, filter history and log export are missing. The
   Scratch panel lists and creates files, but the language chooser and template
-  shortcuts are missing. The Terminal now has a real VT screen
+  shortcuts are missing. Save As currently saves a copy: the OpenIDEA document
+  layer only supports re-keying untitled buffers, not renaming an existing file.
+  The Terminal now has a real VT screen
   and OpenIDEA PTY, but its mouse selection, hyperlinks, IME composition and
   resize path are not yet verified or complete (the IME input handler is
   wired, but locked-screen visual/IME verification is still unavailable).

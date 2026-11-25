@@ -38,6 +38,7 @@ actions!(
     rustidea_zed,
     [
         SaveDocument,
+        SaveDocumentAs,
         CloseTab,
         ToggleSplit,
         ToggleQuickOpen,
@@ -135,6 +136,7 @@ fn main() {
             }
             cx.bind_keys([
                 KeyBinding::new("cmd-s", SaveDocument, Some("Editor")),
+                KeyBinding::new("cmd-shift-s", SaveDocumentAs, None),
                 KeyBinding::new("cmd-w", CloseTab, None),
                 KeyBinding::new("cmd-\\", ToggleSplit, None),
                 KeyBinding::new("cmd-p", ToggleQuickOpen, None),
@@ -326,6 +328,7 @@ fn main() {
                 let smoke_logcat = std::env::var("RUSTIDEA_ZED_SMOKE_LOGCAT").ok();
                 let smoke_scratch = std::env::var("RUSTIDEA_ZED_SMOKE_SCRATCH").ok();
                 let smoke_recent = std::env::var_os("RUSTIDEA_ZED_SMOKE_RECENT").is_some();
+                let smoke_save_as = std::env::var("RUSTIDEA_ZED_SMOKE_SAVE_AS").ok();
                 let completion_position = std::env::var("RUSTIDEA_ZED_SMOKE_COMPLETION_POS")
                     .ok()
                     .and_then(|position| {
@@ -457,6 +460,9 @@ fn main() {
                                 if smoke_recent {
                                     app.smoke_recent(cx);
                                 }
+                                if let Some(path) = &smoke_save_as {
+                                    app.smoke_save_as(path.clone(), cx);
+                                }
                                 if let Some((line, column)) = completion_position {
                                     app.smoke_request_completion(line, column, cx);
                                 }
@@ -491,7 +497,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} bookmarks={} bookmark_status={} bookmark_first={:?} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} github_prs={} github_status={} github_first={:?} heap_classes={} heap_objects={} heap_status={} heap_first={:?} profile_methods={} profile_status={} profile_first={:?} logcat_lines={} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} bookmarks={} bookmark_status={} bookmark_first={:?} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} github_prs={} github_status={} github_first={:?} heap_classes={} heap_objects={} heap_status={} heap_first={:?} profile_methods={} profile_status={} profile_first={:?} logcat_lines={} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} active_path={} status={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -541,6 +547,8 @@ fn main() {
                                     app.recent_count(),
                                     app.recent_status_text(),
                                     app.recent_first(),
+                                    app.active_path(),
+                                    app.status_text(),
                                     app.terminal_status(),
                                     app.terminal_text(cx)
                                         .map(|text| {

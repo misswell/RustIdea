@@ -471,6 +471,23 @@ impl NativeHost {
         .await
     }
 
+    pub async fn save_file_copy(&self, path: PathBuf, text: String) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, text)?;
+                Ok::<_, std::io::Error>(())
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))
+        })
+        .await
+    }
+
     pub async fn highlights_async(
         &self,
         language: ide_core::LanguageId,
