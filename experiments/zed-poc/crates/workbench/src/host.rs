@@ -871,6 +871,18 @@ impl NativeHost {
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
 
+    pub async fn remote_write(&self, id: String, path: String, data: String) -> IdeResult<()> {
+        let host = self.host.clone();
+        self.runtime
+            .spawn(async move {
+                let session = host.ssh.session(&id).await?;
+                let fs = ide_ssh::filesystem::RemoteFs::new(session.sftp().await?);
+                fs.write(&path, data.as_bytes(), None).await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
     pub async fn notebook_open(&self, path: String) -> IdeResult<ide_notebook::NotebookSnapshot> {
         self.run(move |host| async move {
             ide_host::ops::notebook::open(&host, MAIN_WINDOW, path).await

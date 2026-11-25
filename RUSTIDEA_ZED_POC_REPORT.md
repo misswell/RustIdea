@@ -344,7 +344,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   selected request through `ide_http::run`, showing status, headers and body;
 - Remote lists OpenIDEA SSH configurations, opens a real SSH PTY-backed
   terminal through `ops::term::spawn_ssh`, and browses/previews remote files
-  over SFTP (`SshManager::session` + `RemoteFs::list/read`);
+  over SFTP (`SshManager::session` + `RemoteFs::list/read`); the preview opens
+  a Zed-Editor modal and writes changes back through `RemoteFs::write`;
 - Agents lists trusted OpenIDEA ACP providers (16 on this machine), subscribes
   to `AgentEvent`, shows task rows and an incremental conversation timeline
   (`Entry`/`Append`/`Truncated`), creates a local agent task from the prompt
@@ -410,7 +411,7 @@ Panel coverage at this commit:
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
 | Database | working (source/connect/query) | `ops::db` |
 | HTTP Client | working (parse/run/response) | `ide_http::run` |
-| Remote Host | working (SSH terminal, SFTP browse/preview) | `ops::term::spawn_ssh`, `SshManager` |
+| Remote Host | SSH terminal, SFTP browse/preview/edit | `ops::term::spawn_ssh`, `SshManager` |
 | Notebook | viewer + cell editor + save/run all | `ops::notebook` |
 | Agents | working (providers/tasks/timeline/prompt/cancel) | `ops::agent` |
 | MCP | list/toggle/add/update/remove stdio servers | `ops::agent::mcp_*` |
@@ -579,8 +580,9 @@ documents/project/sync/host: 24 passed; 0 failed
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
 - Plugin live UI contributions and per-capability consent UI, full debugger
-  session UI, notebook insert/delete/rich-output editing, remote file editing
-  (browsing/preview exists), structured question/form widgets and live subagent/form verification
+  session UI, notebook insert/delete/rich-output editing, live remote-write
+  verification (UI path exists), structured question/form widgets and live
+  subagent/form verification
   are not yet integrated. MCP add/update/remove is wired for stdio servers; HTTP/SSE editing
   still lives in settings. Settings edits booleans and JSON scalars; structured
   list/map editors are missing. Database/HTTP have working execution paths but no

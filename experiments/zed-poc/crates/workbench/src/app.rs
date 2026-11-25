@@ -446,6 +446,10 @@ pub struct Workbench {
     remote_path: Option<String>,
     remote_entries: Vec<ide_ssh::RemoteEntry>,
     remote_preview: String,
+    remote_preview_path: Option<String>,
+    remote_editor: Option<Entity<Editor>>,
+    remote_edit_buffer: Option<Entity<Buffer>>,
+    remote_edit_status: gpui::SharedString,
     remote_busy: bool,
     notebook: Option<ide_notebook::NotebookSnapshot>,
     notebook_status: gpui::SharedString,
@@ -858,6 +862,10 @@ impl Workbench {
             remote_path: None,
             remote_entries: Vec::new(),
             remote_preview: String::new(),
+            remote_preview_path: None,
+            remote_editor: None,
+            remote_edit_buffer: None,
+            remote_edit_status: "Edit remote file".into(),
             remote_busy: false,
             notebook: None,
             notebook_status: "Open a .ipynb file to view cells".into(),
@@ -1460,6 +1468,7 @@ impl Workbench {
         };
         let host = self.host.clone();
         let id = config.id.clone();
+        let path_for_app = path.clone();
         self.remote_busy = true;
         self.remote_status = format!("Reading {path}…").into();
         cx.spawn(async move |this, cx| {
@@ -1471,10 +1480,71 @@ impl Workbench {
                         Ok(text) => {
                             app.remote_status = format!("{} bytes", text.len()).into();
                             app.remote_preview = text;
+                            app.remote_preview_path = Some(path_for_app.clone());
                         }
                         Err(error) => {
                             app.remote_status =
                                 format!("Remote read failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_remote_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.remote_preview_path.clone() else {
+            self.remote_status = "Preview a remote file first".into();
+            cx.notify();
+            return;
+        };
+        let buffer = cx.new(|cx| Buffer::local(self.remote_preview.clone(), cx));
+        let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.remote_editor = Some(editor);
+        self.remote_edit_buffer = Some(buffer);
+        self.remote_edit_status = format!("Editing {path}").into();
+        cx.notify();
+    }
+
+    fn commit_remote_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.remote_preview_path.clone() else {
+            self.remote_editor = None;
+            return;
+        };
+        let Some(buffer) = self.remote_edit_buffer.take() else {
+            self.remote_editor = None;
+            return;
+        };
+        self.remote_editor = None;
+        let text = buffer.read(cx).snapshot().text();
+        let Some(config) = self.ssh_configs.get(self.ssh_selected).cloned() else {
+            self.remote_status = "No SSH configuration selected".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let id = config.id.clone();
+        self.remote_status = format!("Writing {path}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.remote_write(id, path.clone(), text.clone()).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(()) => {
+                            app.remote_status = format!("Saved {} bytes", text.len()).into();
+                            app.remote_preview = text;
+                        }
+                        Err(error) => {
+                            app.remote_status =
+                                format!("Remote write failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -4762,6 +4832,77 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_remote_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(editor) = &self.remote_editor else {
+            return div().into_any_element();
+        };
+        let theme = self.theme;
+        div()
+            .absolute()
+            .top(px(60.))
+            .left(px(220.))
+            .w(px(760.))
+            .h(px(520.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .text_size(px(10.5))
+                    .text_color(theme.muted)
+                    .child(self.remote_edit_status.clone()),
+            )
+            .child(div().flex_1().min_h(px(0.)).child(editor.clone()))
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("remote-edit-save")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.commit_remote_editor(cx);
+                            }))
+                            .child("Write remote file"),
+                    )
+                    .child(
+                        div()
+                            .id("remote-edit-cancel")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.remote_editor = None;
+                                this.remote_edit_buffer = None;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_notebook_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(editor) = &self.notebook_editor else {
             return div().into_any_element();
@@ -5422,6 +5563,23 @@ impl Workbench {
                             }))
                             .child("Browse"),
                     )
+                    .when(self.remote_preview_path.is_some(), |row| {
+                        row.child(
+                            div()
+                                .id("ssh-edit")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.))
+                                .text_color(theme.text)
+                                .bg(theme.accent_muted)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.open_remote_editor(window, cx);
+                                }))
+                                .child("Edit"),
+                        )
+                    })
                     .child(div().flex_1())
                     .child(
                         div()
@@ -7281,6 +7439,7 @@ impl Render for Workbench {
         let setting_editor = self.render_setting_editor(cx);
         let agent_form_answer = self.render_agent_form_answer(cx);
         let notebook_editor = self.render_notebook_editor(cx);
+        let remote_editor = self.render_remote_editor(cx);
         div()
             .size_full()
             .relative()
@@ -7409,6 +7568,7 @@ impl Render for Workbench {
             .child(setting_editor)
             .child(agent_form_answer)
             .child(notebook_editor)
+            .child(remote_editor)
     }
 }
 
