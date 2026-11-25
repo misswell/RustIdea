@@ -1201,6 +1201,14 @@ impl NativeHost {
         })
         .await
     }
+
+    pub async fn git_log(&self, query: ide_vcs::LogQuery) -> IdeResult<Vec<ide_vcs::Commit>> {
+        self.run(move |host| async move {
+            let project = host.project(MAIN_WINDOW)?;
+            project.with_repo_at(None, |repo| repo.log(&query))
+        })
+        .await
+    }
 }
 
 impl Drop for NativeHost {

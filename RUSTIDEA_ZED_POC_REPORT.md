@@ -343,8 +343,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   use the old text-only terminal stub or xterm.js; an `EntityInputHandler`
   marked-range path now forwards committed IME text and reports cursor bounds;
 - the sidebar is now a compact multi-panel workbench: Project, Search, TODO,
-  Dependencies, Coverage, Bookmarks, Git, Outline, Problems, Database, HTTP,
-  Remote, Notebook, MCP, Agents, Plugins, Tools and Settings;
+  Dependencies, Coverage, Bookmarks, Git, Git Log, Outline, Problems, Database,
+  HTTP, Remote, Notebook, MCP, Agents, Plugins, Tools and Settings;
 - Outline calls OpenIDEA's LSP/tree-sitter `doc_outline` and navigates
   selection; Problems aggregates real backend diagnostics and navigates to
   file/line;
@@ -377,7 +377,7 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - Cmd-P opens a native quick-open overlay backed by
   `ops::nav::find_files`; typing re-queries the project index and clicking or
   submitting opens the selected file;
-- Cmd-Shift-P opens a native command palette with 40 commands covering file
+- Cmd-Shift-P opens a native command palette with 41 commands covering file
   save/close, splits, every sidebar and bottom panel, run/build/rebuild and
   backend refreshes; filtering is local and execution uses the same methods as
   the buttons;
@@ -427,7 +427,7 @@ Panel coverage at this commit:
 | Project tree | working | `ops::fs::read_dir` |
 | Quick Open (Cmd-P) | working | `ops::nav::find_files` |
 | Zed default macOS keymap | loaded (603 bindings) | `settings::KeymapFile` |
-| Command Palette (Cmd-Shift-P) | working (40 commands) | local dispatch |
+| Command Palette (Cmd-Shift-P) | working (41 commands) | local dispatch |
 | Go to Symbol (Cmd-Shift-O) | working | `ops::nav::find_symbols` |
 | Find Usages (Alt-F7) | working | `ops::lsp::lsp_references` |
 | Find in Files | regex/case/whole-word + navigation | `ops::search` |
@@ -436,6 +436,7 @@ Panel coverage at this commit:
 | Dependencies | Maven/Gradle/sbt modules and libraries with filter | `ops::build::build_model` + `ide-build` |
 | Coverage | import lcov/JaCoCo/Go/SimpleCov reports, sort, per-file percentages, file navigation | `ops::coverage::coverage_import` |
 | Bookmarks | F3 toggle at caret, navigable list, remove, per-project JSON persistence | local store + navigation |
+| Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
@@ -641,6 +642,13 @@ Bookmark smoke (F3 on line 1, then a fresh process reloading the same config):
 ```text
 bookmarks=1 bookmark_first="/private/tmp/rustidea-bookmark-smoke/src/main.rs:1"
 bookmarks.json text="fn main() {"
+```
+
+Git Log smoke on this repository:
+
+```text
+git_log=74 git_log_status=74 commits
+git_log_first="afaf8374 experiment: add persistent bookmark tool window"
 ```
 
 Build smoke on the Maven project:

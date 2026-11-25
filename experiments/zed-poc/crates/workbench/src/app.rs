@@ -36,6 +36,7 @@ enum SidebarMode {
     Coverage,
     Bookmarks,
     Git,
+    GitLog,
     Outline,
     Problems,
     Database,
@@ -72,6 +73,7 @@ enum Command {
     ShowCoverage,
     ShowBookmarks,
     ShowGit,
+    ShowGitLog,
     ShowOutline,
     ShowProblems,
     ShowDatabase,
@@ -102,7 +104,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 40] = [
+    const ALL: [Command; 41] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -116,6 +118,7 @@ impl Command {
         Command::ShowCoverage,
         Command::ShowBookmarks,
         Command::ShowGit,
+        Command::ShowGitLog,
         Command::ShowOutline,
         Command::ShowProblems,
         Command::ShowDatabase,
@@ -160,6 +163,7 @@ impl Command {
             Command::ShowCoverage => "Show Coverage",
             Command::ShowBookmarks => "Show Bookmarks",
             Command::ShowGit => "Show Version Control",
+            Command::ShowGitLog => "Show Git Log",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
             Command::ShowDatabase => "Show Database",
@@ -560,6 +564,11 @@ pub struct Workbench {
     git_message_input: Entity<TextInput>,
     git_status_message: gpui::SharedString,
     _git_subscription: Subscription,
+    git_commits: Vec<ide_vcs::Commit>,
+    git_log_status: gpui::SharedString,
+    git_log_filter_input: Entity<TextInput>,
+    git_log_filter: String,
+    _git_log_filter_subscription: Subscription,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -767,6 +776,27 @@ impl Workbench {
                 app.commit_git(message.clone(), cx);
             }
         });
+        let git_log_filter_input = cx.new(|cx| {
+            TextInput::new(
+                "Filter commits by message or hash…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let git_log_filter_subscription =
+            cx.subscribe(&git_log_filter_input, |app, _, event, cx| match event {
+                TextInputEvent::Submit(filter) => {
+                    app.git_log_filter = filter.clone();
+                    app.refresh_git_log(cx);
+                }
+                TextInputEvent::Change(filter) => {
+                    app.git_log_filter = filter.clone();
+                }
+                _ => {}
+            });
         let agent_prompt_input = cx.new(|cx| {
             TextInput::new(
                 "Describe a task for the selected agent…",
@@ -1101,6 +1131,11 @@ impl Workbench {
             git_message_input,
             git_status_message: "Loading Git status…".into(),
             _git_subscription: git_subscription,
+            git_commits: Vec::new(),
+            git_log_status: "Open Git Log to load history".into(),
+            git_log_filter_input,
+            git_log_filter: String::new(),
+            _git_log_filter_subscription: git_log_filter_subscription,
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -1347,6 +1382,7 @@ impl Workbench {
                 self.settings_status = "Effective OpenIDEA settings".into();
             }
             SidebarMode::Git => self.refresh_git(cx),
+            SidebarMode::GitLog => self.refresh_git_log(cx),
             SidebarMode::Http => self.refresh_http(cx),
             SidebarMode::Database => self.refresh_db(cx),
             SidebarMode::Remote => self.refresh_remote(cx),
@@ -3972,6 +4008,7 @@ impl Workbench {
             Command::ShowCoverage => self.select_sidebar(SidebarMode::Coverage, cx),
             Command::ShowBookmarks => self.select_sidebar(SidebarMode::Bookmarks, cx),
             Command::ShowGit => self.select_sidebar(SidebarMode::Git, cx),
+            Command::ShowGitLog => self.select_sidebar(SidebarMode::GitLog, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
             Command::ShowDatabase => self.select_sidebar(SidebarMode::Database, cx),
@@ -4639,6 +4676,41 @@ impl Workbench {
         cx.notify();
     }
 
+    fn refresh_git_log(&mut self, cx: &mut Context<Self>) {
+        let filter = self.git_log_filter.trim().to_owned();
+        let query = ide_vcs::LogQuery {
+            text: (!filter.is_empty()).then_some(filter),
+            limit: 100,
+            ..Default::default()
+        };
+        let host = self.host.clone();
+        self.git_log_status = "Loading Git history…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.git_log(query).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(commits) => {
+                            app.git_log_status = format!("{} commits", commits.len()).into();
+                            app.git_commits = commits;
+                        }
+                        Err(error) => {
+                            app.git_commits.clear();
+                            app.git_log_status =
+                                format!("Git log failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn stage_all(&mut self, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = self
             .git_status
@@ -5058,6 +5130,7 @@ impl Workbench {
             SidebarMode::Coverage => "Coverage",
             SidebarMode::Bookmarks => "Bookmarks",
             SidebarMode::Git => "Git",
+            SidebarMode::GitLog => "Git Log",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
             SidebarMode::Database => "Database",
@@ -5382,6 +5455,25 @@ impl Workbench {
         self.git_branch
             .as_ref()
             .and_then(|branch| branch.head.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_git_log(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::GitLog, cx);
+    }
+
+    pub fn git_log_count(&self) -> usize {
+        self.git_commits.len()
+    }
+
+    pub fn git_log_status(&self) -> String {
+        self.git_log_status.to_string()
+    }
+
+    pub fn git_log_first(&self) -> String {
+        self.git_commits
+            .first()
+            .map(|commit| format!("{} {}", commit.short_id, commit.summary))
             .unwrap_or_default()
     }
 
@@ -8460,6 +8552,132 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_git_log(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("git-log")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.git_commits.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(if self.git_log_status.starts_with("Loading") {
+                        "Loading history…"
+                    } else {
+                        "No commits"
+                    }),
+            );
+        }
+        for (index, commit) in self.git_commits.iter().take(200).enumerate() {
+            let refs = if commit.refs.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", commit.refs.join(", "))
+            };
+            rows = rows.child(
+                div()
+                    .id(("git-log-row", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .text_color(theme.accent)
+                                    .child(commit.short_id.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.text)
+                                    .child(format!("{}{refs}", commit.summary)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child(commit.author.clone())
+                            .child(div().flex_1())
+                            .child(if commit.parents.len() > 1 {
+                                "merge"
+                            } else {
+                                ""
+                            }),
+                    ),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("git-log-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_git_log(cx);
+                            }))
+                            .child("Refresh"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.git_log_status.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.git_log_filter_input.clone()),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut results = div()
@@ -10039,6 +10257,7 @@ impl Render for Workbench {
         let coverage = self.render_coverage(cx);
         let bookmarks = self.render_bookmarks(cx);
         let git = self.render_git_panel(cx);
+        let git_log = self.render_git_log(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
         let settings = self.render_settings(cx);
@@ -10050,6 +10269,7 @@ impl Render for Workbench {
             SidebarMode::Coverage => coverage,
             SidebarMode::Bookmarks => bookmarks,
             SidebarMode::Git => git,
+            SidebarMode::GitLog => git_log,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
             SidebarMode::Settings => settings,
@@ -10070,6 +10290,7 @@ impl Render for Workbench {
             ("COV", SidebarMode::Coverage),
             ("BMK", SidebarMode::Bookmarks),
             ("GIT", SidebarMode::Git),
+            ("LOG", SidebarMode::GitLog),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
             ("DB", SidebarMode::Database),
