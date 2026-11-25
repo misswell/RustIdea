@@ -346,6 +346,25 @@ fn search_replace_targets(results: &[ide_search::FileMatches]) -> Vec<ide_search
         .collect()
 }
 
+fn build_search_query(
+    pattern: String,
+    regex: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+) -> ide_search::SearchQuery {
+    ide_search::SearchQuery {
+        pattern,
+        is_regex: regex,
+        case_sensitive,
+        whole_word,
+        include: Vec::new(),
+        exclude: Vec::new(),
+        scope: ide_search::SearchScope::Project,
+        max_matches: 10_000,
+        context: ide_search::SearchContext::Any,
+    }
+}
+
 fn utf16_prefix(text: &str, units: u32) -> String {
     let mut consumed = 0u32;
     let mut end = text.len();
@@ -507,6 +526,9 @@ pub struct Workbench {
     _search_replace_subscription: Subscription,
     search_preserve_case: bool,
     search_replacing: bool,
+    search_regex: bool,
+    search_case_sensitive: bool,
+    search_whole_word: bool,
     todo_items: Vec<crate::todo::TodoItem>,
     todo_status: gpui::SharedString,
     todo_case_sensitive: bool,
@@ -1038,6 +1060,9 @@ impl Workbench {
             _search_replace_subscription: search_replace_subscription,
             search_preserve_case: true,
             search_replacing: false,
+            search_regex: false,
+            search_case_sensitive: false,
+            search_whole_word: false,
             todo_items: Vec::new(),
             todo_status: "Open TODO to scan the project".into(),
             todo_case_sensitive: true,
@@ -4259,17 +4284,12 @@ impl Workbench {
         }
         self.search_results.clear();
         self.search_status = format!("Searching for {pattern}…").into();
-        let query = ide_search::SearchQuery {
+        let query = build_search_query(
             pattern,
-            is_regex: false,
-            case_sensitive: false,
-            whole_word: false,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            scope: ide_search::SearchScope::Project,
-            max_matches: 10_000,
-            context: ide_search::SearchContext::Any,
-        };
+            self.search_regex,
+            self.search_case_sensitive,
+            self.search_whole_word,
+        );
         let host = self.host.clone();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let emit: ide_host::ops::Emit<ide_host::ops::search::SearchEvent> =
@@ -4350,17 +4370,12 @@ impl Workbench {
         }
         let replacement = self.search_replacement.clone();
         let preserve_case = self.search_preserve_case;
-        let query = ide_search::SearchQuery {
-            pattern: pattern.clone(),
-            is_regex: false,
-            case_sensitive: false,
-            whole_word: false,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            scope: ide_search::SearchScope::Project,
-            max_matches: 10_000,
-            context: ide_search::SearchContext::Any,
-        };
+        let query = build_search_query(
+            pattern.clone(),
+            self.search_regex,
+            self.search_case_sensitive,
+            self.search_whole_word,
+        );
         let host = self.host.clone();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let events = ide_host::ops::Channel::new(move |event: ide_search::ReplaceEvent| {
@@ -8472,6 +8487,84 @@ impl Workbench {
                     )
                     .child(
                         div()
+                            .id("search-regex")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.search_regex {
+                                theme.text
+                            } else {
+                                theme.faint
+                            })
+                            .bg(if self.search_regex {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.search_regex = !this.search_regex;
+                                if !this.search_pattern.is_empty() {
+                                    this.start_search(this.search_pattern.clone(), cx);
+                                }
+                            }))
+                            .child(".*"),
+                    )
+                    .child(
+                        div()
+                            .id("search-case")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.search_case_sensitive {
+                                theme.text
+                            } else {
+                                theme.faint
+                            })
+                            .bg(if self.search_case_sensitive {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.search_case_sensitive = !this.search_case_sensitive;
+                                if !this.search_pattern.is_empty() {
+                                    this.start_search(this.search_pattern.clone(), cx);
+                                }
+                            }))
+                            .child("Aa"),
+                    )
+                    .child(
+                        div()
+                            .id("search-whole-word")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.search_whole_word {
+                                theme.text
+                            } else {
+                                theme.faint
+                            })
+                            .bg(if self.search_whole_word {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.search_whole_word = !this.search_whole_word;
+                                if !this.search_pattern.is_empty() {
+                                    this.start_search(this.search_pattern.clone(), cx);
+                                }
+                            }))
+                            .child("W"),
+                    )
+                    .child(
+                        div()
                             .id("search-preserve-case")
                             .px_2()
                             .py_1()
@@ -8492,7 +8585,7 @@ impl Workbench {
                                 this.search_preserve_case = !this.search_preserve_case;
                                 cx.notify();
                             }))
-                            .child("Preserve case"),
+                            .child("Preserve"),
                     )
                     .child(div().flex_1())
                     .child(
@@ -10028,5 +10121,15 @@ mod tests {
         assert_eq!(targets.len(), 1);
         let only = targets[0].only.as_ref().expect("selected matches");
         assert_eq!(only, &[ide_core::Pos::new(3, 2), ide_core::Pos::new(3, 10)]);
+    }
+
+    #[test]
+    fn search_query_honours_pattern_options() {
+        let query = build_search_query("TODO.*".into(), true, true, true);
+        assert!(query.is_regex);
+        assert!(query.case_sensitive);
+        assert!(query.whole_word);
+        assert_eq!(query.pattern, "TODO.*");
+        assert_eq!(query.max_matches, 10_000);
     }
 }

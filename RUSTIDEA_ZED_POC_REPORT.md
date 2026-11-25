@@ -320,7 +320,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - a native Run tool window lists OpenIDEA run configurations, starts/stops a
   run, streams stdout/stderr/system output and shows the exit status;
 - a native Find in Files panel uses the shared GPUI `TextInput` and the
-  OpenIDEA `ops::search` streaming engine, with clickable file/line results;
+  OpenIDEA `ops::search` streaming engine, with regex/case/whole-word toggles
+  and clickable file/line/column results;
 - the Find in Files panel also replaces every current match through
   `replace_in_files` (one undoable patch per file, open buffers updated,
   preserve-case option, cancellable backend request) and re-runs the search;
@@ -429,7 +430,7 @@ Panel coverage at this commit:
 | Command Palette (Cmd-Shift-P) | working (39 commands) | local dispatch |
 | Go to Symbol (Cmd-Shift-O) | working | `ops::nav::find_symbols` |
 | Find Usages (Alt-F7) | working | `ops::lsp::lsp_references` |
-| Find in Files | working | `ops::search` |
+| Find in Files | regex/case/whole-word + navigation | `ops::search` |
 | Replace in Files | working (all current matches, preserve case) | `ops::search::replace_in_files` |
 | TODO | working (comment scan/navigation/filters) | `ops::search` regex + comment context |
 | Dependencies | Maven/Gradle/sbt modules and libraries with filter | `ops::build::build_model` + `ide-build` |
@@ -657,7 +658,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo: 38 passed; 0 failed
+documents/project/sync/host/build/coverage/todo: 39 passed; 0 failed
 ```
 
 ## Not yet done
