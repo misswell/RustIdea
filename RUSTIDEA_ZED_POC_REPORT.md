@@ -377,6 +377,29 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   and the OpenIDEA Java outline query, because Zed's built-in language set does
   not include Java.
 
+Panel coverage at this commit:
+
+| Surface | State | Backend path |
+|---|---|---|
+| Project tree | working | `ops::fs::read_dir` |
+| Find in Files | working | `ops::search` |
+| Git / VCS | working | `ide-vcs` + `ops::vcs` |
+| Outline | working | `ops::doc::doc_outline` |
+| Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
+| Database | working (source/connect/query) | `ops::db` |
+| HTTP Client | working (parse/run/response) | `ide_http::run` |
+| Remote Host | working (SSH terminal, SFTP browse/preview) | `ops::term::spawn_ssh`, `SshManager` |
+| Notebook | read-only viewer + run all | `ops::notebook` |
+| Agents | working (providers/tasks/timeline/prompt/cancel) | `ops::agent` |
+| MCP | list/toggle only | `ops::agent::mcp_*` |
+| Tools | list/install | `ops::tools` |
+| Plugins | installed list + marketplace/preview/install | `PluginHost` |
+| Settings | read-only effective JSON | `ops::project::settings` |
+| Debug | attachable-process browse only | `ops::debug::debug_attachable_processes` |
+| Terminal | working VT screen | Zed `terminal` + `ops::term` |
+| Run | working | `ops::run` |
+| Build | working | `ops::build` |
+
 Headless split/search smoke (real native window, real OpenIDEA host, Java file):
 
 ```text
