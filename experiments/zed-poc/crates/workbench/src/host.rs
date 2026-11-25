@@ -898,6 +898,19 @@ impl NativeHost {
         .await
     }
 
+    pub async fn debug_evaluate(
+        &self,
+        session: ide_core::DebugSessionId,
+        frame_id: Option<i64>,
+        expression: String,
+    ) -> IdeResult<ide_dap::Variable> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_evaluate(&host, MAIN_WINDOW, session, frame_id, expression)
+                .await
+        })
+        .await
+    }
+
     pub async fn debug_resume(
         &self,
         session: ide_core::DebugSessionId,

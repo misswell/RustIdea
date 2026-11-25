@@ -397,7 +397,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   the active editor cursor through `debug_set_breakpoints` and shows returned
   verification states. On `Stopped`, the panel fetches stack frames, scopes
   and variables, supports frame selection, and exposes Resume/Pause/Step-Over;
-  Java/Unity attach configs and condition/logpoint editing are still pending.
+  an expression field evaluates in the selected frame through
+  `ops::debug::debug_evaluate`. Java/Unity attach configs and condition/logpoint
+  editing are still pending.
   No attachable process was visible to the scanner in the smoke environment;
 - Notebook opens the active `.ipynb` through `ops::notebook::open`, renders
   code/markdown cells and stored outputs, and runs all code cells through
@@ -436,7 +438,7 @@ Panel coverage at this commit:
 | Tools | list/install | `ops::tools` |
 | Plugins | installed list + marketplace/preview/install + optional-capability consent | `PluginHost` |
 | Settings | filter + boolean toggles + JSON value editor | `ops::project::settings` / `set_settings` |
-| Debug | attach/session console, line breakpoints, stack/scopes/variables, resume/pause/step (session runtime unverified) | `ops::debug` |
+| Debug | attach/session console, line breakpoints, stack/scopes/variables, evaluate, resume/pause/step (session runtime unverified) | `ops::debug` |
 | Terminal | working VT screen | Zed `terminal` + `ops::term` |
 | Run | working | `ops::run` |
 | Build | working | `ops::build` |

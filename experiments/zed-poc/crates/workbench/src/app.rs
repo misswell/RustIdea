@@ -535,6 +535,8 @@ pub struct Workbench {
     debug_frame_selected: usize,
     debug_scopes: Vec<ide_dap::Scope>,
     debug_variables: Vec<ide_dap::Variable>,
+    debug_eval_input: Entity<TextInput>,
+    _debug_eval_subscription: Subscription,
     debug_status: gpui::SharedString,
 }
 
@@ -634,6 +636,21 @@ impl Workbench {
                 }
                 _ => {}
             });
+        let debug_eval_input = cx.new(|cx| {
+            TextInput::new(
+                "Evaluate expression in the selected frame…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let debug_eval_subscription = cx.subscribe(&debug_eval_input, |app, _, event, cx| {
+            if let TextInputEvent::Submit(expression) = event {
+                app.evaluate_debug_expression(expression.clone(), cx);
+            }
+        });
         let mcp_name_input = cx.new(|cx| {
             TextInput::new(
                 "MCP server name",
@@ -967,6 +984,8 @@ impl Workbench {
             debug_frame_selected: 0,
             debug_scopes: Vec::new(),
             debug_variables: Vec::new(),
+            debug_eval_input,
+            _debug_eval_subscription: debug_eval_subscription,
             debug_status: "Select DEBUG to scan attachable processes".into(),
         };
         if let Some(document) = document {
@@ -3089,6 +3108,57 @@ impl Workbench {
             refresh_window(handle, cx);
         })
         .detach();
+    }
+
+    fn evaluate_debug_expression(&mut self, expression: String, cx: &mut Context<Self>) {
+        let Some(session) = self.debug_active_session else {
+            self.debug_status = "No active debug session".into();
+            cx.notify();
+            return;
+        };
+        let expression = expression.trim().to_owned();
+        if expression.is_empty() {
+            return;
+        }
+        let frame_id = self
+            .debug_frames
+            .get(self.debug_frame_selected)
+            .map(|frame| frame.id);
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .debug_evaluate(session, frame_id, expression.clone())
+                .await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(variable) => {
+                            app.debug_console.push_str(&format!(
+                                "> {expression}\n= {}{}\n",
+                                variable.value,
+                                variable
+                                    .type_name
+                                    .as_ref()
+                                    .map(|ty| format!(" : {ty}"))
+                                    .unwrap_or_default()
+                            ));
+                            app.debug_eval_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                        }
+                        Err(error) => {
+                            app.debug_status = format!("Evaluate failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
     }
 
     fn goto_position(
@@ -8006,6 +8076,13 @@ impl Workbench {
             .child(breakpoint_rows)
             .child(frame_rows)
             .child(variable_rows)
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .py_1()
+                    .child(self.debug_eval_input.clone()),
+            )
             .child(debug_console)
             .into_any_element();
         let body = match self.bottom_mode {
