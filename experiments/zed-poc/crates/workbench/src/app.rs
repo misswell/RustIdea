@@ -86,6 +86,7 @@ enum GitHubTab {
 enum AnalysisTab {
     Duplicates,
     Structural,
+    Inspect,
 }
 
 #[derive(Clone, Debug)]
@@ -765,6 +766,10 @@ pub struct Workbench {
     structural_status: gpui::SharedString,
     structural_busy: bool,
     _structural_subscriptions: Vec<Subscription>,
+    inspect_files: Vec<ide_host::ops::analysis::InspectedFile>,
+    inspect_summary: Option<ide_host::ops::analysis::InspectSummary>,
+    inspect_status: gpui::SharedString,
+    inspect_busy: bool,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -1546,6 +1551,10 @@ impl Workbench {
             structural_status: "Run a structural search to find syntax patterns".into(),
             structural_busy: false,
             _structural_subscriptions: structural_subscriptions,
+            inspect_files: Vec::new(),
+            inspect_summary: None,
+            inspect_status: "Run Inspect Code to collect backend diagnostics".into(),
+            inspect_busy: false,
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -5875,6 +5884,79 @@ impl Workbench {
         cx.notify();
     }
 
+    fn run_inspect_code(&mut self, cx: &mut Context<Self>) {
+        if self.inspect_busy {
+            return;
+        }
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let events =
+            ide_host::ops::Channel::new(move |event: ide_host::ops::analysis::InspectEvent| {
+                let _ = event_tx.send(event);
+            });
+        let host = self.host.clone();
+        self.inspect_busy = true;
+        self.inspect_files.clear();
+        self.inspect_summary = None;
+        self.inspect_status = "Inspecting project…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.inspect_code(events).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.inspect_busy = false;
+                    match result {
+                        Ok(()) => {
+                            let mut started = None;
+                            let mut summary = None;
+                            while let Ok(event) = event_rx.try_recv() {
+                                match event {
+                                    ide_host::ops::analysis::InspectEvent::Started { total } => {
+                                        started = Some(total)
+                                    }
+                                    ide_host::ops::analysis::InspectEvent::File {
+                                        file, ..
+                                    } => app.inspect_files.push(file),
+                                    ide_host::ops::analysis::InspectEvent::Done {
+                                        summary: done,
+                                    } => summary = Some(done),
+                                }
+                            }
+                            app.inspect_status = summary
+                                .as_ref()
+                                .map(|summary| {
+                                    format!(
+                                        "{} files · {} problems · {} skipped · {} failed · {} ms{}",
+                                        summary.files,
+                                        summary.problems,
+                                        summary.skipped,
+                                        summary.failed,
+                                        summary.elapsed_ms,
+                                        started
+                                            .map(|total| format!(" · scanned {total}"))
+                                            .unwrap_or_default()
+                                    )
+                                })
+                                .unwrap_or_else(|| "Inspect Code finished".into())
+                                .into();
+                            app.inspect_summary = summary;
+                        }
+                        Err(error) => {
+                            app.inspect_files.clear();
+                            app.inspect_summary = None;
+                            app.inspect_status =
+                                format!("Inspect Code failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn open_profile(&mut self, cx: &mut Context<Self>) {
         if self.profile_busy {
             return;
@@ -7202,6 +7284,34 @@ impl Workbench {
             .first()
             .and_then(|file| file.matches.first().map(|matched| (file, matched)))
             .map(|(file, matched)| format!("{}:{}", file.rel_path, matched.range.start.line + 1))
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_inspect(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Analysis, cx);
+        self.analysis_tab = AnalysisTab::Inspect;
+        self.run_inspect_code(cx);
+    }
+
+    pub fn inspect_diagnostic_count(&self) -> usize {
+        self.inspect_files
+            .iter()
+            .map(|file| file.diagnostics.len())
+            .sum()
+    }
+
+    pub fn inspect_status_text(&self) -> String {
+        self.inspect_status.to_string()
+    }
+
+    pub fn inspect_first(&self) -> String {
+        self.inspect_files
+            .iter()
+            .find_map(|file| {
+                file.diagnostics.first().map(|diagnostic| {
+                    format!("{}:{}", file.rel_path, diagnostic.range.start.line + 1)
+                })
+            })
             .unwrap_or_default()
     }
 
@@ -12330,8 +12440,10 @@ impl Workbench {
     }
 
     fn render_analysis(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        if self.analysis_tab == AnalysisTab::Structural {
-            return self.render_structural(cx);
+        match self.analysis_tab {
+            AnalysisTab::Structural => return self.render_structural(cx),
+            AnalysisTab::Inspect => return self.render_inspect(cx),
+            AnalysisTab::Duplicates => {}
         }
         let theme = self.theme;
         let mut rows = div()
@@ -12465,6 +12577,22 @@ impl Workbench {
                                 cx.notify();
                             }))
                             .child("Structural"),
+                    )
+                    .child(
+                        div()
+                            .id("analysis-tab-inspect")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.muted)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.analysis_tab = AnalysisTab::Inspect;
+                                cx.notify();
+                            }))
+                            .child("Inspect"),
                     )
                     .child(
                         div()
@@ -12659,6 +12787,22 @@ impl Workbench {
                     )
                     .child(
                         div()
+                            .id("analysis-tab-inspect")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.muted)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.analysis_tab = AnalysisTab::Inspect;
+                                cx.notify();
+                            }))
+                            .child("Inspect"),
+                    )
+                    .child(
+                        div()
                             .id("structural-run")
                             .px_2()
                             .py_1()
@@ -12712,6 +12856,175 @@ impl Workbench {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(self.structural_replacement_input.clone()),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
+    fn render_inspect(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("inspect-results")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.inspect_files.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(self.inspect_status.clone()),
+            );
+        }
+        for (file_index, file) in self.inspect_files.iter().take(200).enumerate() {
+            if file.diagnostics.is_empty() {
+                continue;
+            }
+            rows = rows.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .bg(theme.panel_alt)
+                    .text_size(px(9.5))
+                    .text_color(theme.accent)
+                    .child(format!("{} · {}", file.rel_path, file.diagnostics.len())),
+            );
+            for (diagnostic_index, diagnostic) in file.diagnostics.iter().take(50).enumerate() {
+                let path = file.path.0.clone();
+                let line = diagnostic.range.start.line;
+                let column = diagnostic.range.start.col;
+                let color = match diagnostic.severity {
+                    Severity::Error => theme.error,
+                    Severity::Warning => theme.warning,
+                    Severity::Info => theme.accent,
+                    Severity::Hint => theme.muted,
+                };
+                rows = rows.child(
+                    div()
+                        .id(("inspect-diagnostic", file_index * 100 + diagnostic_index))
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(9.5))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.panel_alt))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_or_goto(path.clone(), line, column, window, cx);
+                        }))
+                        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(color))
+                        .child(
+                            div()
+                                .w(px(30.))
+                                .text_size(px(8.5))
+                                .text_color(theme.faint)
+                                .child(format!("{}", line + 1)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_color(theme.muted)
+                                .child(diagnostic.message.clone()),
+                        ),
+                );
+            }
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("analysis-tab-duplicates")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.muted)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.analysis_tab = AnalysisTab::Duplicates;
+                                cx.notify();
+                            }))
+                            .child("Duplicates"),
+                    )
+                    .child(
+                        div()
+                            .id("analysis-tab-structural")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.muted)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.analysis_tab = AnalysisTab::Structural;
+                                cx.notify();
+                            }))
+                            .child("Structural"),
+                    )
+                    .child(
+                        div()
+                            .id("analysis-tab-inspect")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .child("Inspect"),
+                    )
+                    .child(
+                        div()
+                            .id("inspect-run")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(if self.inspect_busy {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.run_inspect_code(cx);
+                            }))
+                            .child(if self.inspect_busy {
+                                "Inspecting…"
+                            } else {
+                                "Inspect Code"
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.inspect_status.clone()),
+                    ),
             )
             .child(rows)
             .into_any_element()

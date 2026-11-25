@@ -1434,6 +1434,24 @@ impl NativeHost {
         .await
     }
 
+    pub async fn inspect_code(
+        &self,
+        on_event: ide_host::ops::Channel<ide_host::ops::analysis::InspectEvent>,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            ide_host::ops::analysis::inspect_code(
+                &host,
+                MAIN_WINDOW,
+                ide_core::RequestId::next(),
+                ide_search::SearchScope::Project,
+                on_event,
+            )
+            .await
+        })
+        .await
+    }
+
     pub async fn logcat_devices(&self) -> IdeResult<Vec<crate::logcat::LogcatDevice>> {
         self.run(move |host| async move {
             host.require_trust(MAIN_WINDOW)?;

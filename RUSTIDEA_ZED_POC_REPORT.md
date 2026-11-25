@@ -446,7 +446,7 @@ Panel coverage at this commit:
 | Scratch | list/create/edit scratch files in the app data directory | local workspace + `ops::doc` |
 | Recent Files | per-project MRU list persisted in app config | local store |
 | Save a Copy | writes the active unsaved buffer text to a chosen path | `save_file_copy` |
-| Analysis | Locate Duplicates + structural pattern search, clickable fragments | `ops::analysis::analysis_locate_duplicates`, `structural_search` |
+| Analysis | Locate Duplicates + structural search + Inspect Code | `ops::analysis` duplicates/structural/inspect |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
@@ -747,6 +747,13 @@ structural_matches=2 structural_status=2 matches in 2 files · 1 ms
 structural_first="src/main/java/com/example/DupA.java:34"
 ```
 
+Inspect Code smoke on a project with no language-server files (proves the scan
+event/summary path, not a diagnostic result):
+
+```text
+inspect_problems=0 inspect_status=0 files · 0 problems · 2 skipped · 0 failed · 8 ms · scanned 0
+```
+
 Build smoke on the Maven project:
 
 ```text
@@ -809,8 +816,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent:
   Scratch panel lists and creates files, but the language chooser and template
   shortcuts are missing. Save As currently saves a copy: the OpenIDEA document
   layer only supports re-keying untitled buffers, not renaming an existing file.
-  Analysis runs Locate Duplicates and structural search, but Inspect Code and
-  applying structural replacements are missing. The Terminal now has a real VT
+  Analysis runs Locate Duplicates, structural search and Inspect Code, but
+  applying structural replacements is missing and a Java diagnostic-producing
+  Inspect Code run is not yet smoke-verified. The Terminal now has a real VT
   screen
   and OpenIDEA PTY, but its mouse selection, hyperlinks, IME composition and
   resize path are not yet verified or complete (the IME input handler is
