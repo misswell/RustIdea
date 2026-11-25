@@ -229,6 +229,8 @@ fn main() {
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK").is_some();
                 let smoke_notebook_edit =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK_EDIT").is_some();
+                let smoke_notebook_add =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK_ADD").is_some();
                 let smoke_search = std::env::var("RUSTIDEA_ZED_SMOKE_SEARCH").ok();
                 let completion_position = std::env::var("RUSTIDEA_ZED_SMOKE_COMPLETION_POS")
                     .ok()
@@ -326,6 +328,9 @@ fn main() {
                                 }
                                 if smoke_notebook_edit {
                                     app.smoke_notebook_edit(window, cx);
+                                }
+                                if smoke_notebook_add {
+                                    app.smoke_notebook_add_markdown(cx);
                                 }
                             })
                             .ok();

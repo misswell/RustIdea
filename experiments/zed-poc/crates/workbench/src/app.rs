@@ -1706,6 +1706,86 @@ impl Workbench {
         cx.notify();
     }
 
+    fn apply_notebook_edit(
+        &mut self,
+        edit: ide_notebook::NotebookEdit,
+        status: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(notebook) = self.notebook.clone() else {
+            self.notebook_status = "Open a notebook first".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let id = notebook.id.clone();
+        let version = notebook.version;
+        self.notebook_status = status.into();
+        cx.spawn(async move |this, cx| {
+            let result = host.notebook_edit(id.clone(), version, edit).await;
+            let result = match result {
+                Ok(_) => host.notebook_save(id).await,
+                Err(error) => Err(error),
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(notebook) => {
+                            app.notebook_status =
+                                format!("Updated · version {}", notebook.version).into();
+                            app.notebook = Some(notebook);
+                        }
+                        Err(error) => {
+                            app.notebook_status =
+                                format!("Notebook update failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn add_notebook_cell(&mut self, cell_type: &str, cx: &mut Context<Self>) {
+        let after = self
+            .notebook
+            .as_ref()
+            .and_then(|notebook| notebook.cells.last())
+            .map(|cell| cell.id.clone());
+        self.apply_notebook_edit(
+            ide_notebook::NotebookEdit::InsertCell {
+                after,
+                cell_type: cell_type.to_owned(),
+            },
+            "Adding cell…",
+            cx,
+        );
+    }
+
+    fn delete_notebook_cell(&mut self, cell: String, cx: &mut Context<Self>) {
+        self.apply_notebook_edit(
+            ide_notebook::NotebookEdit::DeleteCell { cell },
+            "Deleting cell…",
+            cx,
+        );
+    }
+
+    fn set_notebook_cell_type(&mut self, cell: String, cell_type: &str, cx: &mut Context<Self>) {
+        self.apply_notebook_edit(
+            ide_notebook::NotebookEdit::SetCellType {
+                cell,
+                cell_type: cell_type.to_owned(),
+            },
+            "Changing cell type…",
+            cx,
+        );
+    }
+
     fn open_notebook_cell_editor(
         &mut self,
         cell: String,
@@ -3981,6 +4061,10 @@ impl Workbench {
             .unwrap_or_default()
     }
 
+    pub fn smoke_notebook_add_markdown(&mut self, cx: &mut Context<Self>) {
+        self.add_notebook_cell("markdown", cx);
+    }
+
     pub fn notebook_cell_count(&self) -> usize {
         self.notebook
             .as_ref()
@@ -5617,7 +5701,10 @@ impl Workbench {
             .flex_col();
         if let Some(notebook) = &self.notebook {
             for (index, cell) in notebook.cells.iter().take(500).enumerate() {
-                let cell_id = cell.id.clone();
+                let edit_id = cell.id.clone();
+                let type_id = cell.id.clone();
+                let delete_id = cell.id.clone();
+                let cell_type = cell.cell_type.clone();
                 let source = cell.source.clone();
                 let mut body = div()
                     .id(("notebook-cell", index))
@@ -5659,7 +5746,7 @@ impl Workbench {
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, window, cx| {
                                             this.open_notebook_cell_editor(
-                                                cell_id.clone(),
+                                                edit_id.clone(),
                                                 source.clone(),
                                                 window,
                                                 cx,
@@ -5667,6 +5754,35 @@ impl Workbench {
                                         },
                                     ))
                                     .child("Edit"),
+                            )
+                            .child(
+                                div()
+                                    .id(("notebook-type", index))
+                                    .px_1()
+                                    .text_size(px(9.))
+                                    .text_color(theme.muted)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        let other = if cell_type == "code" {
+                                            "markdown"
+                                        } else {
+                                            "code"
+                                        };
+                                        this.set_notebook_cell_type(type_id.clone(), other, cx);
+                                    }))
+                                    .child("type"),
+                            )
+                            .child(
+                                div()
+                                    .id(("notebook-delete", index))
+                                    .px_1()
+                                    .text_size(px(9.))
+                                    .text_color(theme.error)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.delete_notebook_cell(delete_id.clone(), cx);
+                                    }))
+                                    .child("delete"),
                             ),
                     )
                     .child(
@@ -5736,6 +5852,34 @@ impl Workbench {
                                 this.save_notebook(cx);
                             }))
                             .child("Save"),
+                    )
+                    .child(
+                        div()
+                            .id("notebook-add-code")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.add_notebook_cell("code", cx);
+                            }))
+                            .child("+ Code"),
+                    )
+                    .child(
+                        div()
+                            .id("notebook-add-markdown")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.add_notebook_cell("markdown", cx);
+                            }))
+                            .child("+ Markdown"),
                     )
                     .child(div().flex_1())
                     .child(
