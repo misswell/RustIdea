@@ -1311,6 +1311,32 @@ impl NativeHost {
         })
         .await
     }
+
+    pub async fn logcat_devices(&self) -> IdeResult<Vec<crate::logcat::LogcatDevice>> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(crate::logcat::list_devices)
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+                .map_err(ide_core::IdeError::unavailable)
+        })
+        .await
+    }
+
+    pub async fn logcat_stream(
+        &self,
+        serial: String,
+        on_line: ide_host::ops::Emit<crate::logcat::LogcatLine>,
+        cancel: ide_core::CancellationToken,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            crate::logcat::stream_device(serial, move |line| on_line(line), cancel)
+                .await
+                .map_err(ide_core::IdeError::unavailable)
+        })
+        .await
+    }
 }
 
 impl Drop for NativeHost {

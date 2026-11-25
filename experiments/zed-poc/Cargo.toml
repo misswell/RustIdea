@@ -33,7 +33,7 @@ settings = { path = "../../third_party/zed/crates/settings" }
 text = { path = "../../third_party/zed/crates/text" }
 theme = { path = "../../third_party/zed/crates/theme" }
 theme_settings = { path = "../../third_party/zed/crates/theme_settings" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 util = { path = "../../third_party/zed/crates/util", features = ["debug-embed"] }

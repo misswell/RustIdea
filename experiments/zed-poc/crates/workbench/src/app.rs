@@ -41,6 +41,7 @@ enum SidebarMode {
     GitHub,
     Heap,
     Profiler,
+    Logcat,
     Outline,
     Problems,
     Database,
@@ -70,6 +71,12 @@ enum DockerTab {
     Networks,
 }
 
+#[derive(Clone, Debug)]
+enum LogcatEvent {
+    Line(crate::logcat::LogcatLine),
+    Finished(Result<(), String>),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Save,
@@ -90,6 +97,7 @@ enum Command {
     ShowGitHub,
     ShowHeap,
     ShowProfiler,
+    ShowLogcat,
     ShowOutline,
     ShowProblems,
     ShowDatabase,
@@ -120,7 +128,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 45] = [
+    const ALL: [Command; 46] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -139,6 +147,7 @@ impl Command {
         Command::ShowGitHub,
         Command::ShowHeap,
         Command::ShowProfiler,
+        Command::ShowLogcat,
         Command::ShowOutline,
         Command::ShowProblems,
         Command::ShowDatabase,
@@ -188,6 +197,7 @@ impl Command {
             Command::ShowGitHub => "Show GitHub Pull Requests",
             Command::ShowHeap => "Show Heap Snapshot",
             Command::ShowProfiler => "Show CPU Profile",
+            Command::ShowLogcat => "Show Logcat",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
             Command::ShowDatabase => "Show Database",
@@ -412,6 +422,14 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn short_log_time(time: &str) -> &str {
+    if time.len() > 12 {
+        &time[time.len() - 12..]
+    } else {
+        time
+    }
+}
+
 fn utf16_prefix(text: &str, units: u32) -> String {
     let mut consumed = 0u32;
     let mut end = text.len();
@@ -628,6 +646,17 @@ pub struct Workbench {
     profile_status: gpui::SharedString,
     profile_busy: bool,
     _profile_input_subscription: Subscription,
+    logcat_devices: Vec<crate::logcat::LogcatDevice>,
+    logcat_lines: Vec<crate::logcat::LogcatLine>,
+    logcat_status: gpui::SharedString,
+    logcat_device_input: Entity<TextInput>,
+    logcat_filter_input: Entity<TextInput>,
+    logcat_filter: String,
+    logcat_level: crate::logcat::LogLevel,
+    logcat_cancel: Option<ide_core::CancellationToken>,
+    logcat_busy: bool,
+    _logcat_device_subscription: Subscription,
+    _logcat_filter_subscription: Subscription,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -1133,6 +1162,37 @@ impl Workbench {
                 app.open_profile(cx);
             }
         });
+        let logcat_device_input = cx.new(|cx| {
+            TextInput::new(
+                "Device serial (leave empty for the first online device)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let logcat_device_subscription = cx.subscribe(&logcat_device_input, |app, _, event, cx| {
+            if let TextInputEvent::Submit(_) = event {
+                app.start_logcat(cx);
+            }
+        });
+        let logcat_filter_input = cx.new(|cx| {
+            TextInput::new(
+                "Filter log text or tag…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let logcat_filter_subscription = cx.subscribe(&logcat_filter_input, |app, _, event, cx| {
+            if let TextInputEvent::Change(filter) = event {
+                app.logcat_filter = filter.clone();
+                cx.notify();
+            }
+        });
         let setting_edit_input = cx.new(|cx| {
             TextInput::new(
                 "Setting value",
@@ -1245,6 +1305,17 @@ impl Workbench {
             profile_status: "Import a folder of .cpuprofile files".into(),
             profile_busy: false,
             _profile_input_subscription: profile_input_subscription,
+            logcat_devices: Vec::new(),
+            logcat_lines: Vec::new(),
+            logcat_status: "Open Logcat to list devices".into(),
+            logcat_device_input,
+            logcat_filter_input,
+            logcat_filter: String::new(),
+            logcat_level: crate::logcat::LogLevel::Verbose,
+            logcat_cancel: None,
+            logcat_busy: false,
+            _logcat_device_subscription: logcat_device_subscription,
+            _logcat_filter_subscription: logcat_filter_subscription,
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -1494,6 +1565,7 @@ impl Workbench {
             SidebarMode::GitLog => self.refresh_git_log(cx),
             SidebarMode::Services => self.refresh_docker(cx),
             SidebarMode::GitHub => self.refresh_github(cx),
+            SidebarMode::Logcat => self.refresh_logcat_devices(cx),
             SidebarMode::Http => self.refresh_http(cx),
             SidebarMode::Database => self.refresh_db(cx),
             SidebarMode::Remote => self.refresh_remote(cx),
@@ -4124,6 +4196,7 @@ impl Workbench {
             Command::ShowGitHub => self.select_sidebar(SidebarMode::GitHub, cx),
             Command::ShowHeap => self.select_sidebar(SidebarMode::Heap, cx),
             Command::ShowProfiler => self.select_sidebar(SidebarMode::Profiler, cx),
+            Command::ShowLogcat => self.select_sidebar(SidebarMode::Logcat, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
             Command::ShowDatabase => self.select_sidebar(SidebarMode::Database, cx),
@@ -5209,6 +5282,126 @@ impl Workbench {
         cx.notify();
     }
 
+    fn refresh_logcat_devices(&mut self, cx: &mut Context<Self>) {
+        self.logcat_status = "Listing Android devices…".into();
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.logcat_devices().await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(devices) => {
+                            app.logcat_status = if devices.is_empty() {
+                                "No Android devices".into()
+                            } else {
+                                format!("{} Android devices", devices.len()).into()
+                            };
+                            app.logcat_devices = devices;
+                        }
+                        Err(error) => {
+                            app.logcat_devices.clear();
+                            app.logcat_status =
+                                format!("adb devices failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn start_logcat(&mut self, cx: &mut Context<Self>) {
+        if self.logcat_busy {
+            return;
+        }
+        let requested = self
+            .logcat_device_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let serial = if requested.is_empty() {
+            self.logcat_devices
+                .iter()
+                .find(|device| device.state == "device")
+                .map(|device| device.serial.clone())
+        } else {
+            Some(requested)
+        };
+        let Some(serial) = serial else {
+            self.logcat_status = "Select an online Android device".into();
+            cx.notify();
+            return;
+        };
+        let cancel = ide_core::CancellationToken::new();
+        self.logcat_cancel = Some(cancel.clone());
+        self.logcat_busy = true;
+        self.logcat_lines.clear();
+        self.logcat_status = format!("Streaming logcat from {serial}…").into();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LogcatEvent>();
+        let producer = event_tx.clone();
+        let host = self.host.clone();
+        cx.spawn(async move |_, _| {
+            let on_line: ide_host::ops::Emit<crate::logcat::LogcatLine> = Arc::new(move |line| {
+                let _ = producer.send(LogcatEvent::Line(line));
+            });
+            let result = host
+                .logcat_stream(serial, on_line, cancel)
+                .await
+                .map_err(|error| error.message);
+            let _ = event_tx.send(LogcatEvent::Finished(result));
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = event_rx.recv().await {
+                let handle = this
+                    .update(cx, |app, cx| {
+                        match event {
+                            LogcatEvent::Line(line) => {
+                                app.logcat_lines.push(line);
+                                if app.logcat_lines.len() > 5_000 {
+                                    app.logcat_lines.drain(..1_000);
+                                }
+                                app.logcat_status =
+                                    format!("{} log lines", app.logcat_lines.len()).into();
+                            }
+                            LogcatEvent::Finished(result) => {
+                                app.logcat_busy = false;
+                                app.logcat_cancel = None;
+                                app.logcat_status = match result {
+                                    Ok(()) => {
+                                        format!("logcat stopped · {} lines", app.logcat_lines.len())
+                                            .into()
+                                    }
+                                    Err(error) => format!("logcat stopped: {error}").into(),
+                                };
+                            }
+                        }
+                        cx.notify();
+                        app.window_handle
+                    })
+                    .ok()
+                    .flatten();
+                refresh_window(handle, cx);
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn stop_logcat(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = self.logcat_cancel.take() {
+            cancel.cancel();
+            self.logcat_status = "Stopping logcat…".into();
+            cx.notify();
+        }
+    }
+
     fn stage_all(&mut self, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = self
             .git_status
@@ -5633,6 +5826,7 @@ impl Workbench {
             SidebarMode::GitHub => "GitHub",
             SidebarMode::Heap => "Heap",
             SidebarMode::Profiler => "Profiler",
+            SidebarMode::Logcat => "Logcat",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
             SidebarMode::Database => "Database",
@@ -6092,6 +6286,31 @@ impl Workbench {
                     .and_then(|method| profile.frames.get(method.frame as usize))
             })
             .map(|frame| frame.name.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_logcat(&mut self, serial: String, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Logcat, cx);
+        if !serial.is_empty() {
+            self.logcat_device_input.update(cx, |input, cx| {
+                input.set_content(serial, cx);
+            });
+        }
+        self.start_logcat(cx);
+    }
+
+    pub fn logcat_line_count(&self) -> usize {
+        self.logcat_lines.len()
+    }
+
+    pub fn logcat_status_text(&self) -> String {
+        self.logcat_status.to_string()
+    }
+
+    pub fn logcat_first_line(&self) -> String {
+        self.logcat_lines
+            .first()
+            .map(|line| format!("{} {}: {}", line.level.letter(), line.tag, line.message))
             .unwrap_or_default()
     }
 
@@ -10158,6 +10377,264 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_logcat(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let filter = self.logcat_filter.to_lowercase();
+        let mut device_rows = div()
+            .id("logcat-devices")
+            .flex_none()
+            .max_h(px(90.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, device) in self.logcat_devices.iter().take(50).enumerate() {
+            let serial = device.serial.clone();
+            let label = device
+                .model
+                .as_ref()
+                .map(|model| format!("{model} ({})", device.serial))
+                .unwrap_or_else(|| device.serial.clone());
+            device_rows = device_rows.child(
+                div()
+                    .id(("logcat-device", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(9.5))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.logcat_device_input.update(cx, |input, cx| {
+                            input.set_content(serial.clone(), cx);
+                        });
+                        cx.notify();
+                    }))
+                    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(
+                        if device.state == "device" {
+                            theme.accent
+                        } else {
+                            theme.faint
+                        },
+                    ))
+                    .child(div().flex_1().truncate().child(label))
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child(device.state.clone()),
+                    ),
+            );
+        }
+        let mut rows = div()
+            .id("logcat-lines")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.logcat_lines.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(self.logcat_status.clone()),
+            );
+        }
+        for (index, line) in self.logcat_lines.iter().enumerate() {
+            if line.level < self.logcat_level {
+                continue;
+            }
+            if !filter.is_empty()
+                && !line.message.to_lowercase().contains(&filter)
+                && !line.tag.to_lowercase().contains(&filter)
+            {
+                continue;
+            }
+            if index >= 1_000 {
+                break;
+            }
+            let color = match line.level {
+                crate::logcat::LogLevel::Verbose => theme.faint,
+                crate::logcat::LogLevel::Debug => theme.muted,
+                crate::logcat::LogLevel::Info => theme.text,
+                crate::logcat::LogLevel::Warn => theme.warning,
+                crate::logcat::LogLevel::Error | crate::logcat::LogLevel::Fatal => theme.error,
+                crate::logcat::LogLevel::Unknown => theme.muted,
+            };
+            rows = rows.child(
+                div()
+                    .id(("logcat-line", index))
+                    .px_2()
+                    .py(px(1.))
+                    .flex()
+                    .items_start()
+                    .gap_1()
+                    .font_family("Menlo")
+                    .text_size(px(9.5))
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .child(
+                        div()
+                            .w(px(66.))
+                            .flex_none()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child(short_log_time(&line.time).to_owned()),
+                    )
+                    .child(
+                        div()
+                            .w(px(8.))
+                            .flex_none()
+                            .text_color(color)
+                            .child(line.level.letter().to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(theme.accent)
+                                    .child(line.tag.clone()),
+                            )
+                            .child(div().text_color(theme.text).child(line.message.clone())),
+                    ),
+            );
+        }
+        let levels = [
+            crate::logcat::LogLevel::Verbose,
+            crate::logcat::LogLevel::Debug,
+            crate::logcat::LogLevel::Info,
+            crate::logcat::LogLevel::Warn,
+            crate::logcat::LogLevel::Error,
+        ];
+        let mut level_row = div().flex().items_center().gap(px(2.));
+        for (index, level) in levels.into_iter().enumerate() {
+            let selected = self.logcat_level == level;
+            level_row = level_row.child(
+                div()
+                    .id(("logcat-level", index))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_size(px(8.5))
+                    .text_color(if selected { theme.text } else { theme.faint })
+                    .bg(if selected {
+                        theme.accent_muted
+                    } else {
+                        theme.panel_alt
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.logcat_level = level;
+                        cx.notify();
+                    }))
+                    .child(level.letter().to_string()),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("logcat-start")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.logcat_busy {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.start_logcat(cx);
+                            }))
+                            .child(if self.logcat_busy {
+                                "Streaming…"
+                            } else {
+                                "Start"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("logcat-stop")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(theme.error)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.stop_logcat(cx);
+                            }))
+                            .child("Stop"),
+                    )
+                    .child(
+                        div()
+                            .id("logcat-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_logcat_devices(cx);
+                            }))
+                            .child("Devices"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.logcat_status.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.logcat_device_input.clone()),
+            )
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(self.logcat_filter_input.clone()))
+                    .child(level_row),
+            )
+            .child(device_rows)
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut results = div()
@@ -11742,6 +12219,7 @@ impl Render for Workbench {
         let github = self.render_github(cx);
         let heap = self.render_heap(cx);
         let profiler = self.render_profiler(cx);
+        let logcat = self.render_logcat(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
         let settings = self.render_settings(cx);
@@ -11758,6 +12236,7 @@ impl Render for Workbench {
             SidebarMode::GitHub => github,
             SidebarMode::Heap => heap,
             SidebarMode::Profiler => profiler,
+            SidebarMode::Logcat => logcat,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
             SidebarMode::Settings => settings,
@@ -11783,6 +12262,7 @@ impl Render for Workbench {
             ("GH", SidebarMode::GitHub),
             ("HEAP", SidebarMode::Heap),
             ("PROF", SidebarMode::Profiler),
+            ("LOGCAT", SidebarMode::Logcat),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
             ("DB", SidebarMode::Database),

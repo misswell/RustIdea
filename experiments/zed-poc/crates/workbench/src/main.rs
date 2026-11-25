@@ -10,6 +10,7 @@ mod coverage;
 mod documents;
 mod host;
 mod java;
+mod logcat;
 mod lsp;
 mod project;
 mod semantics;
@@ -320,6 +321,7 @@ fn main() {
                 let smoke_github = std::env::var_os("RUSTIDEA_ZED_SMOKE_GITHUB").is_some();
                 let smoke_heap = std::env::var("RUSTIDEA_ZED_SMOKE_HEAP").ok();
                 let smoke_profile = std::env::var("RUSTIDEA_ZED_SMOKE_PROFILE").ok();
+                let smoke_logcat = std::env::var("RUSTIDEA_ZED_SMOKE_LOGCAT").ok();
                 let completion_position = std::env::var("RUSTIDEA_ZED_SMOKE_COMPLETION_POS")
                     .ok()
                     .and_then(|position| {
@@ -442,6 +444,9 @@ fn main() {
                                 if let Some(path) = &smoke_profile {
                                     app.smoke_profile(path.clone(), cx);
                                 }
+                                if let Some(serial) = &smoke_logcat {
+                                    app.smoke_logcat(serial.clone(), cx);
+                                }
                                 if let Some((line, column)) = completion_position {
                                     app.smoke_request_completion(line, column, cx);
                                 }
@@ -476,7 +481,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} bookmarks={} bookmark_status={} bookmark_first={:?} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} github_prs={} github_status={} github_first={:?} heap_classes={} heap_objects={} heap_status={} heap_first={:?} profile_methods={} profile_status={} profile_first={:?} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} bookmarks={} bookmark_status={} bookmark_first={:?} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} github_prs={} github_status={} github_first={:?} heap_classes={} heap_objects={} heap_status={} heap_first={:?} profile_methods={} profile_status={} profile_first={:?} logcat_lines={} logcat_status={} logcat_first={:?} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -517,6 +522,9 @@ fn main() {
                                     app.profile_method_count(),
                                     app.profile_status_text(),
                                     app.profile_first_method(),
+                                    app.logcat_line_count(),
+                                    app.logcat_status_text(),
+                                    app.logcat_first_line(),
                                     app.terminal_status(),
                                     app.terminal_text(cx)
                                         .map(|text| {
