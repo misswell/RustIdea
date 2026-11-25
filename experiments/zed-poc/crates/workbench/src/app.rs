@@ -144,6 +144,10 @@ pub struct Workbench {
     ssh_configs: Vec<ide_core::remote_settings::SshConfiguration>,
     ssh_selected: usize,
     remote_status: gpui::SharedString,
+    remote_path: Option<String>,
+    remote_entries: Vec<ide_ssh::RemoteEntry>,
+    remote_preview: String,
+    remote_busy: bool,
     agents: Vec<ide_agent::AgentProvider>,
     agents_status: gpui::SharedString,
     agent_prompt_input: Entity<TextInput>,
@@ -306,6 +310,10 @@ impl Workbench {
             ssh_configs: Vec::new(),
             ssh_selected: 0,
             remote_status: "Select REMOTE to load SSH configurations".into(),
+            remote_path: None,
+            remote_entries: Vec::new(),
+            remote_preview: String::new(),
+            remote_busy: false,
             agents: Vec::new(),
             agents_status: "Select AGENTS to load providers".into(),
             agent_prompt_input,
@@ -759,6 +767,81 @@ impl Workbench {
         } else {
             format!("{} SSH configurations", self.ssh_configs.len()).into()
         };
+        self.remote_path = None;
+        self.remote_entries.clear();
+        self.remote_preview.clear();
+        cx.notify();
+    }
+
+    fn browse_remote(&mut self, dir: Option<String>, cx: &mut Context<Self>) {
+        let Some(config) = self.ssh_configs.get(self.ssh_selected).cloned() else {
+            self.remote_status = "No SSH configuration selected".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let id = config.id.clone();
+        self.remote_busy = true;
+        self.remote_status = format!("Listing {}…", dir.as_deref().unwrap_or("home")).into();
+        cx.spawn(async move |this, cx| {
+            let result = host.remote_list(id, dir).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.remote_busy = false;
+                    match result {
+                        Ok((path, entries)) => {
+                            app.remote_status =
+                                format!("{} entries · {path}", entries.len()).into();
+                            app.remote_path = Some(path);
+                            app.remote_entries = entries;
+                        }
+                        Err(error) => {
+                            app.remote_status =
+                                format!("Remote list failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn preview_remote_file(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(config) = self.ssh_configs.get(self.ssh_selected).cloned() else {
+            return;
+        };
+        let host = self.host.clone();
+        let id = config.id.clone();
+        self.remote_busy = true;
+        self.remote_status = format!("Reading {path}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.remote_read(id, path).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.remote_busy = false;
+                    match result {
+                        Ok(text) => {
+                            app.remote_status = format!("{} bytes", text.len()).into();
+                            app.remote_preview = text;
+                        }
+                        Err(error) => {
+                            app.remote_status =
+                                format!("Remote read failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
         cx.notify();
     }
 
@@ -2852,8 +2935,8 @@ impl Workbench {
         let theme = self.theme;
         let mut rows = div()
             .id("ssh-configs")
-            .flex_1()
-            .min_h(px(0.))
+            .flex_none()
+            .max_h(px(100.))
             .overflow_y_scroll()
             .flex()
             .flex_col();
@@ -2880,6 +2963,9 @@ impl Workbench {
                     .hover(|style| style.bg(theme.panel_alt))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.ssh_selected = index;
+                        this.remote_path = None;
+                        this.remote_entries.clear();
+                        this.remote_preview.clear();
                         cx.notify();
                     }))
                     .child(name)
@@ -2891,6 +2977,88 @@ impl Workbench {
                     ),
             );
         }
+        let mut remote_files = div()
+            .id("ssh-files")
+            .flex_none()
+            .max_h(px(160.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if let Some(path) = &self.remote_path {
+            let parent = std::path::Path::new(path)
+                .parent()
+                .map(|parent| parent.to_string_lossy().into_owned())
+                .filter(|parent| !parent.is_empty());
+            if let Some(parent) = parent {
+                remote_files = remote_files.child(
+                    div()
+                        .id("ssh-parent")
+                        .px_2()
+                        .py_1()
+                        .text_size(px(10.))
+                        .text_color(theme.muted)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.browse_remote(Some(parent.clone()), cx);
+                        }))
+                        .child(".."),
+                );
+            }
+            for (index, entry) in self.remote_entries.iter().take(200).enumerate() {
+                let is_dir = entry.is_dir;
+                let path = entry.path.clone();
+                let name = entry.name.clone();
+                let size = entry.size;
+                remote_files = remote_files.child(
+                    div()
+                        .id(("ssh-entry", index))
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(10.))
+                        .text_color(if is_dir { theme.text } else { theme.muted })
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.panel_alt))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if is_dir {
+                                this.browse_remote(Some(path.clone()), cx);
+                            } else {
+                                this.preview_remote_file(path.clone(), cx);
+                            }
+                        }))
+                        .child(if is_dir { "▸" } else { "·" })
+                        .child(div().flex_1().truncate().child(name))
+                        .when(!is_dir, |row| {
+                            row.child(
+                                div()
+                                    .text_size(px(9.))
+                                    .text_color(theme.faint)
+                                    .child(size.to_string()),
+                            )
+                        }),
+                );
+            }
+        }
+        let preview_lines: Vec<String> = self
+            .remote_preview
+            .lines()
+            .take(400)
+            .map(str::to_owned)
+            .collect();
+        let remote_preview = div()
+            .id("ssh-preview")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_scroll()
+            .p_2()
+            .font_family("Menlo")
+            .text_size(px(9.5))
+            .text_color(theme.text)
+            .flex()
+            .flex_col()
+            .children(preview_lines.into_iter().map(|line| div().child(line)));
         div()
             .size_full()
             .flex()
@@ -2934,6 +3102,20 @@ impl Workbench {
                             }))
                             .child("Open SSH"),
                     )
+                    .child(
+                        div()
+                            .id("ssh-browse")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.browse_remote(None, cx);
+                            }))
+                            .child("Browse"),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
@@ -2944,6 +3126,8 @@ impl Workbench {
                     ),
             )
             .child(rows)
+            .child(remote_files)
+            .child(remote_preview)
             .into_any_element()
     }
 

@@ -742,6 +742,40 @@ impl NativeHost {
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
 
+    pub async fn remote_list(
+        &self,
+        id: String,
+        dir: Option<String>,
+    ) -> IdeResult<(String, Vec<ide_ssh::sftp::RemoteEntry>)> {
+        let host = self.host.clone();
+        self.runtime
+            .spawn(async move {
+                let session = host.ssh.session(&id).await?;
+                let fs = ide_ssh::filesystem::RemoteFs::new(session.sftp().await?);
+                let dir = match dir {
+                    Some(dir) => fs.resolve(&dir).await?,
+                    None => fs.home().await?,
+                };
+                let entries = fs.list(&dir).await?;
+                Ok((dir, entries))
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub async fn remote_read(&self, id: String, path: String) -> IdeResult<String> {
+        let host = self.host.clone();
+        self.runtime
+            .spawn(async move {
+                let session = host.ssh.session(&id).await?;
+                let fs = ide_ssh::filesystem::RemoteFs::new(session.sftp().await?);
+                let bytes = fs.read(&path).await?;
+                Ok(String::from_utf8_lossy(&bytes).into_owned())
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
     pub async fn start_search(
         &self,
         query: ide_search::SearchQuery,

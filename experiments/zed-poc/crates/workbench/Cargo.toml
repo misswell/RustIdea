@@ -30,6 +30,7 @@ ide-lsp.workspace = true
 ide-run = { path = "../../../../crates/ide-run" }
 ide-sdk = { path = "../../../../crates/ide-sdk" }
 ide-search = { path = "../../../../crates/ide-search" }
+ide-ssh = { path = "../../../../crates/ide-ssh" }
 ide-terminal = { path = "../../../../crates/ide-terminal" }
 ide-text = { path = "../../../../crates/ide-text" }
 ide-vcs = { path = "../../../../crates/ide-vcs" }

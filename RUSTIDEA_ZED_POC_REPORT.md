@@ -341,8 +341,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   at the caret from the active SQL document through `ops::db::execute`;
 - HTTP parses the active `.http` file, lists requests, and executes the
   selected request through `ide_http::run`, showing status, headers and body;
-- Remote lists OpenIDEA SSH configurations and opens a real SSH PTY-backed
-  terminal through `ops::term::spawn_ssh`;
+- Remote lists OpenIDEA SSH configurations, opens a real SSH PTY-backed
+  terminal through `ops::term::spawn_ssh`, and browses/previews remote files
+  over SFTP (`SshManager::session` + `RemoteFs::list/read`);
 - Agents lists trusted OpenIDEA ACP providers (16 on this machine), subscribes
   to `AgentEvent`, shows task rows, and creates a local agent task from the
   prompt field through `ops::agent::create`; the same panel lists MCP servers
@@ -472,7 +473,7 @@ documents/project/sync/host: 24 passed; 0 failed
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
 - Plugin UI contributions/marketplace install flow, full debugger session UI,
-  notebook, remote filesystem (as opposed to the SSH terminal), the full agent
+- notebook, remote file editing (browsing/preview exists), the full agent
   conversation view and MCP add/edit/remove are not yet integrated. Database/HTTP have working
   execution paths but no source/request editors of their own. The Terminal now
   has a real VT screen and OpenIDEA PTY, but its mouse selection, hyperlinks,
