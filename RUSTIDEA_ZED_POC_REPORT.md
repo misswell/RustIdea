@@ -321,6 +321,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   run, streams stdout/stderr/system output and shows the exit status;
 - a native Find in Files panel uses the shared GPUI `TextInput` and the
   OpenIDEA `ops::search` streaming engine, with clickable file/line results;
+- a native Git tool window shows the branch, changed files, stage/unstage
+  actions and a commit-message field backed by `ide-vcs`;
 - buffer edits are sent incrementally to
   `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
   `DocPatched` events and diagnostics are applied back to Zed buffers;
@@ -342,6 +344,14 @@ Run smoke on the same Java project:
 WORKBENCH_PROJECT_OPEN name=rustidea-java-workbench-smoke trusted=true tree_rows=3 initial_doc=true
 WORKBENCH_DOC_OPEN doc=1 path=.../App.java language=java tabs=1
 WORKBENCH_SMOKE status=jdtls: Ready language=true editors=2 run_status=Exited with Some(0) run_output="Process finished with exit code 0" text_prefix="// rustidea run smoke"
+```
+
+Git smoke in a temporary `main` repository with one modified Java file:
+
+```text
+WORKBENCH_PROJECT_OPEN name=rustidea-git-smoke trusted=false tree_rows=3 initial_doc=true
+WORKBENCH_DOC_OPEN doc=1 path=.../App.java language=java tabs=1
+WORKBENCH_SMOKE status=jdtls: Ready language=true editors=1 ... git_branch=main git_files=1 text_prefix="// rustidea git smoke"
 ```
 
 The workbench completion smoke produced `WORKBENCH_COMPLETION count=1` in a

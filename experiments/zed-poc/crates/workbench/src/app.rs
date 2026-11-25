@@ -27,6 +27,7 @@ use crate::theme::{Theme, ThemeMode};
 enum SidebarMode {
     Project,
     Search,
+    Git,
 }
 
 fn refresh_window(handle: Option<gpui::WindowHandle<Workbench>>, cx: &mut gpui::AsyncApp) {
@@ -34,6 +35,19 @@ fn refresh_window(handle: Option<gpui::WindowHandle<Workbench>>, cx: &mut gpui::
         && let Err(error) = handle.update(cx, |_, window, _| window.refresh())
     {
         eprintln!("WORKBENCH_REFRESH_ERROR {error:#}");
+    }
+}
+
+fn change_letter(kind: Option<ide_vcs::ChangeKind>) -> &'static str {
+    match kind {
+        Some(ide_vcs::ChangeKind::Added) => "A",
+        Some(ide_vcs::ChangeKind::Modified) => "M",
+        Some(ide_vcs::ChangeKind::Deleted) => "D",
+        Some(ide_vcs::ChangeKind::Renamed) => "R",
+        Some(ide_vcs::ChangeKind::Untracked) => "?",
+        Some(ide_vcs::ChangeKind::Ignored) => "I",
+        Some(ide_vcs::ChangeKind::Conflicted) => "C",
+        None => "·",
     }
 }
 
@@ -73,6 +87,11 @@ pub struct Workbench {
     search_results: Vec<ide_search::FileMatches>,
     search_status: gpui::SharedString,
     _search_subscription: Subscription,
+    git_status: Vec<ide_vcs::FileStatus>,
+    git_branch: Option<ide_vcs::BranchInfo>,
+    git_message_input: Entity<TextInput>,
+    git_status_message: gpui::SharedString,
+    _git_subscription: Subscription,
 }
 
 impl Workbench {
@@ -122,6 +141,21 @@ impl Workbench {
             }
             TextInputEvent::MoveSelection(_) => {}
         });
+        let git_message_input = cx.new(|cx| {
+            TextInput::new(
+                "Commit message…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let git_subscription = cx.subscribe(&git_message_input, |app, _, event, cx| {
+            if let TextInputEvent::Submit(message) = event {
+                app.commit_git(message.clone(), cx);
+            }
+        });
         let mut app = Self {
             host,
             language_registry,
@@ -152,10 +186,16 @@ impl Workbench {
             search_results: Vec::new(),
             search_status: "Type a pattern and press Enter".into(),
             _search_subscription: search_subscription,
+            git_status: Vec::new(),
+            git_branch: None,
+            git_message_input,
+            git_status_message: "Loading Git status…".into(),
+            _git_subscription: git_subscription,
         };
         if let Some(document) = document {
             app.insert_document(document, &registry_for_initial, cx);
         }
+        app.refresh_git(cx);
         let ui_events = app.host.take_events();
         if let Some(mut events) = ui_events {
             cx.spawn(async move |this, cx| {
@@ -621,6 +661,140 @@ impl Workbench {
         cx.notify();
     }
 
+    fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        self.git_status_message = "Loading Git status…".into();
+        cx.spawn(async move |this, cx| {
+            let (status, branch) = tokio::join!(host.git_status(), host.git_branch());
+            let handle = this
+                .update(cx, |app, cx| {
+                    match status {
+                        Ok(status) => {
+                            app.git_status_message = if status.is_empty() {
+                                "No changes".into()
+                            } else {
+                                format!("{} changed files", status.len()).into()
+                            };
+                            app.git_status = status;
+                        }
+                        Err(error) => {
+                            app.git_status.clear();
+                            app.git_status_message = error.message.into();
+                        }
+                    }
+                    if let Ok(branch) = branch {
+                        app.git_branch = Some(branch);
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn stage_all(&mut self, cx: &mut Context<Self>) {
+        let paths: Vec<PathBuf> = self
+            .git_status
+            .iter()
+            .map(|status| status.path.0.clone())
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let host = self.host.clone();
+        self.git_status_message = "Staging files…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.git_stage(paths).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.git_status_message = match result {
+                        Ok(()) => "Staged all changes".into(),
+                        Err(error) => format!("Stage failed: {}", error.message).into(),
+                    };
+                    app.refresh_git(cx);
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn unstage_all(&mut self, cx: &mut Context<Self>) {
+        let paths: Vec<PathBuf> = self
+            .git_status
+            .iter()
+            .filter(|status| status.staged.is_some())
+            .map(|status| status.path.0.clone())
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let host = self.host.clone();
+        self.git_status_message = "Unstaging files…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.git_unstage(paths).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.git_status_message = match result {
+                        Ok(()) => "Unstaged changes".into(),
+                        Err(error) => format!("Unstage failed: {}", error.message).into(),
+                    };
+                    app.refresh_git(cx);
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn commit_git(&mut self, message: String, cx: &mut Context<Self>) {
+        let message = message.trim().to_owned();
+        if message.is_empty() {
+            self.git_status_message = "Enter a commit message".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        self.git_status_message = "Committing…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.git_commit(message).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(commit) => {
+                            app.git_status_message =
+                                format!("Created commit {}", &commit[..commit.len().min(12)])
+                                    .into();
+                            app.git_message_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                        }
+                        Err(error) => {
+                            app.git_status_message =
+                                format!("Commit failed: {}", error.message).into();
+                        }
+                    }
+                    app.refresh_git(cx);
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub fn smoke_insert_marker(&mut self, marker: &str, cx: &mut Context<Self>) -> bool {
         let Some(doc) = self.active else {
             return false;
@@ -723,6 +897,17 @@ impl Workbench {
 
     pub fn smoke_search_files(&self) -> usize {
         self.search_results.len()
+    }
+
+    pub fn smoke_git_files(&self) -> usize {
+        self.git_status.len()
+    }
+
+    pub fn smoke_git_branch(&self) -> String {
+        self.git_branch
+            .as_ref()
+            .and_then(|branch| branch.head.clone())
+            .unwrap_or_default()
     }
 
     pub fn smoke_has_language(&self, cx: &gpui::App) -> bool {
@@ -971,6 +1156,125 @@ impl Workbench {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.tree_scroll)
+    }
+
+    fn render_git_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let branch = self
+            .git_branch
+            .as_ref()
+            .map(|branch| {
+                let head = branch.head.as_deref().unwrap_or("detached");
+                format!(
+                    "{head}{}{}",
+                    if branch.ahead > 0 {
+                        format!(" ↑{}", branch.ahead)
+                    } else {
+                        String::new()
+                    },
+                    if branch.behind > 0 {
+                        format!(" ↓{}", branch.behind)
+                    } else {
+                        String::new()
+                    }
+                )
+            })
+            .unwrap_or_else(|| "No Git repository".into());
+        let mut files = div()
+            .id("git-files")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, file) in self.git_status.iter().take(200).enumerate() {
+            let path = file.path.0.clone();
+            let open_app = cx.entity();
+            let letter = change_letter(file.unstaged.or(file.staged));
+            let color = if file.unstaged.is_some() {
+                theme.warning
+            } else {
+                theme.accent
+            };
+            files = files.child(
+                div()
+                    .id(("git-file", index))
+                    .h(px(22.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(11.5))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        open_app.update(cx, |app, cx| {
+                            app.open_path(path.clone(), cx);
+                        });
+                    })
+                    .child(div().w(px(12.)).text_color(color).child(letter))
+                    .child(div().flex_1().truncate().child(file.rel_path.clone())),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.5))
+                    .text_color(theme.accent)
+                    .child(branch),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_y_1()
+                    .border_color(theme.border)
+                    .child(self.git_message_input.clone()),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(10.5))
+                    .text_color(theme.muted)
+                    .child(self.git_status_message.clone())
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("git-stage-all")
+                            .px_2()
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.stage_all(cx);
+                            }))
+                            .child("Stage all"),
+                    )
+                    .child(
+                        div()
+                            .id("git-unstage-all")
+                            .px_2()
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.unstage_all(cx);
+                            }))
+                            .child("Unstage all"),
+                    ),
+            )
+            .child(files)
+            .into_any_element()
     }
 
     fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1243,9 +1547,11 @@ impl Render for Workbench {
             .and_then(|doc| self.editors.get(&(doc, true)).cloned());
         let project = self.render_project(cx).into_any_element();
         let search = self.render_search_panel(cx);
+        let git = self.render_git_panel(cx);
         let sidebar_body = match self.sidebar_mode {
             SidebarMode::Project => project,
             SidebarMode::Search => search,
+            SidebarMode::Git => git,
         };
         let tabs = self.render_tabs(cx).into_any_element();
         let run_panel = self.render_run_panel(cx);
@@ -1340,6 +1646,30 @@ impl Render for Workbench {
                                                 cx.notify();
                                             }))
                                             .child("SEARCH"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("sidebar-git")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .text_color(if self.sidebar_mode == SidebarMode::Git {
+                                                theme.text
+                                            } else {
+                                                theme.muted
+                                            })
+                                            .bg(if self.sidebar_mode == SidebarMode::Git {
+                                                theme.panel_alt
+                                            } else {
+                                                theme.panel
+                                            })
+                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                                this.sidebar_mode = SidebarMode::Git;
+                                                this.refresh_git(cx);
+                                                cx.notify();
+                                            }))
+                                            .child("GIT"),
                                     ),
                             )
                             .child(div().flex_1().min_h(px(0.)).child(sidebar_body)),

@@ -12026,6 +12026,7 @@ dependencies = [
  "ide-search",
  "ide-text",
  "ide-tools",
+ "ide-vcs",
  "ide-vfs",
  "ide-workspace",
  "language",

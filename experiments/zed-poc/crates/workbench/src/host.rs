@@ -484,6 +484,49 @@ impl NativeHost {
         })
         .await
     }
+
+    pub async fn git_status(&self) -> IdeResult<Vec<ide_vcs::FileStatus>> {
+        self.run(move |host| async move { ide_host::ops::vcs::status(&host, MAIN_WINDOW).await })
+            .await
+    }
+
+    pub async fn git_branch(&self) -> IdeResult<ide_vcs::BranchInfo> {
+        self.run(move |host| async move {
+            ide_host::ops::vcs::vcs_branch_info(&host, MAIN_WINDOW, None).await
+        })
+        .await
+    }
+
+    pub async fn git_stage(&self, paths: Vec<PathBuf>) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::vcs::vcs_stage(&host, MAIN_WINDOW, paths).await
+        })
+        .await
+    }
+
+    pub async fn git_unstage(&self, paths: Vec<PathBuf>) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::vcs::vcs_unstage(&host, MAIN_WINDOW, paths).await
+        })
+        .await
+    }
+
+    pub async fn git_commit(&self, message: String) -> IdeResult<String> {
+        self.run(move |host| async move {
+            ide_host::ops::vcs::vcs_commit(
+                &host,
+                MAIN_WINDOW,
+                None,
+                message,
+                ide_vcs::CommitOptions {
+                    run_hooks: true,
+                    ..Default::default()
+                },
+            )
+            .await
+        })
+        .await
+    }
 }
 
 impl Drop for NativeHost {

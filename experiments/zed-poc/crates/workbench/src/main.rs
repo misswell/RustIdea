@@ -228,7 +228,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -236,6 +236,8 @@ fn main() {
                                     app.smoke_run_output().lines().last().unwrap_or_default(),
                                     app.smoke_search_status(),
                                     app.smoke_search_files(),
+                                    app.smoke_git_branch(),
+                                    app.smoke_git_files(),
                                     app.smoke_active_text(cx).lines().next().unwrap_or_default()
                                 );
                                 cx.quit();
