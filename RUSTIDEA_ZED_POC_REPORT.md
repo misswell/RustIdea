@@ -323,6 +323,10 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   OpenIDEA `ops::search` streaming engine, with clickable file/line results;
 - a native Git tool window shows the branch, changed files, stage/unstage
   actions and a commit-message field backed by `ide-vcs`;
+- the editor now binds core Zed actions: caret movement/selection, backspace/
+  delete, page up/down, undo/redo, copy/cut/paste/select-all, comment toggle,
+  indent/outdent, completion (Ctrl-Space), go-to-definition/declaration
+  (F12/Shift-F12);
 - a bottom-panel Terminal uses the Zed `terminal` crate's Alacritty/VT screen
   model with OpenIDEA's `ops::term` PTY ownership. The OpenIDEA PTY output is
   fed into `terminal::Terminal::write_output`; the workbench renders the
@@ -600,7 +604,8 @@ documents/project/sync/host: 24 passed; 0 failed
 - External-change reload/conflict handling in the Zed Buffer path (the POC only
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
-- Plugin live UI contributions, full debugger session UI (variables/stack/
+- Plugin live UI contributions, the full Zed keymap (only core editor actions
+  are bound), full debugger session UI (variables/stack/
   breakpoints) and Java/Unity attach, notebook rich-output editing, live
   remote-write verification (UI path exists), structured question/form widgets
   and live subagent/form verification
