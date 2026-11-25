@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -95,6 +95,116 @@ fn notebook_output_text(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
+fn utf16_prefix(text: &str, units: u32) -> String {
+    let mut consumed = 0u32;
+    let mut end = text.len();
+    for (index, character) in text.char_indices() {
+        let width = character.len_utf16() as u32;
+        if consumed + width > units {
+            end = index;
+            break;
+        }
+        consumed += width;
+    }
+    text[..end].to_owned()
+}
+
+fn append_agent_entry_text(entry: &mut ide_agent::AgentEntry, from: u32, addition: &str) {
+    match entry {
+        ide_agent::AgentEntry::Agent { text }
+        | ide_agent::AgentEntry::Thought { text }
+        | ide_agent::AgentEntry::Message { text, .. } => {
+            let prefix = utf16_prefix(text, from);
+            *text = format!("{prefix}{addition}");
+        }
+        ide_agent::AgentEntry::Tool { output, .. } => {
+            let prefix = utf16_prefix(output.as_deref().unwrap_or_default(), from);
+            *output = Some(format!("{prefix}{addition}"));
+        }
+        _ => {}
+    }
+}
+
+fn agent_entry_display(entry: &ide_agent::AgentEntry) -> (&'static str, String) {
+    use ide_agent::AgentEntry;
+    match entry {
+        AgentEntry::User { text, .. } => ("You", text.clone()),
+        AgentEntry::Agent { text } => ("Agent", text.clone()),
+        AgentEntry::Thought { text } => ("Thought", text.clone()),
+        AgentEntry::Tool {
+            title,
+            kind,
+            status,
+            output,
+            ..
+        } => (
+            "Tool",
+            format!(
+                "[{kind}] {title} · {status:?}{}",
+                output
+                    .as_ref()
+                    .map(|output| format!("\n{output}"))
+                    .unwrap_or_default()
+            ),
+        ),
+        AgentEntry::Plan { items } => (
+            "Plan",
+            items
+                .iter()
+                .map(|item| format!("[{}] {}", item.status, item.content))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        AgentEntry::Subagent {
+            title,
+            description,
+            status,
+            reply,
+            prompt,
+            ..
+        } => (
+            "Subagent",
+            format!(
+                "{} · {status:?}\n{}",
+                title
+                    .as_deref()
+                    .or(description.as_deref())
+                    .unwrap_or("subagent"),
+                reply.as_deref().or(prompt.as_deref()).unwrap_or_default()
+            ),
+        ),
+        AgentEntry::Message { incoming, text } => (
+            if *incoming {
+                "Message in"
+            } else {
+                "Message out"
+            },
+            text.clone(),
+        ),
+        AgentEntry::Permission {
+            title,
+            command,
+            chosen,
+            ..
+        } => (
+            "Permission",
+            format!(
+                "{}{}{}",
+                title,
+                command
+                    .as_ref()
+                    .map(|command| format!("\n{command}"))
+                    .unwrap_or_default(),
+                chosen
+                    .as_ref()
+                    .map(|chosen| format!("\n→ {chosen}"))
+                    .unwrap_or_default()
+            ),
+        ),
+        AgentEntry::Error { message } => ("Error", message.clone()),
+    }
+}
+
 pub struct InitialState {
     pub project: ide_host::ops::project::ProjectInfo,
     pub root_listing: Vec<ide_vfs::FileEntry>,
@@ -182,6 +292,8 @@ pub struct Workbench {
     _agent_prompt_subscription: Subscription,
     agent_selected: usize,
     agent_tasks: Vec<ide_agent::AgentTask>,
+    agent_selected_task: Option<String>,
+    agent_entries: HashMap<String, BTreeMap<u32, ide_agent::AgentEntry>>,
     agent_task_status: gpui::SharedString,
     mcp_servers: Vec<ide_agent::McpServer>,
     mcp_status: gpui::SharedString,
@@ -351,6 +463,8 @@ impl Workbench {
             _agent_prompt_subscription: agent_prompt_subscription,
             agent_selected: 0,
             agent_tasks: Vec::new(),
+            agent_selected_task: None,
+            agent_entries: HashMap::default(),
             agent_task_status: "No agent tasks".into(),
             mcp_servers: Vec::new(),
             mcp_status: "No MCP servers".into(),
@@ -378,25 +492,7 @@ impl Workbench {
                 while let Some(event) = agent_rx.recv().await {
                     let handle = this
                         .update(cx, |app, cx| {
-                            match event {
-                                ide_agent::AgentEvent::Task { task } => {
-                                    if let Some(existing) = app
-                                        .agent_tasks
-                                        .iter_mut()
-                                        .find(|existing| existing.id == task.id)
-                                    {
-                                        *existing = *task;
-                                    } else {
-                                        app.agent_tasks.push(*task);
-                                    }
-                                }
-                                ide_agent::AgentEvent::Removed { id } => {
-                                    app.agent_tasks.retain(|task| task.id != id);
-                                }
-                                _ => {}
-                            }
-                            app.agent_task_status =
-                                format!("{} agent tasks", app.agent_tasks.len()).into();
+                            app.apply_agent_event(event, cx);
                             cx.notify();
                             app.window_handle
                         })
@@ -1100,6 +1196,66 @@ impl Workbench {
         cx.notify();
     }
 
+    fn apply_agent_event(&mut self, event: ide_agent::AgentEvent, _cx: &mut Context<Self>) {
+        match event {
+            ide_agent::AgentEvent::Task { task } => {
+                let id = task.id.clone();
+                if let Some(existing) = self
+                    .agent_tasks
+                    .iter_mut()
+                    .find(|existing| existing.id == id)
+                {
+                    *existing = *task;
+                } else {
+                    self.agent_tasks.push(*task);
+                }
+                if self.agent_selected_task.is_none() {
+                    self.agent_selected_task = Some(id);
+                }
+            }
+            ide_agent::AgentEvent::Removed { id } => {
+                self.agent_tasks.retain(|task| task.id != id);
+                self.agent_entries.remove(&id);
+                if self.agent_selected_task.as_deref() == Some(id.as_str()) {
+                    self.agent_selected_task = self.agent_tasks.first().map(|task| task.id.clone());
+                }
+            }
+            ide_agent::AgentEvent::Truncated { task, length } => {
+                if let Some(entries) = self.agent_entries.get_mut(&task) {
+                    entries.retain(|index, _| *index < length);
+                }
+            }
+            ide_agent::AgentEvent::Entry {
+                task,
+                subagent,
+                index,
+                entry,
+            } => {
+                if subagent.is_none() {
+                    self.agent_entries
+                        .entry(task)
+                        .or_default()
+                        .insert(index, entry);
+                }
+            }
+            ide_agent::AgentEvent::Append {
+                task,
+                subagent,
+                index,
+                from,
+                text,
+            } => {
+                if subagent.is_none()
+                    && let Some(entry) = self.agent_entries.entry(task).or_default().get_mut(&index)
+                {
+                    append_agent_entry_text(entry, from, &text);
+                }
+            }
+            _ => {}
+        }
+        self.agent_task_status = format!("{} agent tasks", self.agent_tasks.len()).into();
+    }
+
     fn start_agent_task(&mut self, cx: &mut Context<Self>) {
         if self.agents.is_empty() {
             self.refresh_agents(cx);
@@ -1131,6 +1287,14 @@ impl Workbench {
                     match result {
                         Ok(task) => {
                             app.agent_task_status = format!("Created task {}", task.title).into();
+                            app.agent_selected_task = Some(task.id.clone());
+                            if !app
+                                .agent_tasks
+                                .iter()
+                                .any(|existing| existing.id == task.id)
+                            {
+                                app.agent_tasks.push(task);
+                            }
                             app.agent_prompt_input.update(cx, |input, cx| {
                                 input.set_content("", cx);
                             });
@@ -1148,6 +1312,60 @@ impl Workbench {
             refresh_window(handle, cx);
         })
         .detach();
+        cx.notify();
+    }
+
+    fn send_agent_followup(&mut self, cx: &mut Context<Self>) {
+        let Some(task) = self.agent_selected_task.clone() else {
+            self.agent_task_status = "Select a task first".into();
+            cx.notify();
+            return;
+        };
+        let prompt = self.agent_prompt_input.read(cx).content().trim().to_owned();
+        if prompt.is_empty() {
+            self.agent_task_status = "Enter a message".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        self.agent_task_status = "Sending message…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.agent_prompt(task, prompt).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(()) => {
+                            app.agent_task_status = "Message queued".into();
+                            app.agent_prompt_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                        }
+                        Err(error) => {
+                            app.agent_task_status =
+                                format!("Prompt failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn cancel_selected_agent_task(&mut self, cx: &mut Context<Self>) {
+        let Some(task) = self.agent_selected_task.clone() else {
+            return;
+        };
+        match self.host.agent_cancel(task) {
+            Ok(()) => self.agent_task_status = "Cancelled".into(),
+            Err(error) => {
+                self.agent_task_status = format!("Cancel failed: {}", error.message).into();
+            }
+        }
         cx.notify();
     }
 
@@ -3449,12 +3667,14 @@ impl Workbench {
         }
         let mut task_rows = div()
             .id("agent-tasks")
-            .flex_1()
-            .min_h(px(0.))
+            .flex_none()
+            .max_h(px(90.))
             .overflow_y_scroll()
             .flex()
             .flex_col();
         for (index, task) in self.agent_tasks.iter().take(100).enumerate() {
+            let selected = self.agent_selected_task.as_deref() == Some(task.id.as_str());
+            let task_id = task.id.clone();
             task_rows = task_rows.child(
                 div()
                     .id(("agent-task", index))
@@ -3464,6 +3684,18 @@ impl Workbench {
                     .flex_col()
                     .gap(px(1.))
                     .text_size(px(10.5))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.agent_selected_task = Some(task_id.clone());
+                        cx.notify();
+                    }))
                     .child(div().truncate().child(task.title.clone()))
                     .child(
                         div()
@@ -3511,6 +3743,42 @@ impl Workbench {
                             .child(if enabled { "disable" } else { "enable" }),
                     ),
             );
+        }
+        let mut timeline = div()
+            .id("agent-timeline")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap(px(4.));
+        if let Some(task_id) = &self.agent_selected_task
+            && let Some(entries) = self.agent_entries.get(task_id)
+        {
+            for (_, entry) in entries.iter().take(500) {
+                let (role, text) = agent_entry_display(entry);
+                if text.trim().is_empty() {
+                    continue;
+                }
+                timeline = timeline.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .child(
+                            div()
+                                .text_size(px(8.5))
+                                .text_color(if role == "Error" {
+                                    theme.error
+                                } else {
+                                    theme.faint
+                                })
+                                .child(role),
+                        )
+                        .child(div().text_size(px(10.)).text_color(theme.text).child(text)),
+                );
+            }
         }
         div()
             .size_full()
@@ -3560,7 +3828,7 @@ impl Workbench {
                     .child(div().flex_1().child(self.agent_prompt_input.clone()))
                     .child(
                         div()
-                            .id("agent-start")
+                            .id("agent-send")
                             .px_2()
                             .py_1()
                             .rounded_sm()
@@ -3569,9 +3837,37 @@ impl Workbench {
                             .bg(theme.accent_muted)
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.send_agent_followup(cx);
+                            }))
+                            .child("Send"),
+                    )
+                    .child(
+                        div()
+                            .id("agent-new")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.start_agent_task(cx);
                             }))
-                            .child("Start"),
+                            .child("New"),
+                    )
+                    .child(
+                        div()
+                            .id("agent-cancel")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.error)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.cancel_selected_agent_task(cx);
+                            }))
+                            .child("Stop"),
                     ),
             )
             .child(rows)
@@ -3584,6 +3880,7 @@ impl Workbench {
                     .child(self.agent_task_status.clone()),
             )
             .child(task_rows)
+            .child(timeline)
             .child(
                 div()
                     .px_2()
@@ -4660,5 +4957,38 @@ impl Render for Workbench {
                         self.diagnostics.values().sum::<usize>()
                     )),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf16_prefix_counts_astral_characters() {
+        assert_eq!(utf16_prefix("a😀b", 1), "a");
+        assert_eq!(utf16_prefix("a😀b", 3), "a😀");
+        assert_eq!(utf16_prefix("a😀b", 4), "a😀b");
+    }
+
+    #[test]
+    fn append_agent_entry_replaces_the_reported_suffix() {
+        let mut entry = ide_agent::AgentEntry::Agent {
+            text: "hello".into(),
+        };
+        append_agent_entry_text(&mut entry, 2, "llo world");
+        let ide_agent::AgentEntry::Agent { text } = entry else {
+            panic!("expected agent entry");
+        };
+        assert_eq!(text, "hello world");
+    }
+
+    #[test]
+    fn error_entries_are_displayed_as_errors() {
+        let (role, text) = agent_entry_display(&ide_agent::AgentEntry::Error {
+            message: "boom".into(),
+        });
+        assert_eq!(role, "Error");
+        assert_eq!(text, "boom");
     }
 }

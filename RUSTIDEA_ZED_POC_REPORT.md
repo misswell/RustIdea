@@ -345,8 +345,10 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   terminal through `ops::term::spawn_ssh`, and browses/previews remote files
   over SFTP (`SshManager::session` + `RemoteFs::list/read`);
 - Agents lists trusted OpenIDEA ACP providers (16 on this machine), subscribes
-  to `AgentEvent`, shows task rows, and creates a local agent task from the
-  prompt field through `ops::agent::create`; the same panel lists MCP servers
+  to `AgentEvent`, shows task rows and an incremental conversation timeline
+  (`Entry`/`Append`/`Truncated`), creates a local agent task from the prompt
+  field through `ops::agent::create`, sends follow-ups through
+  `ops::agent::prompt`, and cancels a selected task; the same panel lists MCP servers
   from `ops::agent::mcp_list` and toggles enablement through `mcp_set_enabled`;
   Tools lists
   language-server/debug-adapter status through `ops::tools::tools_list` and can
@@ -483,10 +485,10 @@ documents/project/sync/host: 24 passed; 0 failed
 - Process-tree memory/performance comparison and three-platform CI.
 - Plugin UI contributions/marketplace install flow, full debugger session UI,
   notebook cell editing, remote file editing (browsing/preview exists), the
-  full agent conversation view and MCP add/edit/remove are not yet integrated.
-  Database/HTTP have working
-  execution paths but no source/request editors of their own. The Terminal now
-  has a real VT screen and OpenIDEA PTY, but its mouse selection, hyperlinks,
-  IME and resize path are not yet verified or complete.
+  agent permission responses/subagent drill-down and MCP add/edit/remove are
+  not yet integrated. Database/HTTP have working execution paths but no
+  source/request editors of their own. The Terminal now has a real VT screen
+  and OpenIDEA PTY, but its mouse selection, hyperlinks, IME and resize path
+  are not yet verified or complete.
 
 This document is a POC report, not a claim of OpenIdea parity.

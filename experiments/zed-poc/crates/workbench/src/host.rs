@@ -662,6 +662,28 @@ impl NativeHost {
         ide_host::ops::agent::mcp_remove(&self.host, MAIN_WINDOW, id)
     }
 
+    pub async fn agent_prompt(&self, task: String, prompt: String) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::agent::prompt(
+                &host,
+                MAIN_WINDOW,
+                task,
+                ide_agent::AgentPrompt {
+                    text: prompt,
+                    files: Vec::new(),
+                    images: Vec::new(),
+                },
+                false,
+            )
+            .await
+        })
+        .await
+    }
+
+    pub fn agent_cancel(&self, task: String) -> IdeResult<()> {
+        ide_host::ops::agent::cancel(&self.host, MAIN_WINDOW, task, None)
+    }
+
     pub async fn tools_list(&self) -> IdeResult<Vec<ide_tools::ToolInfo>> {
         self.run(
             move |host| async move { ide_host::ops::tools::tools_list(&host, MAIN_WINDOW).await },
