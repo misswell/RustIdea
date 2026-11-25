@@ -51,6 +51,127 @@ enum BottomMode {
     Debug,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Command {
+    Save,
+    CloseTab,
+    ToggleSplit,
+    QuickOpen,
+    ShowProject,
+    ShowSearch,
+    ShowGit,
+    ShowOutline,
+    ShowProblems,
+    ShowDatabase,
+    ShowHttp,
+    ShowRemote,
+    ShowNotebook,
+    ShowMcp,
+    ShowAgents,
+    ShowPlugins,
+    ShowTools,
+    ShowSettings,
+    ShowRun,
+    ShowTerminal,
+    ShowBuild,
+    ShowDebug,
+    RunSelected,
+    BuildProject,
+    RebuildProject,
+    RefreshGit,
+    RefreshAgents,
+    RefreshTools,
+    RefreshPlugins,
+    RefreshMarket,
+    RefreshRemote,
+    RefreshDatabase,
+}
+
+impl Command {
+    const ALL: [Command; 32] = [
+        Command::Save,
+        Command::CloseTab,
+        Command::ToggleSplit,
+        Command::QuickOpen,
+        Command::ShowProject,
+        Command::ShowSearch,
+        Command::ShowGit,
+        Command::ShowOutline,
+        Command::ShowProblems,
+        Command::ShowDatabase,
+        Command::ShowHttp,
+        Command::ShowRemote,
+        Command::ShowNotebook,
+        Command::ShowMcp,
+        Command::ShowAgents,
+        Command::ShowPlugins,
+        Command::ShowTools,
+        Command::ShowSettings,
+        Command::ShowRun,
+        Command::ShowTerminal,
+        Command::ShowBuild,
+        Command::ShowDebug,
+        Command::RunSelected,
+        Command::BuildProject,
+        Command::RebuildProject,
+        Command::RefreshGit,
+        Command::RefreshAgents,
+        Command::RefreshTools,
+        Command::RefreshPlugins,
+        Command::RefreshMarket,
+        Command::RefreshRemote,
+        Command::RefreshDatabase,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Command::Save => "Save file",
+            Command::CloseTab => "Close tab",
+            Command::ToggleSplit => "Toggle split editor",
+            Command::QuickOpen => "Quick open file",
+            Command::ShowProject => "Show Project",
+            Command::ShowSearch => "Show Find in Files",
+            Command::ShowGit => "Show Version Control",
+            Command::ShowOutline => "Show Outline",
+            Command::ShowProblems => "Show Problems",
+            Command::ShowDatabase => "Show Database",
+            Command::ShowHttp => "Show HTTP Client",
+            Command::ShowRemote => "Show Remote Host",
+            Command::ShowNotebook => "Show Notebook",
+            Command::ShowMcp => "Show MCP Servers",
+            Command::ShowAgents => "Show Agents",
+            Command::ShowPlugins => "Show Plugins",
+            Command::ShowTools => "Show Tools",
+            Command::ShowSettings => "Show Settings",
+            Command::ShowRun => "Show Run",
+            Command::ShowTerminal => "Show Terminal",
+            Command::ShowBuild => "Show Build",
+            Command::ShowDebug => "Show Debug",
+            Command::RunSelected => "Run selected configuration",
+            Command::BuildProject => "Build project",
+            Command::RebuildProject => "Rebuild project",
+            Command::RefreshGit => "Refresh Git status",
+            Command::RefreshAgents => "Refresh agent providers",
+            Command::RefreshTools => "Refresh tools",
+            Command::RefreshPlugins => "Refresh installed plugins",
+            Command::RefreshMarket => "Refresh plugin marketplace",
+            Command::RefreshRemote => "Refresh SSH configurations",
+            Command::RefreshDatabase => "Refresh data sources",
+        }
+    }
+
+    fn matches(self, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let label = self.label().to_lowercase();
+        let mut terms = label.split_whitespace();
+        query
+            .split_whitespace()
+            .all(|term| label.contains(term) || terms.any(|word| word.starts_with(term)))
+    }
+}
+
 fn refresh_window(handle: Option<gpui::WindowHandle<Workbench>>, cx: &mut gpui::AsyncApp) {
     if let Some(handle) = handle
         && let Err(error) = handle.update(cx, |_, window, _| window.refresh())
@@ -315,6 +436,12 @@ pub struct Workbench {
     fast_open_selected: usize,
     fast_open_status: gpui::SharedString,
     _fast_open_subscription: Subscription,
+    command_palette: bool,
+    command_palette_input: Entity<TextInput>,
+    command_palette_query: String,
+    command_palette_selected: usize,
+    pending_command: Option<Command>,
+    _command_palette_subscription: Subscription,
     plugins: Vec<ide_host::plugins::PluginInfo>,
     plugins_status: gpui::SharedString,
     market_plugins: Vec<ide_host::plugins::MarketPlugin>,
@@ -460,6 +587,44 @@ impl Workbench {
                 }
                 TextInputEvent::MoveSelection(_) => {}
             });
+        let command_palette_input = cx.new(|cx| {
+            TextInput::new(
+                "Type a command…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let command_palette_subscription =
+            cx.subscribe(&command_palette_input, |app, _, event, cx| match event {
+                TextInputEvent::Change(query) => {
+                    app.command_palette_query = query.clone();
+                    app.command_palette_selected = 0;
+                    cx.notify();
+                }
+                TextInputEvent::MoveSelection(delta) => {
+                    let commands = app.filtered_commands();
+                    if commands.is_empty() {
+                        return;
+                    }
+                    let last = commands.len() - 1;
+                    app.command_palette_selected = if *delta < 0 {
+                        app.command_palette_selected.saturating_sub(1)
+                    } else {
+                        (app.command_palette_selected + 1).min(last)
+                    };
+                    cx.notify();
+                }
+                TextInputEvent::Submit(_) => {
+                    app.run_selected_command(cx);
+                }
+                TextInputEvent::Cancel => {
+                    app.command_palette = false;
+                    cx.notify();
+                }
+            });
         let mut app = Self {
             host,
             language_registry,
@@ -557,6 +722,12 @@ impl Workbench {
             fast_open_results: Vec::new(),
             fast_open_selected: 0,
             fast_open_status: "Type a file name".into(),
+            command_palette: false,
+            command_palette_input,
+            command_palette_query: String::new(),
+            command_palette_selected: 0,
+            pending_command: None,
+            _command_palette_subscription: command_palette_subscription,
             plugins: Vec::new(),
             plugins_status: "Select PLUGINS to load installed plugins".into(),
             market_plugins: Vec::new(),
@@ -2167,6 +2338,112 @@ impl Workbench {
         cx.notify();
     }
 
+    fn filtered_commands(&self) -> Vec<Command> {
+        let query = self.command_palette_query.to_lowercase();
+        Command::ALL
+            .iter()
+            .copied()
+            .filter(|command| command.matches(&query))
+            .collect()
+    }
+
+    fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette = !self.command_palette;
+        if self.command_palette {
+            self.fast_open = false;
+            self.command_palette_query.clear();
+            self.command_palette_selected = 0;
+            self.command_palette_input
+                .update(cx, |input, cx| input.set_content("", cx));
+            let focus = self.command_palette_input.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    fn run_selected_command(&mut self, cx: &mut Context<Self>) {
+        let commands = self.filtered_commands();
+        let Some(command) = commands.get(self.command_palette_selected).copied() else {
+            return;
+        };
+        self.command_palette = false;
+        self.pending_command = Some(command);
+        cx.notify();
+    }
+
+    fn execute_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette = false;
+        match command {
+            Command::Save => {
+                if let Some(doc) = self.active {
+                    self.save_document(doc, cx);
+                }
+            }
+            Command::CloseTab => {
+                if let Some(doc) = self.active {
+                    self.close_tab(doc, cx);
+                }
+            }
+            Command::ToggleSplit => self.toggle_split(cx),
+            Command::QuickOpen => {
+                self.fast_open = true;
+                self.fast_open_selected = 0;
+                let focus = self.fast_open_input.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            Command::ShowProject => self.select_sidebar(SidebarMode::Project, cx),
+            Command::ShowSearch => self.select_sidebar(SidebarMode::Search, cx),
+            Command::ShowGit => self.select_sidebar(SidebarMode::Git, cx),
+            Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
+            Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
+            Command::ShowDatabase => self.select_sidebar(SidebarMode::Database, cx),
+            Command::ShowHttp => self.select_sidebar(SidebarMode::Http, cx),
+            Command::ShowRemote => self.select_sidebar(SidebarMode::Remote, cx),
+            Command::ShowNotebook => self.select_sidebar(SidebarMode::Notebook, cx),
+            Command::ShowMcp => self.select_sidebar(SidebarMode::Mcp, cx),
+            Command::ShowAgents => self.select_sidebar(SidebarMode::Agents, cx),
+            Command::ShowPlugins => self.select_sidebar(SidebarMode::Plugins, cx),
+            Command::ShowTools => self.select_sidebar(SidebarMode::Tools, cx),
+            Command::ShowSettings => self.select_sidebar(SidebarMode::Settings, cx),
+            Command::ShowRun => {
+                self.bottom_mode = BottomMode::Run;
+            }
+            Command::ShowTerminal => {
+                self.bottom_mode = BottomMode::Terminal;
+                self.ensure_terminal(window, cx);
+            }
+            Command::ShowBuild => {
+                self.bottom_mode = BottomMode::Build;
+                if self.build_model.is_none() {
+                    self.refresh_build(cx);
+                }
+            }
+            Command::ShowDebug => {
+                self.bottom_mode = BottomMode::Debug;
+                if self.debug_attachables.is_empty() {
+                    self.refresh_debug(cx);
+                }
+            }
+            Command::RunSelected => self.start_selected_run(cx),
+            Command::BuildProject => {
+                self.bottom_mode = BottomMode::Build;
+                self.run_build(ide_build::compile::BuildKind::Build, cx);
+            }
+            Command::RebuildProject => {
+                self.bottom_mode = BottomMode::Build;
+                self.run_build(ide_build::compile::BuildKind::Rebuild, cx);
+            }
+            Command::RefreshGit => self.refresh_git(cx),
+            Command::RefreshAgents => self.refresh_agents(cx),
+            Command::RefreshTools => self.refresh_tools(cx),
+            Command::RefreshPlugins => self.refresh_plugins(cx),
+            Command::RefreshMarket => self.refresh_market(cx),
+            Command::RefreshRemote => self.refresh_remote(cx),
+            Command::RefreshDatabase => self.refresh_db(cx),
+        }
+        cx.notify();
+    }
+
     fn insert_document(
         &mut self,
         info: ide_workspace::DocumentInfo,
@@ -2942,6 +3219,68 @@ impl Workbench {
         &self.fast_open_status
     }
 
+    pub fn smoke_command_palette(
+        &mut self,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_palette = true;
+        self.command_palette_input.update(cx, |input, cx| {
+            input.set_content(query.clone(), cx);
+        });
+        self.command_palette_query = query;
+        self.command_palette_selected = 0;
+        let focus = self.command_palette_input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    pub fn command_palette_count(&self) -> usize {
+        self.filtered_commands().len()
+    }
+
+    pub fn command_palette_first(&self) -> String {
+        self.filtered_commands()
+            .first()
+            .map(|command| command.label().to_owned())
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_command_palette_execute(
+        &mut self,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_palette = true;
+        self.command_palette_query = query;
+        self.command_palette_selected = 0;
+        let command = self.filtered_commands().first().copied();
+        if let Some(command) = command {
+            self.execute_command(command, window, cx);
+        }
+    }
+
+    pub fn sidebar_mode_name(&self) -> &'static str {
+        match self.sidebar_mode {
+            SidebarMode::Project => "Project",
+            SidebarMode::Search => "Search",
+            SidebarMode::Git => "Git",
+            SidebarMode::Outline => "Outline",
+            SidebarMode::Problems => "Problems",
+            SidebarMode::Database => "Database",
+            SidebarMode::Http => "Http",
+            SidebarMode::Remote => "Remote",
+            SidebarMode::Notebook => "Notebook",
+            SidebarMode::Mcp => "Mcp",
+            SidebarMode::Agents => "Agents",
+            SidebarMode::Plugins => "Plugins",
+            SidebarMode::Tools => "Tools",
+            SidebarMode::Settings => "Settings",
+        }
+    }
+
     pub fn plugins_count(&self) -> usize {
         self.plugins.len()
     }
@@ -3299,6 +3638,82 @@ impl Workbench {
                     .child(self.fast_open_status.clone()),
             )
             .child(results)
+            .into_any_element()
+    }
+
+    fn render_command_palette(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if !self.command_palette {
+            return div().into_any_element();
+        }
+        let theme = self.theme;
+        let commands = self.filtered_commands();
+        let mut rows = div()
+            .id("command-palette-results")
+            .flex_1()
+            .min_h(px(0.))
+            .max_h(px(360.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, command) in commands.iter().take(80).enumerate() {
+            let selected = index == self.command_palette_selected;
+            let command = *command;
+            rows = rows.child(
+                div()
+                    .id(("command-palette-row", index))
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.command_palette_selected = index;
+                        this.execute_command(command, window, cx);
+                    }))
+                    .child(command.label()),
+            );
+        }
+        div()
+            .absolute()
+            .top(px(70.))
+            .left(px(280.))
+            .w(px(600.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .h(px(36.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.command_palette_input.clone()),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .text_size(px(9.5))
+                    .text_color(theme.faint)
+                    .child(format!("{} commands · ⌘⇧P", commands.len())),
+            )
+            .child(rows)
             .into_any_element()
     }
 
@@ -5626,6 +6041,9 @@ impl Render for Workbench {
             self.pending_goto = None;
             self.goto_position(doc, line, column, window, cx);
         }
+        if let Some(command) = self.pending_command.take() {
+            self.execute_command(command, window, cx);
+        }
         let active_editor = self
             .active
             .and_then(|doc| self.editors.get(&(doc, false)).cloned());
@@ -5695,6 +6113,7 @@ impl Render for Workbench {
         let tabs = self.render_tabs(cx).into_any_element();
         let run_panel = self.render_bottom_panel(window, cx);
         let quick_open = self.render_quick_open(cx);
+        let command_palette = self.render_command_palette(cx);
         div()
             .size_full()
             .relative()
@@ -5718,6 +6137,11 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &crate::ToggleQuickOpen, window, cx| {
                 this.toggle_quick_open(window, cx);
             }))
+            .on_action(
+                cx.listener(|this, _: &crate::ToggleCommandPalette, window, cx| {
+                    this.toggle_command_palette(window, cx);
+                }),
+            )
             .child(
                 div()
                     .flex_1()
@@ -5808,6 +6232,7 @@ impl Render for Workbench {
                     )),
             )
             .child(quick_open)
+            .child(command_palette)
     }
 }
 
@@ -5841,5 +6266,12 @@ mod tests {
         });
         assert_eq!(role, "Error");
         assert_eq!(text, "boom");
+    }
+
+    #[test]
+    fn command_filter_matches_label_words_case_insensitively() {
+        assert!(Command::ShowProblems.matches("problems"));
+        assert!(Command::ShowProblems.matches("show pro"));
+        assert!(!Command::ShowProblems.matches("market"));
     }
 }
