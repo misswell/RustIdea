@@ -73,6 +73,14 @@ enum DockerTab {
     Networks,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GitHubTab {
+    Overview,
+    Files,
+    Checks,
+    Comments,
+}
+
 #[derive(Clone, Debug)]
 enum LogcatEvent {
     Line(crate::logcat::LogcatLine),
@@ -672,6 +680,11 @@ pub struct Workbench {
     github_status: gpui::SharedString,
     github_state: ide_github::PrStateFilter,
     github_busy: bool,
+    github_selected: Option<u32>,
+    github_details: Option<ide_github::PullRequestDetails>,
+    github_comments: Vec<ide_github::PrReviewComment>,
+    github_detail_status: gpui::SharedString,
+    github_tab: GitHubTab,
     heap_info: Option<ide_host::ops::heap::HeapSnapshotInfo>,
     heap_classes: Vec<ide_host::ops::heap::HeapClassRow>,
     heap_path_input: Entity<TextInput>,
@@ -1381,6 +1394,11 @@ impl Workbench {
             github_status: "Open GitHub to load pull requests".into(),
             github_state: ide_github::PrStateFilter::Open,
             github_busy: false,
+            github_selected: None,
+            github_details: None,
+            github_comments: Vec::new(),
+            github_detail_status: "Select a pull request".into(),
+            github_tab: GitHubTab::Overview,
             heap_info: None,
             heap_classes: Vec::new(),
             heap_path_input,
@@ -5298,6 +5316,63 @@ impl Workbench {
         cx.notify();
     }
 
+    fn open_github_pr(&mut self, number: u32, cx: &mut Context<Self>) {
+        self.github_selected = Some(number);
+        self.github_details = None;
+        self.github_comments.clear();
+        self.github_tab = GitHubTab::Overview;
+        self.github_detail_status = format!("Loading pull request #{number}…").into();
+        let host = self.host.clone();
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let (details, comments) = tokio::join!(
+                host.github_pr_view(root.clone(), number),
+                host.github_review_comments(root, number)
+            );
+            let handle = this
+                .update(cx, |app, cx| {
+                    match details {
+                        Ok(details) => {
+                            app.github_detail_status = format!(
+                                "{} files · {} checks",
+                                details.files.len(),
+                                details.checks.len()
+                            )
+                            .into();
+                            app.github_details = Some(details);
+                            match comments {
+                                Ok(comments) => app.github_comments = comments,
+                                Err(error) => {
+                                    app.github_comments.clear();
+                                    app.github_detail_status =
+                                        format!("Review comments failed: {}", error.message).into();
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            app.github_details = None;
+                            app.github_detail_status =
+                                format!("Pull request failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn close_github_pr(&mut self, cx: &mut Context<Self>) {
+        self.github_selected = None;
+        self.github_details = None;
+        self.github_comments.clear();
+        cx.notify();
+    }
+
     fn open_heap_snapshot(&mut self, cx: &mut Context<Self>) {
         if self.heap_busy {
             return;
@@ -6499,6 +6574,34 @@ impl Workbench {
             .first()
             .map(|pull| format!("#{} {}", pull.number, pull.title))
             .unwrap_or_default()
+    }
+
+    pub fn smoke_github_pr(&mut self, number: u32, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::GitHub, cx);
+        self.open_github_pr(number, cx);
+    }
+
+    pub fn github_detail_summary(&self) -> String {
+        self.github_details
+            .as_ref()
+            .map(|details| {
+                format!(
+                    "#{} {} · {} files · {} checks",
+                    details.summary.number,
+                    details.summary.title,
+                    details.files.len(),
+                    details.checks.len()
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn github_comment_count(&self) -> usize {
+        self.github_comments.len()
+    }
+
+    pub fn github_detail_status_text(&self) -> String {
+        self.github_detail_status.to_string()
     }
 
     pub fn smoke_heap(&mut self, path: String, cx: &mut Context<Self>) {
@@ -10278,6 +10381,9 @@ impl Workbench {
 
     fn render_github(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
+        if self.github_selected.is_some() {
+            return self.render_github_detail(cx);
+        }
         let ready = self
             .github_availability
             .as_ref()
@@ -10313,7 +10419,7 @@ impl Workbench {
             );
         }
         for (index, pull) in self.github_pulls.iter().take(200).enumerate() {
-            let url = pull.url.clone();
+            let number = pull.number;
             let state_color = match pull.state {
                 ide_github::PrState::Open => theme.accent,
                 ide_github::PrState::Merged => theme.accent,
@@ -10331,9 +10437,9 @@ impl Workbench {
                     .border_color(theme.border)
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.panel_alt))
-                    .on_click(move |_: &ClickEvent, _, cx| {
-                        cx.open_url(&url);
-                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_github_pr(number, cx);
+                    }))
                     .child(
                         div()
                             .flex()
@@ -10462,6 +10568,366 @@ impl Workbench {
             )
             .child(div().px_2().py_1().child(tab_row))
             .child(rows)
+            .into_any_element()
+    }
+
+    fn render_github_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let Some(details) = self.github_details.as_ref() else {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(30.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .id("github-detail-back")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(9.5))
+                                .text_color(theme.muted)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.close_github_pr(cx);
+                                }))
+                                .child("← Pull requests"),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(theme.faint)
+                                .child(self.github_detail_status.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .p_3()
+                        .text_size(px(10.5))
+                        .text_color(theme.faint)
+                        .child(self.github_detail_status.clone()),
+                )
+                .into_any_element();
+        };
+        let summary = &details.summary;
+        let browser_url = summary.url.clone();
+        let mut body = div()
+            .id("github-detail-body")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap(px(5.));
+        match self.github_tab {
+            GitHubTab::Overview => {
+                body = body
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.text)
+                            .child(summary.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child(format!(
+                                "#{} · {} · {} → {}",
+                                summary.number, summary.author, summary.head_ref, summary.base_ref
+                            ))
+                            .child(format!("+{} −{}", summary.additions, summary.deletions)),
+                    )
+                    .when_some(summary.review_decision.clone(), |body, decision| {
+                        body.child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(theme.warning)
+                                .child(decision),
+                        )
+                    });
+                if !summary.labels.is_empty() {
+                    body = body.child(div().flex().flex_wrap().gap_1().children(
+                        summary.labels.iter().map(|label| {
+                            div()
+                                .px_1()
+                                .rounded_sm()
+                                .bg(theme.panel_alt)
+                                .text_size(px(8.5))
+                                .text_color(theme.muted)
+                                .child(label.name.clone())
+                        }),
+                    ));
+                }
+                if !details.body.trim().is_empty() {
+                    body = body.child(
+                        div()
+                            .p_2()
+                            .rounded_sm()
+                            .bg(theme.panel_alt)
+                            .text_size(px(10.5))
+                            .text_color(theme.muted)
+                            .child(details.body.clone()),
+                    );
+                }
+                if !details.reviewers.is_empty() {
+                    body = body.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .text_size(px(9.5))
+                            .text_color(theme.muted)
+                            .child("Reviewers")
+                            .children(details.reviewers.iter().map(|reviewer| {
+                                div().child(format!("{} · {}", reviewer.login, reviewer.state))
+                            })),
+                    );
+                }
+                if !details.commits.is_empty() {
+                    body = body.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .text_size(px(9.5))
+                            .text_color(theme.muted)
+                            .child("Commits")
+                            .children(details.commits.iter().map(|commit| {
+                                div().child(format!(
+                                    "{} {}",
+                                    &commit.oid[..commit.oid.len().min(7)],
+                                    commit.headline
+                                ))
+                            })),
+                    );
+                }
+            }
+            GitHubTab::Files => {
+                if details.files.is_empty() {
+                    body = body.child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.faint)
+                            .child("No changed files"),
+                    );
+                }
+                for (index, file) in details.files.iter().take(500).enumerate() {
+                    let path = self.root.join(&file.path);
+                    body = body.child(
+                        div()
+                            .id(("github-file", index))
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(10.))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.panel_alt))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.open_path(path.clone(), cx);
+                            }))
+                            .child(div().flex_1().truncate().child(file.path.clone()))
+                            .child(div().text_size(px(8.5)).text_color(theme.faint).child(
+                                format!(
+                                    "{} +{} −{}",
+                                    file.change_type, file.additions, file.deletions
+                                ),
+                            )),
+                    );
+                }
+            }
+            GitHubTab::Checks => {
+                if details.checks.is_empty() {
+                    body = body.child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.faint)
+                            .child("No checks"),
+                    );
+                }
+                for (index, check) in details.checks.iter().take(500).enumerate() {
+                    let url = check.url.clone();
+                    let color = match check.status {
+                        ide_github::CheckStatus::Success => theme.accent,
+                        ide_github::CheckStatus::Failure => theme.error,
+                        ide_github::CheckStatus::Pending => theme.warning,
+                        _ => theme.faint,
+                    };
+                    body = body.child(
+                        div()
+                            .id(("github-check", index))
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(10.))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .when(url.is_some(), |row| {
+                                row.cursor_pointer()
+                                    .hover(|style| style.bg(theme.panel_alt))
+                            })
+                            .when_some(url, |row, url| {
+                                row.on_click(move |_: &ClickEvent, _, cx| {
+                                    cx.open_url(&url);
+                                })
+                            })
+                            .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(color))
+                            .child(div().flex_1().truncate().child(check.name.clone()))
+                            .child(
+                                div()
+                                    .text_size(px(8.5))
+                                    .text_color(theme.faint)
+                                    .child(format!("{:?}", check.status)),
+                            ),
+                    );
+                }
+            }
+            GitHubTab::Comments => {
+                if self.github_comments.is_empty() {
+                    body = body.child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.faint)
+                            .child("No inline review comments"),
+                    );
+                }
+                for (index, comment) in self.github_comments.iter().take(300).enumerate() {
+                    body = body.child(
+                        div()
+                            .id(("github-comment", index))
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .text_size(px(9.5))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_color(theme.faint)
+                                    .child(comment.author.clone())
+                                    .child(format!(
+                                        "{}:{}",
+                                        comment.path,
+                                        comment.line.unwrap_or(comment.original_line.unwrap_or(0))
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(theme.muted)
+                                    .child(comment.body.clone()),
+                            ),
+                    );
+                }
+            }
+        }
+        let tabs = [
+            (GitHubTab::Overview, "Overview"),
+            (GitHubTab::Files, "Files"),
+            (GitHubTab::Checks, "Checks"),
+            (GitHubTab::Comments, "Comments"),
+        ];
+        let mut tab_row = div().flex().items_center().gap(px(3.));
+        for (index, (tab, label)) in tabs.into_iter().enumerate() {
+            let selected = self.github_tab == tab;
+            tab_row = tab_row.child(
+                div()
+                    .id(("github-detail-tab", index))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_size(px(9.))
+                    .text_color(if selected { theme.text } else { theme.faint })
+                    .bg(if selected {
+                        theme.accent_muted
+                    } else {
+                        theme.panel_alt
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.github_tab = tab;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("github-detail-back")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.close_github_pr(cx);
+                            }))
+                            .child("← Pull requests"),
+                    )
+                    .child(
+                        div()
+                            .id("github-open-browser")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(move |_: &ClickEvent, _, cx| {
+                                cx.open_url(&browser_url);
+                            })
+                            .child("Browser"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.github_detail_status.clone()),
+                    ),
+            )
+            .child(div().px_2().py_1().child(tab_row))
+            .child(body)
             .into_any_element()
     }
 

@@ -439,7 +439,7 @@ Panel coverage at this commit:
 | Bookmarks | F3 toggle at caret, navigable list, remove, per-project JSON persistence | local store + navigation |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers | `ide-docker` |
-| GitHub | repository/login status, PR list by state, labels/review/diff stats, open in browser | `ide-github` |
+| GitHub | repository/login status, PR list by state, details/files/checks/review comments, open in browser | `ide-github` |
 | Heap | import `.hprof`, analyze, object/class summary, class table by retained size | `ops::heap::debug_heap_open/classes` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, source navigation | `ide-profiler` |
 | Logcat | adb devices, streaming threadtime log, level/text filters | `adb` process |
@@ -675,6 +675,13 @@ github_prs=1 github_status=octo-org/demo · octocat · 1 pull requests
 github_first="#42 Add the native GitHub panel"
 ```
 
+GitHub PR detail smoke:
+
+```text
+github_detail=#14768 Refreshable tokens: bump cli/oauth to v1.3.0 and fix `gh status` column width · 2 files · 5 checks
+github_comments=3 github_detail_status=2 files · 5 checks
+```
+
 Heap snapshot smoke with a generated `ide-heap` sample:
 
 ```text
@@ -769,8 +776,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent:
   panel but no editor gutter marker yet. Services lists Docker objects and can
   start/stop/restart containers, but logs, pull/prune, custom connections and
   Compose lifecycle controls are missing. GitHub lists and filters pull
-  requests, but details, diffs, review submission, checks and timeline views
-  are missing. Heap imports and lists classes, but capture from a live JVM,
+  requests and shows details/checks/review comments, but the diff view,
+  review submission and timeline actions are missing. Heap imports and lists
+  classes, but capture from a live JVM,
   dominator pages, instance details, path-to-GC-root and snapshot comparison
   are missing. Profiler imports Node CPU profiles and lists methods, but
   recording new profiles, Python/JVM/perf formats and the call-tree view are
