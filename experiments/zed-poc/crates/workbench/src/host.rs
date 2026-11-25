@@ -1329,6 +1329,39 @@ impl NativeHost {
         .await
     }
 
+    pub async fn github_submit_review(
+        &self,
+        root: PathBuf,
+        number: u32,
+        event: ide_github::ReviewEvent,
+        body: String,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                ide_github::submit_review(&root, number, event, &body)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
+    pub async fn github_add_comment(
+        &self,
+        root: PathBuf,
+        number: u32,
+        body: String,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || ide_github::add_comment(&root, number, &body))
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
     pub async fn heap_open(&self, path: PathBuf) -> IdeResult<ide_host::ops::heap::HeapOpenResult> {
         self.run(move |host| async move {
             host.require_trust(MAIN_WINDOW)?;

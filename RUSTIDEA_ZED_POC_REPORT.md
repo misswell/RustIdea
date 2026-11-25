@@ -439,7 +439,7 @@ Panel coverage at this commit:
 | Bookmarks | F3 toggle at caret, navigable list, remove, per-project JSON persistence | local store + navigation |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers | `ide-docker` |
-| GitHub | repository/login status, PR list by state, details/files/checks/review comments, open in browser | `ide-github` |
+| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, submit review, conversation comment, open in browser | `ide-github` |
 | Heap | import `.hprof`, class table, class object pages, GC-root path | `ops::heap::debug_heap_open/classes/dominators/path` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, source navigation | `ide-profiler` |
 | Logcat | adb devices, streaming threadtime log, level/text filters | `adb` process |
@@ -680,7 +680,14 @@ GitHub PR detail smoke:
 
 ```text
 github_detail=#14768 Refreshable tokens: bump cli/oauth to v1.3.0 and fix `gh status` column width · 2 files · 5 checks
-github_comments=3 github_detail_status=2 files · 5 checks
+github_comments=3 github_timeline=2 github_detail_status=2 files · 5 checks
+```
+
+GitHub review submission smoke through the fake `gh` CLI (`pr review --comment`):
+
+```text
+github_review=Review submitted for #14768
+pr review 14768 --comment --body Smoke review comment
 ```
 
 Heap snapshot smoke with a generated `ide-heap` sample:
@@ -816,8 +823,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent:
   panel but no editor gutter marker yet. Services lists Docker objects and can
   start/stop/restart containers, but logs, pull/prune, custom connections and
   Compose lifecycle controls are missing. GitHub lists and filters pull
-  requests and shows details/checks/review comments, but the diff view,
-  review submission and timeline actions are missing. Heap imports and lists
+  requests and shows details/checks/review comments/timeline, submits reviews
+  and conversation comments, but the diff view and timeline write actions
+  (merge/close/reopen) are missing. Heap imports and lists
   classes and object pages with GC-root paths, but capture from a live JVM,
   snapshot comparison and richer instance/field detail are missing. Profiler
   imports Node CPU profiles and lists methods, but

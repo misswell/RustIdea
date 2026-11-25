@@ -716,6 +716,10 @@ pub struct Workbench {
     github_comments: Vec<ide_github::PrReviewComment>,
     github_detail_status: gpui::SharedString,
     github_tab: GitHubTab,
+    github_comment_input: Entity<TextInput>,
+    github_review_status: gpui::SharedString,
+    github_review_busy: bool,
+    _github_comment_subscription: Subscription,
     heap_info: Option<ide_host::ops::heap::HeapSnapshotInfo>,
     heap_classes: Vec<ide_host::ops::heap::HeapClassRow>,
     heap_path_input: Entity<TextInput>,
@@ -1264,6 +1268,22 @@ impl Workbench {
                     app.import_coverage(cx);
                 }
             });
+        let github_comment_input = cx.new(|cx| {
+            TextInput::new(
+                "Write a review or conversation comment…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let github_comment_subscription =
+            cx.subscribe(&github_comment_input, |app, _, event, cx| {
+                if let TextInputEvent::Submit(_) = event {
+                    app.add_github_comment(cx);
+                }
+            });
         let heap_path_input = cx.new(|cx| {
             TextInput::new(
                 "Heap snapshot path (.hprof)…",
@@ -1502,6 +1522,10 @@ impl Workbench {
             github_comments: Vec::new(),
             github_detail_status: "Select a pull request".into(),
             github_tab: GitHubTab::Overview,
+            github_comment_input,
+            github_review_status: gpui::SharedString::default(),
+            github_review_busy: false,
+            _github_comment_subscription: github_comment_subscription,
             heap_info: None,
             heap_classes: Vec::new(),
             heap_path_input,
@@ -5450,6 +5474,18 @@ impl Workbench {
         self.github_comments.clear();
         self.github_tab = GitHubTab::Overview;
         self.github_detail_status = format!("Loading pull request #{number}…").into();
+        self.load_github_pr(number, false, cx);
+    }
+
+    fn reload_github_pr(&mut self, number: u32, cx: &mut Context<Self>) {
+        if self.github_selected != Some(number) {
+            return;
+        }
+        self.github_detail_status = format!("Refreshing pull request #{number}…").into();
+        self.load_github_pr(number, true, cx);
+    }
+
+    fn load_github_pr(&mut self, number: u32, preserve_on_error: bool, cx: &mut Context<Self>) {
         let host = self.host.clone();
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
@@ -5478,9 +5514,118 @@ impl Workbench {
                             }
                         }
                         Err(error) => {
-                            app.github_details = None;
+                            if !preserve_on_error {
+                                app.github_details = None;
+                            }
                             app.github_detail_status =
                                 format!("Pull request failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn submit_github_review(&mut self, event: ide_github::ReviewEvent, cx: &mut Context<Self>) {
+        if self.github_review_busy {
+            return;
+        }
+        let Some(number) = self.github_selected else {
+            self.github_review_status = "Select a pull request first".into();
+            cx.notify();
+            return;
+        };
+        let body = self
+            .github_comment_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if !matches!(event, ide_github::ReviewEvent::Approve) && body.is_empty() {
+            self.github_review_status = "Write a review comment first".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.github_review_busy = true;
+        self.github_review_status = "Submitting review…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.github_submit_review(root, number, event, body).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.github_review_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.github_review_status =
+                                format!("Review submitted for #{number}").into();
+                            app.github_comment_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                            app.reload_github_pr(number, cx);
+                        }
+                        Err(error) => {
+                            app.github_review_status =
+                                format!("Review failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn add_github_comment(&mut self, cx: &mut Context<Self>) {
+        if self.github_review_busy {
+            return;
+        }
+        let Some(number) = self.github_selected else {
+            self.github_review_status = "Select a pull request first".into();
+            cx.notify();
+            return;
+        };
+        let body = self
+            .github_comment_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if body.is_empty() {
+            self.github_review_status = "Write a comment first".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.github_review_busy = true;
+        self.github_review_status = "Adding comment…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.github_add_comment(root, number, body).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.github_review_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.github_review_status = format!("Comment added to #{number}").into();
+                            app.github_comment_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                            app.reload_github_pr(number, cx);
+                        }
+                        Err(error) => {
+                            app.github_review_status =
+                                format!("Comment failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -7134,6 +7279,36 @@ impl Workbench {
 
     pub fn github_detail_status_text(&self) -> String {
         self.github_detail_status.to_string()
+    }
+
+    pub fn github_timeline_count(&self) -> usize {
+        self.github_details
+            .as_ref()
+            .map(|details| details.timeline.len())
+            .unwrap_or_default()
+    }
+
+    pub fn github_file_count(&self) -> usize {
+        self.github_details
+            .as_ref()
+            .map(|details| details.files.len())
+            .unwrap_or_default()
+    }
+
+    pub fn github_review_status_text(&self) -> String {
+        self.github_review_status.to_string()
+    }
+
+    pub fn smoke_github_review(&mut self, event: &str, body: String, cx: &mut Context<Self>) {
+        self.github_comment_input.update(cx, |input, cx| {
+            input.set_content(body, cx);
+        });
+        let event = match event {
+            "approve" => ide_github::ReviewEvent::Approve,
+            "request-changes" => ide_github::ReviewEvent::RequestChanges,
+            _ => ide_github::ReviewEvent::Comment,
+        };
+        self.submit_github_review(event, cx);
     }
 
     pub fn smoke_heap(&mut self, path: String, cx: &mut Context<Self>) {
@@ -11366,6 +11541,126 @@ impl Workbench {
                             })),
                     );
                 }
+                if !details.timeline.is_empty() {
+                    body = body.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .text_size(px(9.5))
+                            .text_color(theme.muted)
+                            .child("Conversation")
+                            .children(details.timeline.iter().take(100).map(|item| {
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(1.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .text_size(px(8.5))
+                                            .text_color(theme.faint)
+                                            .child(item.author.clone())
+                                            .when_some(item.review_state.clone(), |row, state| {
+                                                row.child(
+                                                    div().text_color(theme.warning).child(state),
+                                                )
+                                            }),
+                                    )
+                                    .when(!item.body.trim().is_empty(), |item_row| {
+                                        item_row.child(
+                                            div()
+                                                .text_size(px(9.5))
+                                                .text_color(theme.muted)
+                                                .child(item.body.clone()),
+                                        )
+                                    })
+                            })),
+                    );
+                }
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .pt_2()
+                        .child(
+                            div()
+                                .text_size(px(9.5))
+                                .text_color(theme.muted)
+                                .child("Review"),
+                        )
+                        .child(self.github_comment_input.clone())
+                        .when(!self.github_review_status.is_empty(), |composer| {
+                            composer.child(
+                                div()
+                                    .text_size(px(8.5))
+                                    .text_color(theme.faint)
+                                    .child(self.github_review_status.clone()),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("github-review-comment")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(theme.panel_alt)
+                                        .text_size(px(8.5))
+                                        .text_color(theme.text)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.add_github_comment(cx);
+                                        }))
+                                        .child("Comment"),
+                                )
+                                .child(
+                                    div()
+                                        .id("github-review-approve")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(theme.accent_muted)
+                                        .text_size(px(8.5))
+                                        .text_color(theme.text)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.submit_github_review(
+                                                ide_github::ReviewEvent::Approve,
+                                                cx,
+                                            );
+                                        }))
+                                        .child("Approve"),
+                                )
+                                .child(
+                                    div()
+                                        .id("github-review-request-changes")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(theme.panel_alt)
+                                        .text_size(px(8.5))
+                                        .text_color(theme.warning)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.submit_github_review(
+                                                ide_github::ReviewEvent::RequestChanges,
+                                                cx,
+                                            );
+                                        }))
+                                        .child("Request changes"),
+                                ),
+                        ),
+                );
             }
             GitHubTab::Files => {
                 if details.files.is_empty() {
