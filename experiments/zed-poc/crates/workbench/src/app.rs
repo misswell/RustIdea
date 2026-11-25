@@ -458,6 +458,10 @@ pub struct Workbench {
     agent_entries: HashMap<String, BTreeMap<u32, ide_agent::AgentEntry>>,
     agent_subentries: HashMap<String, BTreeMap<u32, ide_agent::AgentEntry>>,
     agent_viewing_subagent: Option<String>,
+    agent_answer_target: Option<(String, u32)>,
+    agent_answer_input: Entity<TextInput>,
+    agent_answer_status: gpui::SharedString,
+    _agent_answer_subscription: Subscription,
     agent_task_status: gpui::SharedString,
     mcp_servers: Vec<ide_agent::McpServer>,
     mcp_status: gpui::SharedString,
@@ -582,6 +586,25 @@ impl Workbench {
                 app.start_agent_task(cx);
             }
         });
+        let agent_answer_input = cx.new(|cx| {
+            TextInput::new(
+                "JSON answers (e.g. {\"question\": [\"answer\"]})",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let agent_answer_subscription =
+            cx.subscribe(&agent_answer_input, |app, _, event, cx| match event {
+                TextInputEvent::Submit(_) => app.submit_agent_form_answer(cx),
+                TextInputEvent::Cancel => {
+                    app.agent_answer_target = None;
+                    cx.notify();
+                }
+                _ => {}
+            });
         let mcp_name_input = cx.new(|cx| {
             TextInput::new(
                 "MCP server name",
@@ -843,6 +866,10 @@ impl Workbench {
             agent_entries: HashMap::default(),
             agent_subentries: HashMap::default(),
             agent_viewing_subagent: None,
+            agent_answer_target: None,
+            agent_answer_input,
+            agent_answer_status: "Answer as a JSON object".into(),
+            _agent_answer_subscription: agent_answer_subscription,
             agent_task_status: "No agent tasks".into(),
             mcp_servers: Vec::new(),
             mcp_status: "No MCP servers".into(),
@@ -1977,6 +2004,27 @@ impl Workbench {
             }
         }
         cx.notify();
+    }
+
+    fn open_agent_form_answer(&mut self, task: String, permission: u32, cx: &mut Context<Self>) {
+        self.agent_answer_target = Some((task, permission));
+        self.agent_answer_input
+            .update(cx, |input, cx| input.set_content("{}", cx));
+        self.agent_answer_status = "Type the JSON answer object the agent expects".into();
+        cx.notify();
+    }
+
+    fn submit_agent_form_answer(&mut self, cx: &mut Context<Self>) {
+        let Some((task, permission)) = self.agent_answer_target.take() else {
+            return;
+        };
+        let answer = self.agent_answer_input.read(cx).content().trim().to_owned();
+        if answer.is_empty() {
+            self.agent_answer_status = "Answer cannot be empty".into();
+            cx.notify();
+            return;
+        }
+        self.respond_agent_permission(task, permission, Some(answer), cx);
     }
 
     fn refresh_tools(&mut self, cx: &mut Context<Self>) {
@@ -4571,6 +4619,81 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_agent_form_answer(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some((_, permission)) = &self.agent_answer_target else {
+            return div().into_any_element();
+        };
+        let theme = self.theme;
+        div()
+            .absolute()
+            .top(px(140.))
+            .left(px(300.))
+            .w(px(560.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(10.5))
+                    .text_color(theme.muted)
+                    .child(format!("Agent form request #{permission}")),
+            )
+            .child(div().px_2().pb_1().child(self.agent_answer_input.clone()))
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(9.5))
+                    .text_color(theme.faint)
+                    .child(self.agent_answer_status.clone()),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("agent-form-save")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.submit_agent_form_answer(cx);
+                            }))
+                            .child("Submit"),
+                    )
+                    .child(
+                        div()
+                            .id("agent-form-cancel")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.agent_answer_target = None;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_setting_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(key) = &self.setting_edit_key else {
             return div().into_any_element();
@@ -5541,6 +5664,8 @@ impl Workbench {
                 if let ide_agent::AgentEntry::Permission {
                     id,
                     options,
+                    questions,
+                    form,
                     chosen: None,
                     ..
                 } = entry
@@ -5591,6 +5716,24 @@ impl Workbench {
                             }))
                             .child("Cancel"),
                     );
+                    if !questions.is_empty() || form.is_some() {
+                        let task = task_id.clone();
+                        actions = actions.child(
+                            div()
+                                .id(SharedString::from(format!("permission-{permission}-form")))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(theme.accent_muted)
+                                .text_size(px(9.))
+                                .text_color(theme.text)
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.open_agent_form_answer(task.clone(), permission, cx);
+                                }))
+                                .child("Answer form"),
+                        );
+                    }
                     row = row.child(actions);
                 }
                 if let ide_agent::AgentEntry::Subagent {
@@ -6879,6 +7022,7 @@ impl Render for Workbench {
         let command_palette = self.render_command_palette(cx);
         let symbol_search = self.render_symbol_search(cx);
         let setting_editor = self.render_setting_editor(cx);
+        let agent_form_answer = self.render_agent_form_answer(cx);
         div()
             .size_full()
             .relative()
@@ -7005,6 +7149,7 @@ impl Render for Workbench {
             .child(command_palette)
             .child(symbol_search)
             .child(setting_editor)
+            .child(agent_form_answer)
     }
 }
 
