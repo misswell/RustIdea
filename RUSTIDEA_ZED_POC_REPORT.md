@@ -326,7 +326,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - the editor now binds core Zed actions: caret movement/selection, backspace/
   delete, page up/down, undo/redo, copy/cut/paste/select-all, comment toggle,
   indent/outdent, completion (Ctrl-Space), go-to-definition/declaration
-  (F12/Shift-F12);
+  (F12/Shift-F12); the full macOS default Zed keymap is also loaded from
+  `keymaps/default-macos.json` (603 bindings), with RustIdea bindings applied
+  afterwards so Quick Open/Command Palette/Symbol Search keep their own keys;
 - a bottom-panel Terminal uses the Zed `terminal` crate's Alacritty/VT screen
   model with OpenIDEA's `ops::term` PTY ownership. The OpenIDEA PTY output is
   fed into `terminal::Terminal::write_output`; the workbench renders the
@@ -414,6 +416,7 @@ Panel coverage at this commit:
 |---|---|---|
 | Project tree | working | `ops::fs::read_dir` |
 | Quick Open (Cmd-P) | working | `ops::nav::find_files` |
+| Zed default macOS keymap | loaded (603 bindings) | `settings::KeymapFile` |
 | Command Palette (Cmd-Shift-P) | working (34 commands) | local dispatch |
 | Go to Symbol (Cmd-Shift-O) | working | `ops::nav::find_symbols` |
 | Find Usages (Alt-F7) | working | `ops::lsp::lsp_references` |
@@ -519,6 +522,12 @@ Command-palette smoke:
 commands=1 command_first="Show Problems" sidebar=Problems
 ```
 
+Keymap smoke:
+
+```text
+WORKBENCH_KEYMAP bindings=603
+```
+
 Go-to-symbol smoke:
 
 ```text
@@ -604,8 +613,7 @@ documents/project/sync/host: 24 passed; 0 failed
 - External-change reload/conflict handling in the Zed Buffer path (the POC only
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
-- Plugin live UI contributions, the full Zed keymap (only core editor actions
-  are bound), full debugger session UI (variables/stack/
+- Plugin live UI contributions, full debugger session UI (variables/stack/
   breakpoints) and Java/Unity attach, notebook rich-output editing, live
   remote-write verification (UI path exists), structured question/form widgets
   and live subagent/form verification

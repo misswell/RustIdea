@@ -115,6 +115,16 @@ fn main() {
             if let Err(error) = java::register(&language_registry) {
                 eprintln!("WORKBENCH_JAVA_LANGUAGE_ERROR {error:#}");
             }
+            match settings::KeymapFile::load_asset_allow_partial_failure(
+                settings::DEFAULT_KEYMAP_PATH,
+                cx,
+            ) {
+                Ok(bindings) => {
+                    eprintln!("WORKBENCH_KEYMAP bindings={}", bindings.len());
+                    cx.bind_keys(bindings);
+                }
+                Err(error) => eprintln!("WORKBENCH_DEFAULT_KEYMAP_ERROR {error:#}"),
+            }
             cx.bind_keys([
                 KeyBinding::new("cmd-s", SaveDocument, Some("Editor")),
                 KeyBinding::new("cmd-w", CloseTab, None),
