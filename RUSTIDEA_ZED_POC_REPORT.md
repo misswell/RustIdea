@@ -446,7 +446,7 @@ Panel coverage at this commit:
 | Scratch | list/create/edit scratch files in the app data directory | local workspace + `ops::doc` |
 | Recent Files | per-project MRU list persisted in app config | local store |
 | Save a Copy | writes the active unsaved buffer text to a chosen path | `save_file_copy` |
-| Analysis | Locate Duplicates with identifier/literal normalisation, clickable fragments | `ops::analysis::analysis_locate_duplicates` |
+| Analysis | Locate Duplicates + structural pattern search, clickable fragments | `ops::analysis::analysis_locate_duplicates`, `structural_search` |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
@@ -740,6 +740,13 @@ duplicate_groups=1 duplicate_status=1 duplicate groups · 2 files · 374 tokens 
 duplicate_first="src/main/java/com/example/DupA.java:1"
 ```
 
+Structural search smoke (Java pattern `return $A + $B;`):
+
+```text
+structural_matches=2 structural_status=2 matches in 2 files · 1 ms
+structural_first="src/main/java/com/example/DupA.java:34"
+```
+
 Build smoke on the Maven project:
 
 ```text
@@ -802,8 +809,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent:
   Scratch panel lists and creates files, but the language chooser and template
   shortcuts are missing. Save As currently saves a copy: the OpenIDEA document
   layer only supports re-keying untitled buffers, not renaming an existing file.
-  Analysis runs Locate Duplicates but Inspect Code and structural search/replace
-  are missing. The Terminal now has a real VT screen
+  Analysis runs Locate Duplicates and structural search, but Inspect Code and
+  applying structural replacements are missing. The Terminal now has a real VT
+  screen
   and OpenIDEA PTY, but its mouse selection, hyperlinks, IME composition and
   resize path are not yet verified or complete (the IME input handler is
   wired, but locked-screen visual/IME verification is still unavailable).

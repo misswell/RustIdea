@@ -82,6 +82,12 @@ enum GitHubTab {
     Comments,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnalysisTab {
+    Duplicates,
+    Structural,
+}
+
 #[derive(Clone, Debug)]
 enum LogcatEvent {
     Line(crate::logcat::LogcatLine),
@@ -751,6 +757,14 @@ pub struct Workbench {
     duplicates_busy: bool,
     duplicates_anonymize_identifiers: bool,
     duplicates_anonymize_literals: bool,
+    analysis_tab: AnalysisTab,
+    structural_pattern_input: Entity<TextInput>,
+    structural_replacement_input: Entity<TextInput>,
+    structural_language_input: Entity<TextInput>,
+    structural_files: Vec<ide_analysis::StructuralFile>,
+    structural_status: gpui::SharedString,
+    structural_busy: bool,
+    _structural_subscriptions: Vec<Subscription>,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -1320,6 +1334,54 @@ impl Workbench {
                 app.create_scratch(cx);
             }
         });
+        let structural_pattern_input = cx.new(|cx| {
+            TextInput::new(
+                "Structural pattern, e.g. return $A + $B;",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let structural_replacement_input = cx.new(|cx| {
+            TextInput::new(
+                "Replacement template (optional)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let structural_language_input = cx.new(|cx| {
+            TextInput::new(
+                "Language id (java, typescript, rust…)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        structural_language_input.update(cx, |input, cx| input.set_content("java", cx));
+        let structural_subscriptions = vec![
+            cx.subscribe(&structural_pattern_input, |app, _, event, cx| {
+                if let TextInputEvent::Submit(_) = event {
+                    app.run_structural_search(cx);
+                }
+            }),
+            cx.subscribe(&structural_replacement_input, |app, _, event, cx| {
+                if let TextInputEvent::Submit(_) = event {
+                    app.run_structural_search(cx);
+                }
+            }),
+            cx.subscribe(&structural_language_input, |app, _, event, cx| {
+                if let TextInputEvent::Submit(_) = event {
+                    app.run_structural_search(cx);
+                }
+            }),
+        ];
         let setting_edit_input = cx.new(|cx| {
             TextInput::new(
                 "Setting value",
@@ -1476,6 +1538,14 @@ impl Workbench {
             duplicates_busy: false,
             duplicates_anonymize_identifiers: true,
             duplicates_anonymize_literals: true,
+            analysis_tab: AnalysisTab::Duplicates,
+            structural_pattern_input,
+            structural_replacement_input,
+            structural_language_input,
+            structural_files: Vec::new(),
+            structural_status: "Run a structural search to find syntax patterns".into(),
+            structural_busy: false,
+            _structural_subscriptions: structural_subscriptions,
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -5706,6 +5776,105 @@ impl Workbench {
         cx.notify();
     }
 
+    fn run_structural_search(&mut self, cx: &mut Context<Self>) {
+        if self.structural_busy {
+            return;
+        }
+        let pattern = self
+            .structural_pattern_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if pattern.is_empty() {
+            self.structural_status = "Enter a structural pattern".into();
+            cx.notify();
+            return;
+        }
+        let language = self
+            .structural_language_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if language.is_empty() {
+            self.structural_status = "Enter a language id".into();
+            cx.notify();
+            return;
+        }
+        let replacement = self
+            .structural_replacement_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let query = ide_analysis::StructuralQuery {
+            pattern,
+            language: ide_core::LanguageId::new(language),
+            replacement: (!replacement.is_empty()).then_some(replacement),
+            max_matches: 5_000,
+        };
+        let host = self.host.clone();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let events =
+            ide_host::ops::Channel::new(move |event: ide_host::ops::analysis::StructuralEvent| {
+                let _ = event_tx.send(event);
+            });
+        self.structural_busy = true;
+        self.structural_files.clear();
+        self.structural_status = "Searching structurally…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.structural_search(query, events).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.structural_busy = false;
+                    match result {
+                        Ok(()) => {
+                            let mut summary = None;
+                            while let Ok(event) = event_rx.try_recv() {
+                                match event {
+                                    ide_host::ops::analysis::StructuralEvent::File { file } => {
+                                        app.structural_files.push(file);
+                                    }
+                                    ide_host::ops::analysis::StructuralEvent::Done {
+                                        summary: done,
+                                    } => summary = Some(done),
+                                }
+                            }
+                            app.structural_status = summary
+                                .map(|summary| {
+                                    format!(
+                                        "{} matches in {} files · {} ms{}",
+                                        summary.matches,
+                                        summary.files,
+                                        summary.elapsed_ms,
+                                        if summary.limit_hit {
+                                            " · limit reached"
+                                        } else {
+                                            ""
+                                        }
+                                    )
+                                })
+                                .unwrap_or_else(|| "Structural search finished".into())
+                                .into();
+                        }
+                        Err(error) => {
+                            app.structural_files.clear();
+                            app.structural_status =
+                                format!("Structural search failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn open_profile(&mut self, cx: &mut Context<Self>) {
         if self.profile_busy {
             return;
@@ -7002,6 +7171,37 @@ impl Workbench {
             .and_then(|report| report.groups.first())
             .and_then(|group| group.fragments.first())
             .map(|fragment| format!("{}:{}", fragment.rel_path, fragment.range.start.line + 1))
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_structural(&mut self, pattern: String, language: String, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Analysis, cx);
+        self.analysis_tab = AnalysisTab::Structural;
+        self.structural_language_input.update(cx, |input, cx| {
+            input.set_content(language, cx);
+        });
+        self.structural_pattern_input.update(cx, |input, cx| {
+            input.set_content(pattern, cx);
+        });
+        self.run_structural_search(cx);
+    }
+
+    pub fn structural_match_count(&self) -> usize {
+        self.structural_files
+            .iter()
+            .map(|file| file.matches.len())
+            .sum()
+    }
+
+    pub fn structural_status_text(&self) -> String {
+        self.structural_status.to_string()
+    }
+
+    pub fn structural_first(&self) -> String {
+        self.structural_files
+            .first()
+            .and_then(|file| file.matches.first().map(|matched| (file, matched)))
+            .map(|(file, matched)| format!("{}:{}", file.rel_path, matched.range.start.line + 1))
             .unwrap_or_default()
     }
 
@@ -12130,6 +12330,9 @@ impl Workbench {
     }
 
     fn render_analysis(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if self.analysis_tab == AnalysisTab::Structural {
+            return self.render_structural(cx);
+        }
         let theme = self.theme;
         let mut rows = div()
             .id("duplicate-groups")
@@ -12237,6 +12440,34 @@ impl Workbench {
                     .border_color(theme.border)
                     .child(
                         div()
+                            .id("analysis-tab-duplicates")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .child("Duplicates"),
+                    )
+                    .child(
+                        div()
+                            .id("analysis-tab-structural")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.muted)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.analysis_tab = AnalysisTab::Structural;
+                                cx.notify();
+                            }))
+                            .child("Structural"),
+                    )
+                    .child(
+                        div()
                             .id("duplicates-run")
                             .px_2()
                             .py_1()
@@ -12308,6 +12539,179 @@ impl Workbench {
                             .truncate()
                             .child(self.duplicates_status.clone()),
                     ),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
+    fn render_structural(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("structural-results")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.structural_files.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(self.structural_status.clone()),
+            );
+        }
+        for (file_index, file) in self.structural_files.iter().take(100).enumerate() {
+            rows = rows.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(9.5))
+                    .text_color(theme.muted)
+                    .bg(theme.panel_alt)
+                    .child(format!("{} · {}", file.rel_path, file.matches.len())),
+            );
+            for (match_index, matched) in file.matches.iter().take(50).enumerate() {
+                let path = file.path.0.clone();
+                let line = matched.range.start.line;
+                let column = matched.range.start.col;
+                rows = rows.child(
+                    div()
+                        .id(("structural-match", file_index * 100 + match_index))
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.panel_alt))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_or_goto(path.clone(), line, column, window, cx);
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(theme.faint)
+                                .child(format!("{}:{}", file.rel_path, line + 1)),
+                        )
+                        .child(
+                            div()
+                                .font_family("Menlo")
+                                .text_size(px(8.5))
+                                .text_color(theme.text)
+                                .child(matched.line_text.clone()),
+                        )
+                        .when_some(matched.replacement.clone(), |row, replacement| {
+                            row.child(
+                                div()
+                                    .font_family("Menlo")
+                                    .text_size(px(8.5))
+                                    .text_color(theme.accent)
+                                    .child(format!("→ {replacement}")),
+                            )
+                        }),
+                );
+            }
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("analysis-tab-duplicates")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.muted)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.analysis_tab = AnalysisTab::Duplicates;
+                                cx.notify();
+                            }))
+                            .child("Duplicates"),
+                    )
+                    .child(
+                        div()
+                            .id("analysis-tab-structural")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .child("Structural"),
+                    )
+                    .child(
+                        div()
+                            .id("structural-run")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(if self.structural_busy {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.run_structural_search(cx);
+                            }))
+                            .child(if self.structural_busy {
+                                "Searching…"
+                            } else {
+                                "Search"
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.structural_status.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.structural_language_input.clone()),
+            )
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.structural_pattern_input.clone()),
+            )
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.structural_replacement_input.clone()),
             )
             .child(rows)
             .into_any_element()
