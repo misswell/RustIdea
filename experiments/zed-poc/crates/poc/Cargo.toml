@@ -19,6 +19,7 @@ clock.workspace = true
 collections.workspace = true
 editor.workspace = true
 futures.workspace = true
+fs = { path = "../../../../third_party/zed/crates/fs" }
 gpui.workspace = true
 gpui_platform.workspace = true
 ide-core.workspace = true
@@ -28,8 +29,10 @@ ide-lsp.workspace = true
 ide-run = { path = "../../../../crates/ide-run" }
 ide-workspace.workspace = true
 language.workspace = true
+languages = { path = "../../../../third_party/zed/crates/languages", features = ["load-grammars"] }
 multi_buffer.workspace = true
 lsp.workspace = true
+node_runtime = { path = "../../../../third_party/zed/crates/node_runtime" }
 project.workspace = true
 release_channel.workspace = true
 semver.workspace = true

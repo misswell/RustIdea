@@ -14,9 +14,10 @@ OpenIDEA parity. Phase 0–2 do not require every Phase 3–7 feature, and the 0
 release must not be described as a complete IDE replacement.
 
 The separate `experiment/zed-editor` V2 effort is tracked in
-`RUSTIDEA_ZED_POC_REPORT.md`. It currently proves the Zed editor/document/LSP/
-run/save bridge only; it has not replaced this workbench or completed the
-OpenIDEA UI parity migration.
+`RUSTIDEA_ZED_POC_REPORT.md`. It now has a first native workbench shell
+(project tree, tabs, Zed Editor, multi-document OpenIDEA sync/save and
+language intelligence), but it has not replaced this complete workbench or
+completed the OpenIDEA UI parity migration.
 
 ## Shell and workbench
 

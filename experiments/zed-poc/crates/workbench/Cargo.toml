@@ -1,0 +1,53 @@
+[package]
+name = "rustidea-zed-workbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rustidea-zed-workbench"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+assets.workspace = true
+clock.workspace = true
+collections.workspace = true
+editor.workspace = true
+futures.workspace = true
+fs = { path = "../../../../third_party/zed/crates/fs" }
+gpui.workspace = true
+gpui_platform.workspace = true
+ide-core.workspace = true
+ide-dap = { path = "../../../../crates/ide-dap" }
+ide-host.workspace = true
+ide-language.workspace = true
+ide-lsp.workspace = true
+ide-sdk = { path = "../../../../crates/ide-sdk" }
+ide-text = { path = "../../../../crates/ide-text" }
+ide-tools = { path = "../../../../crates/ide-tools" }
+ide-vfs = { path = "../../../../crates/ide-vfs" }
+ide-workspace.workspace = true
+language.workspace = true
+languages = { path = "../../../../third_party/zed/crates/languages", features = ["load-grammars"] }
+lsp.workspace = true
+multi_buffer.workspace = true
+node_runtime = { path = "../../../../third_party/zed/crates/node_runtime" }
+parking_lot = "0.12"
+project.workspace = true
+release_channel.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+settings.workspace = true
+text.workspace = true
+theme.workspace = true
+theme_settings.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tree-sitter-java = "0.23.5"
+util.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

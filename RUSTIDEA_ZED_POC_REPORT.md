@@ -42,6 +42,10 @@ The POC binary is `rustidea-zed-poc`. It builds and runs with:
   (`Editor::for_buffer`), so the same-file multi-view requirement is structurally
   satisfied.
 
+A second binary, `rustidea-zed-workbench`, now hosts these pieces in a first
+native workbench shell with a project tree, document tabs and a status bar. It
+uses the same OpenIDEA Host and Zed Editor instead of a separate editor engine.
+
 It does **not** create a Zed Project, does not start Zed LSP/index services, and
 does not contain a WebView.
 
@@ -302,6 +306,56 @@ The first line of
 the process exited, proving Zed buffer edit -> OpenIdea incremental edit ->
 OpenIdea Host save for Java. The Java project was then packaged successfully
 through the OpenIdea run service (`mvn package`, exit 0).
+
+## Phase 4 workbench shell (2026-11-25)
+
+The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
+
+- native project tree rows, expandable directories and a real OpenIDEA
+  `ops::fs::read_dir` path;
+- native document tabs backed by one cached Zed `Buffer` per OpenIDEA document;
+- the Zed `Editor` renders the active tab and receives OpenIDEA completion,
+  semantics and code-action providers through `DocumentLsp`;
+- buffer edits are sent incrementally to
+  `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
+  `DocPatched` events and diagnostics are applied back to Zed buffers;
+- Java is registered with a local Zed `LanguageConfig`, tree-sitter-java grammar
+  and the OpenIDEA Java outline query, because Zed's built-in language set does
+  not include Java.
+
+Headless smoke test (real native window, real OpenIDEA host, Java file):
+
+```text
+WORKBENCH_PROJECT_OPEN name=rustidea-java-workbench-smoke trusted=true
+WORKBENCH_TREE rows=3
+WORKBENCH_DOC_OPEN doc=1 path=.../App.java language=java tabs=1
+WORKBENCH_COMPLETION count=1
+WORKBENCH_SMOKE status=jdtls: Ready language=true text_prefix="// rustidea workbench smoke 1795600004"
+```
+
+`WORKBENCH_COMPLETION` is a real OpenIDEA jdtls completion request made through
+the workbench's `DocumentLsp`; it is not yet an onscreen menu acceptance test.
+`language=true` proves the buffer has an attached Zed tree-sitter language
+(including the custom Java registration), not merely an OpenIDEA language id.
+
+The first line of the Java file on disk was the inserted marker after the
+process exited, so the multi-document workbench path exercised:
+
+```text
+project open -> tree load -> OpenIDEA doc open -> Zed Buffer edit
+-> OpenIDEA document sync -> OpenIDEA save -> disk
+```
+
+The macOS window exists and `CGWindowListCopyWindowInfo` reports it onscreen
+(`RustIdea Zed`, 1280x853). Window-specific `screencapture` captures the GPUI
+background but not the Metal-rendered text layer, so this screenshot is not
+used as visual text/IME acceptance.
+
+Workbench tests:
+
+```text
+documents/project/sync/host: 24 passed; 0 failed
+```
 
 ## Not yet done
 

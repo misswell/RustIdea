@@ -22,7 +22,7 @@ use language::{
 };
 use semantics::OpenIdeaSemanticsProvider;
 use settings::SettingsStore;
-use theme::LoadThemes;
+use theme::{ActiveTheme, LoadThemes};
 
 actions!(rustidea_poc, [SaveDocument]);
 
@@ -44,9 +44,25 @@ struct PocApp {
 }
 
 impl PocApp {
-    fn new(backend: Arc<OpenIdeaBridge>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        backend: Arc<OpenIdeaBridge>,
+        language_registry: Arc<language::LanguageRegistry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let text = backend.text.clone();
         let buffer = cx.new(|cx| Buffer::local(text, cx));
+        let language = backend.language.clone();
+        let buffer_for_language = buffer.clone();
+        let registry_for_language = language_registry.clone();
+        cx.spawn(async move |_this, cx| {
+            if let Ok(language) = registry_for_language.language_for_name(&language).await {
+                buffer_for_language.update(cx, |buffer, cx| {
+                    buffer.set_language(Some(language), cx);
+                });
+            }
+        })
+        .detach();
         let version = buffer.read(cx).snapshot().version().clone();
         let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
         let provider = OpenIdeaCompletionProvider::new(backend.clone());
@@ -573,6 +589,16 @@ fn main() {
             theme_settings::init(LoadThemes::All(Box::new(assets::Assets)), cx);
             release_channel::init(semver::Version::new(0, 0, 0), cx);
             editor::init(cx);
+            let language_registry = Arc::new(language::LanguageRegistry::new(
+                cx.background_executor().clone(),
+            ));
+            language_registry.set_theme(cx.theme().clone());
+            languages::init(
+                language_registry.clone(),
+                fs::RealFs::new(None, cx.background_executor().clone()),
+                node_runtime::NodeRuntime::unavailable(),
+                cx,
+            );
             cx.bind_keys([KeyBinding::new("cmd-s", SaveDocument, None)]);
 
             let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
@@ -584,7 +610,8 @@ fn main() {
                     },
                     |window, cx| {
                         let backend = backend.clone();
-                        cx.new(|cx| PocApp::new(backend, window, cx))
+                        let language_registry = language_registry.clone();
+                        cx.new(|cx| PocApp::new(backend, language_registry, window, cx))
                     },
                 )
                 .expect("open Zed editor window");
