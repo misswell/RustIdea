@@ -22,16 +22,30 @@ use crate::project::{ProjectTree, Toggle};
 use crate::semantics::OpenIdeaSemanticsProvider;
 use crate::theme::{Theme, ThemeMode};
 
+fn refresh_window(handle: Option<gpui::WindowHandle<Workbench>>, cx: &mut gpui::AsyncApp) {
+    if let Some(handle) = handle
+        && let Err(error) = handle.update(cx, |_, window, _| window.refresh())
+    {
+        eprintln!("WORKBENCH_REFRESH_ERROR {error:#}");
+    }
+}
+
+pub struct InitialState {
+    pub project: ide_host::ops::project::ProjectInfo,
+    pub root_listing: Vec<ide_vfs::FileEntry>,
+    pub document: Option<ide_workspace::DocumentInfo>,
+}
+
 pub struct Workbench {
     host: Arc<NativeHost>,
     language_registry: Arc<language::LanguageRegistry>,
     root: PathBuf,
-    initial_file: Option<PathBuf>,
     tree: ProjectTree,
     tree_scroll: UniformListScrollHandle,
     documents: HashMap<DocId, ZedDocument>,
     store: DocumentStore<DocId>,
-    editors: HashMap<DocId, Entity<Editor>>,
+    editors: HashMap<(DocId, bool), Entity<Editor>>,
+    split: bool,
     order: Vec<DocId>,
     active: Option<DocId>,
     subscriptions: HashMap<DocId, Subscription>,
@@ -40,6 +54,7 @@ pub struct Workbench {
     theme: Theme,
     status: gpui::SharedString,
     diagnostics: HashMap<PathBuf, usize>,
+    window_handle: Option<gpui::WindowHandle<Workbench>>,
 }
 
 impl Workbench {
@@ -47,73 +62,66 @@ impl Workbench {
         host: Arc<NativeHost>,
         language_registry: Arc<language::LanguageRegistry>,
         root: PathBuf,
-        initial_file: Option<PathBuf>,
+        initial: InitialState,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let InitialState {
+            project,
+            root_listing,
+            document,
+        } = initial;
+        let window_handle = window.window_handle().downcast::<Workbench>();
         let mut tree = ProjectTree::new(root.clone());
+        tree.apply_directory(root.clone(), root_listing);
         tree.rebuild();
-        let ui_events = host.take_events();
-        if let Some(mut events) = ui_events {
-            cx.spawn(async move |this, cx| {
-                while let Some(event) = events.receiver.recv().await {
-                    this.update(cx, |app, cx| app.handle_event(event, cx)).ok();
-                }
-            })
-            .detach();
-        }
-        let host_for_project = host.clone();
-        let root_for_project = root.clone();
-        cx.spawn(async move |this, cx| {
-            match host_for_project.open_project(&root_for_project).await {
-                Ok(project) => {
-                    eprintln!(
-                        "WORKBENCH_PROJECT_OPEN name={} trusted={}",
-                        project.name, project.trusted
-                    );
-                    if std::env::var_os("RUSTIDEA_ZED_TRUST").is_some() {
-                        let _ = host_for_project
-                            .set_project_trust(&root_for_project, true, false)
-                            .await;
-                    }
-                    this.update(cx, |app, cx| {
-                        app.status = format!("{} · {}", project.name, app.root.display()).into();
-                        app.load_root(cx);
-                        if let Some(file) = app.initial_file.clone() {
-                            app.open_path(file, cx);
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                Err(error) => {
-                    this.update(cx, |app, cx| {
-                        app.status = format!("Open project failed: {}", error.message).into();
-                        cx.notify();
-                    })
-                    .ok();
-                }
-            }
-        })
-        .detach();
-        Self {
+        let registry_for_initial = language_registry.clone();
+        let split = std::env::var_os("RUSTIDEA_ZED_SMOKE_SPLIT").is_some();
+        let status = format!("{} · {}", project.name, root.display());
+        let mut app = Self {
             host,
             language_registry,
             root,
-            initial_file,
             tree,
             tree_scroll: UniformListScrollHandle::new(),
             documents: HashMap::default(),
             store: DocumentStore::default(),
             editors: HashMap::default(),
+            split,
             order: Vec::new(),
             active: None,
             subscriptions: HashMap::default(),
             diagnostic_servers: HashMap::default(),
             next_diagnostic_server: 1,
             theme: Theme::for_mode(ThemeMode::Dark),
-            status: "Opening project…".into(),
+            status: status.into(),
             diagnostics: HashMap::default(),
+            window_handle,
+        };
+        if let Some(document) = document {
+            app.insert_document(document, &registry_for_initial, cx);
         }
+        let ui_events = app.host.take_events();
+        if let Some(mut events) = ui_events {
+            cx.spawn(async move |this, cx| {
+                while let Some(event) = events.receiver.recv().await {
+                    let handle = this
+                        .update(cx, |app, cx| {
+                            app.handle_event(event, cx);
+                            app.window_handle
+                        })
+                        .ok()
+                        .flatten();
+                    refresh_window(handle, cx);
+                }
+            })
+            .detach();
+        }
+        app
+    }
+
+    pub fn set_window_handle(&mut self, window: gpui::WindowHandle<Workbench>) {
+        self.window_handle = Some(window);
     }
 
     fn load_root(&mut self, cx: &mut Context<Self>) {
@@ -121,17 +129,21 @@ impl Workbench {
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let listing = host.read_dir(&root).await;
-            this.update(cx, |app, cx| {
-                match listing {
-                    Ok(listing) => {
-                        app.tree.apply_directory(root, listing);
-                        eprintln!("WORKBENCH_TREE rows={}", app.tree.nodes().len());
+            let handle = this
+                .update(cx, |app, cx| {
+                    match listing {
+                        Ok(listing) => {
+                            app.tree.apply_directory(root, listing);
+                            eprintln!("WORKBENCH_TREE rows={}", app.tree.nodes().len());
+                        }
+                        Err(error) => app.tree.apply_error(root, error.message),
                     }
-                    Err(error) => app.tree.apply_error(root, error.message),
-                }
-                cx.notify();
-            })
-            .ok();
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
         })
         .detach();
     }
@@ -140,20 +152,89 @@ impl Workbench {
         let host = self.host.clone();
         cx.spawn(async move |this, cx| {
             let listing = host.read_dir(&path).await;
-            this.update(cx, |app, cx| {
-                match listing {
-                    Ok(listing) => app.tree.apply_directory(path, listing),
-                    Err(error) => app.tree.apply_error(path, error.message),
-                }
-                cx.notify();
-            })
-            .ok();
+            let handle = this
+                .update(cx, |app, cx| {
+                    match listing {
+                        Ok(listing) => app.tree.apply_directory(path, listing),
+                        Err(error) => app.tree.apply_error(path, error.message),
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
         })
         .detach();
     }
 
     fn activate(&mut self, doc: DocId, cx: &mut Context<Self>) {
         self.active = Some(doc);
+        cx.notify();
+    }
+
+    fn ensure_editor(
+        &mut self,
+        doc: DocId,
+        secondary: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Editor>> {
+        if let Some(editor) = self.editors.get(&(doc, secondary)) {
+            return Some(editor.clone());
+        }
+        let document = self.documents.get(&doc)?;
+        let buffer = document.buffer.clone();
+        let editor = cx.new(|cx| Editor::for_buffer(buffer, None, window, cx));
+        let lsp = Arc::new(DocumentLsp::new(
+            self.host.clone(),
+            doc,
+            document.path.clone(),
+        ));
+        editor.update(cx, |editor, _| {
+            editor.set_completion_provider(Some(Rc::new(OpenIdeaCompletionProvider::new(
+                lsp.clone(),
+            ))));
+            editor
+                .set_semantics_provider(Some(Rc::new(OpenIdeaSemanticsProvider::new(lsp.clone()))));
+            editor.set_code_action_provider(Some(Rc::new(OpenIdeaCodeActionProvider::new(lsp))));
+        });
+        self.editors.insert((doc, secondary), editor.clone());
+        Some(editor)
+    }
+
+    fn close_tab(&mut self, doc: DocId, cx: &mut Context<Self>) {
+        let Some(position) = self.order.iter().position(|candidate| *candidate == doc) else {
+            return;
+        };
+        let path = self
+            .documents
+            .get(&doc)
+            .map(|document| document.path.clone());
+        let was_active = self.active == Some(doc);
+        self.order.remove(position);
+        self.subscriptions.remove(&doc);
+        self.documents.remove(&doc);
+        self.editors.remove(&(doc, false));
+        self.editors.remove(&(doc, true));
+        if let Some(path) = path {
+            self.store.release(&DocumentKey::Path(path.clone()));
+            let _ = self.host.close_document(doc);
+            if self.split && self.order.is_empty() {
+                self.split = false;
+            }
+        }
+        if was_active {
+            self.active = self
+                .order
+                .get(position.min(self.order.len().saturating_sub(1)))
+                .copied();
+        }
+        cx.notify();
+    }
+
+    fn toggle_split(&mut self, cx: &mut Context<Self>) {
+        self.split = !self.split;
         cx.notify();
     }
 
@@ -177,16 +258,20 @@ impl Workbench {
         let registry = self.language_registry.clone();
         cx.spawn(async move |this, cx| {
             let info = host.open_document(&path).await;
-            this.update(cx, |app, cx| {
-                match info {
-                    Ok(info) => app.insert_document(info, &registry, cx),
-                    Err(error) => {
-                        app.status = format!("Open failed: {}", error.message).into();
+            let handle = this
+                .update(cx, |app, cx| {
+                    match info {
+                        Ok(info) => app.insert_document(info, &registry, cx),
+                        Err(error) => {
+                            app.status = format!("Open failed: {}", error.message).into();
+                        }
                     }
-                }
-                cx.notify();
-            })
-            .ok();
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
         })
         .detach();
     }
@@ -243,32 +328,36 @@ impl Workbench {
             let result = host
                 .apply_document_edit_async(doc_id, base_version, changes)
                 .await;
-            this.update(cx, |app, cx| {
-                let Some(document) = app.documents.get_mut(&doc_id) else {
-                    return;
-                };
-                document.syncing = false;
-                match result {
-                    Ok(version) => {
-                        document.backend_version = version;
-                        document.confirmed_clock = request_clock.clone();
-                        let current = document.buffer.read(cx).snapshot().version().clone();
-                        if current != request_clock {
-                            app.sync_document(doc_id, cx);
-                        } else if document.save_requested {
-                            document.save_requested = false;
-                            app.save_document(doc_id, cx);
+            let handle = this
+                .update(cx, |app, cx| {
+                    let Some(document) = app.documents.get_mut(&doc_id) else {
+                        return app.window_handle;
+                    };
+                    document.syncing = false;
+                    match result {
+                        Ok(version) => {
+                            document.backend_version = version;
+                            document.confirmed_clock = request_clock.clone();
+                            let current = document.buffer.read(cx).snapshot().version().clone();
+                            if current != request_clock {
+                                app.sync_document(doc_id, cx);
+                            } else if document.save_requested {
+                                document.save_requested = false;
+                                app.save_document(doc_id, cx);
+                            }
+                        }
+                        Err(error) => {
+                            document.conflict =
+                                Some(format!("OpenIDEA edit failed: {}", error.message));
+                            app.status = document.conflict.clone().unwrap().into();
                         }
                     }
-                    Err(error) => {
-                        document.conflict =
-                            Some(format!("OpenIDEA edit failed: {}", error.message));
-                        app.status = document.conflict.clone().unwrap().into();
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
         })
         .detach();
     }
@@ -288,19 +377,23 @@ impl Workbench {
         let host = self.host.clone();
         cx.spawn(async move |this, cx| {
             let result = host.save_document(doc_id).await;
-            this.update(cx, |app, cx| {
-                match result {
-                    Ok(()) => {
-                        buffer.update(cx, |buffer, cx| buffer.did_save(version, None, cx));
-                        app.status = "Saved through OpenIDEA".into();
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(()) => {
+                            buffer.update(cx, |buffer, cx| buffer.did_save(version, None, cx));
+                            app.status = "Saved through OpenIDEA".into();
+                        }
+                        Err(error) => {
+                            app.status = format!("Save failed: {}", error.message).into();
+                        }
                     }
-                    Err(error) => {
-                        app.status = format!("Save failed: {}", error.message).into();
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
         })
         .detach();
     }
@@ -372,6 +465,16 @@ impl Workbench {
 
     pub fn smoke_status(&self) -> String {
         self.status.to_string()
+    }
+
+    pub fn smoke_enable_split(&mut self, cx: &mut Context<Self>) {
+        if !self.split {
+            self.toggle_split(cx);
+        }
+    }
+
+    pub fn smoke_editor_count(&self) -> usize {
+        self.editors.len()
     }
 
     pub fn smoke_has_language(&self, cx: &gpui::App) -> bool {
@@ -512,15 +615,44 @@ impl Workbench {
                     .text_size(px(12.))
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.panel_alt))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.activate(id, cx);
+                        if let Some(editor) = this.editors.get(&(id, false)) {
+                            let focus = editor.read(cx).focus_handle(cx);
+                            window.focus(&focus, cx);
+                        }
                     }))
                     .child(title)
                     .when(dirty, |tab| {
                         tab.child(div().w(px(6.)).h(px(6.)).rounded_full().bg(theme.accent))
-                    }),
+                    })
+                    .child(
+                        div()
+                            .id(("close-tab", id.0))
+                            .px_1()
+                            .text_color(theme.faint)
+                            .hover(|style| style.text_color(theme.error))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(id, cx);
+                            }))
+                            .child("×"),
+                    ),
             );
         }
+        row = row.child(div().flex_1()).child(
+            div()
+                .id("toggle-split")
+                .px_3()
+                .text_color(theme.muted)
+                .text_size(px(11.))
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.text))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.toggle_split(cx);
+                }))
+                .child(if self.split { "Unsplit" } else { "Split" }),
+        );
         row
     }
 
@@ -600,7 +732,7 @@ impl Workbench {
         }
         if let Some(window) = window
             && let Some(doc) = self.active
-            && let Some(editor) = self.editors.get(&doc)
+            && let Some(editor) = self.editors.get(&(doc, false))
         {
             window.focus(&editor.read(cx).focus_handle(cx), cx);
         }
@@ -611,32 +743,28 @@ impl Workbench {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        if let Some(doc) = self.active
-            && !self.editors.contains_key(&doc)
-            && let Some(document) = self.documents.get(&doc)
+        let mut focus_primary = false;
+        if let Some(doc) = self.active {
+            focus_primary = !self.editors.contains_key(&(doc, false));
+            self.ensure_editor(doc, false, window, cx);
+            if self.split {
+                self.ensure_editor(doc, true, window, cx);
+            }
+        }
+        if focus_primary
+            && let Some(doc) = self.active
+            && let Some(editor) = self.editors.get(&(doc, false))
         {
-            let buffer = document.buffer.clone();
-            let editor = cx.new(|cx| Editor::for_buffer(buffer, None, window, cx));
-            let lsp = Arc::new(DocumentLsp::new(
-                self.host.clone(),
-                doc,
-                document.path.clone(),
-            ));
-            editor.update(cx, |editor, _| {
-                editor.set_completion_provider(Some(Rc::new(OpenIdeaCompletionProvider::new(
-                    lsp.clone(),
-                ))));
-                editor.set_semantics_provider(Some(Rc::new(OpenIdeaSemanticsProvider::new(
-                    lsp.clone(),
-                ))));
-                editor
-                    .set_code_action_provider(Some(Rc::new(OpenIdeaCodeActionProvider::new(lsp))));
-            });
             let focus = editor.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
-            self.editors.insert(doc, editor);
         }
-        let active_editor = self.active.and_then(|doc| self.editors.get(&doc).cloned());
+        let active_editor = self
+            .active
+            .and_then(|doc| self.editors.get(&(doc, false)).cloned());
+        let split_editor = self
+            .active
+            .filter(|_| self.split)
+            .and_then(|doc| self.editors.get(&(doc, true)).cloned());
         let project = self.render_project(cx).into_any_element();
         let tabs = self.render_tabs(cx).into_any_element();
         div()
@@ -649,6 +777,14 @@ impl Render for Workbench {
                 if let Some(doc) = this.active {
                     this.save_document(doc, cx);
                 }
+            }))
+            .on_action(cx.listener(|this, _: &crate::CloseTab, _, cx| {
+                if let Some(doc) = this.active {
+                    this.close_tab(doc, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &crate::ToggleSplit, _, cx| {
+                this.toggle_split(cx);
             }))
             .child(
                 div()
@@ -685,17 +821,36 @@ impl Render for Workbench {
                             .flex_col()
                             .child(tabs)
                             .child(
-                                div().flex_1().min_h(px(0.)).child(match active_editor {
-                                    Some(editor) => editor.into_any_element(),
-                                    None => div()
-                                        .size_full()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_color(theme.faint)
-                                        .child("Open a file from the project tree")
-                                        .into_any_element(),
-                                }),
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .flex()
+                                    .child(
+                                        div().flex_1().min_w(px(0.)).h_full().child(
+                                            match active_editor {
+                                                Some(editor) => editor.into_any_element(),
+                                                None => div()
+                                                    .size_full()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_color(theme.faint)
+                                                    .child("Open a file from the project tree")
+                                                    .into_any_element(),
+                                            },
+                                        ),
+                                    )
+                                    .when_some(split_editor, |row, editor| {
+                                        row.child(
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .h_full()
+                                                .border_l_1()
+                                                .border_color(theme.border)
+                                                .child(editor),
+                                        )
+                                    }),
                             ),
                     ),
             )

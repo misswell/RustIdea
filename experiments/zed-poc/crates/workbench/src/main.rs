@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ::theme::{ActiveTheme, LoadThemes};
-use app::Workbench;
+use app::{InitialState, Workbench};
 use gpui::{
     App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, actions, px, size,
 };
@@ -25,7 +25,7 @@ use gpui_platform::application;
 use host::NativeHost;
 use settings::SettingsStore;
 
-actions!(rustidea_zed, [SaveDocument]);
+actions!(rustidea_zed, [SaveDocument, CloseTab, ToggleSplit]);
 
 fn main() {
     let root = std::env::args()
@@ -36,6 +36,47 @@ fn main() {
     let host = NativeHost::start().unwrap_or_else(|error| {
         panic!("start OpenIDEA backend: {error:#}");
     });
+    let host_for_open = host.clone();
+    let root_for_open = root.clone();
+    let initial_file_for_open = initial_file.clone();
+    let (project, root_listing, initial_document) = host.runtime().block_on(async move {
+        let project = host_for_open
+            .open_project(&root_for_open)
+            .await
+            .unwrap_or_else(|error| panic!("open {}: {}", root_for_open.display(), error.message));
+        if std::env::var_os("RUSTIDEA_ZED_TRUST").is_some()
+            && let Err(error) = host_for_open
+                .set_project_trust(&root_for_open, true, false)
+                .await
+        {
+            eprintln!("WORKBENCH_TRUST_ERROR {}", error.message);
+        }
+        let listing = host_for_open
+            .read_dir(&root_for_open)
+            .await
+            .unwrap_or_else(|error| {
+                eprintln!("WORKBENCH_TREE_ERROR {}", error.message);
+                Vec::new()
+            });
+        let initial_document = match initial_file_for_open {
+            Some(path) => match host_for_open.open_document(&path).await {
+                Ok(document) => Some(document),
+                Err(error) => {
+                    eprintln!("WORKBENCH_INITIAL_DOC_ERROR {}", error.message);
+                    None
+                }
+            },
+            None => None,
+        };
+        (project, listing, initial_document)
+    });
+    eprintln!(
+        "WORKBENCH_PROJECT_OPEN name={} trusted={} tree_rows={} initial_doc={}",
+        project.name,
+        project.trusted,
+        root_listing.len(),
+        initial_document.is_some()
+    );
 
     application()
         .with_assets(assets::Assets)
@@ -61,12 +102,15 @@ fn main() {
             if let Err(error) = java::register(&language_registry) {
                 eprintln!("WORKBENCH_JAVA_LANGUAGE_ERROR {error:#}");
             }
-            cx.bind_keys([KeyBinding::new("cmd-s", SaveDocument, Some("Editor"))]);
+            cx.bind_keys([
+                KeyBinding::new("cmd-s", SaveDocument, Some("Editor")),
+                KeyBinding::new("cmd-w", CloseTab, None),
+                KeyBinding::new("cmd-\\", ToggleSplit, None),
+            ]);
 
             let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
             let host = host.clone();
             let root = root.clone();
-            let initial_file = initial_file.clone();
             let window = cx
                 .open_window(
                     WindowOptions {
@@ -77,16 +121,42 @@ fn main() {
                         }),
                         ..Default::default()
                     },
-                    move |_window, cx| {
+                    move |window, cx| {
                         let host = host.clone();
                         let root = root.clone();
                         let language_registry = language_registry.clone();
-                        let initial_file = initial_file.clone();
-                        cx.new(|cx| Workbench::new(host, language_registry, root, initial_file, cx))
+                        let project = project;
+                        let root_listing = root_listing;
+                        let initial_document = initial_document;
+                        cx.new(|cx| {
+                            Workbench::new(
+                                host,
+                                language_registry,
+                                root,
+                                InitialState {
+                                    project,
+                                    root_listing,
+                                    document: initial_document,
+                                },
+                                window,
+                                cx,
+                            )
+                        })
                     },
                 )
                 .expect("open RustIdea Zed window");
+            let window_handle = window;
+            window
+                .update(cx, |app, _, _| app.set_window_handle(window_handle))
+                .expect("attach workbench window handle");
             if let Ok(marker) = std::env::var("RUSTIDEA_ZED_SMOKE_MARKER") {
+                window
+                    .update(cx, |_workbench, window, _cx| {
+                        window.activate_window();
+                    })
+                    .expect("activate workbench window");
+                cx.activate(true);
+                let smoke_split = std::env::var_os("RUSTIDEA_ZED_SMOKE_SPLIT").is_some();
                 let completion_position = std::env::var("RUSTIDEA_ZED_SMOKE_COMPLETION_POS")
                     .ok()
                     .and_then(|position| {
@@ -100,6 +170,9 @@ fn main() {
                                 .timer(std::time::Duration::from_secs(3))
                                 .await;
                             this.update(cx, |app, cx| {
+                                if smoke_split {
+                                    app.smoke_enable_split(cx);
+                                }
                                 if let Some((line, column)) = completion_position {
                                     app.smoke_request_completion(line, column, cx);
                                 }
@@ -118,9 +191,10 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
+                                    app.smoke_editor_count(),
                                     app.smoke_active_text(cx).lines().next().unwrap_or_default()
                                 );
                                 cx.quit();
