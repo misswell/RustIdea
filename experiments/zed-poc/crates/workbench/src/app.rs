@@ -43,6 +43,7 @@ enum SidebarMode {
     Profiler,
     Logcat,
     Scratch,
+    Recent,
     Outline,
     Problems,
     Database,
@@ -101,6 +102,7 @@ enum Command {
     ShowLogcat,
     ShowScratches,
     NewScratch,
+    ShowRecent,
     ShowOutline,
     ShowProblems,
     ShowDatabase,
@@ -131,7 +133,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 48] = [
+    const ALL: [Command; 49] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -153,6 +155,7 @@ impl Command {
         Command::ShowLogcat,
         Command::ShowScratches,
         Command::NewScratch,
+        Command::ShowRecent,
         Command::ShowOutline,
         Command::ShowProblems,
         Command::ShowDatabase,
@@ -205,6 +208,7 @@ impl Command {
             Command::ShowLogcat => "Show Logcat",
             Command::ShowScratches => "Show Scratch Files",
             Command::NewScratch => "New Scratch File",
+            Command::ShowRecent => "Show Recent Files",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
             Command::ShowDatabase => "Show Database",
@@ -689,6 +693,10 @@ pub struct Workbench {
     scratch_name_input: Entity<TextInput>,
     scratch_status: gpui::SharedString,
     _scratch_input_subscription: Subscription,
+    recent_store: crate::recent::RecentStore,
+    recent_file_path: PathBuf,
+    recent_files: Vec<PathBuf>,
+    recent_status: gpui::SharedString,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -1261,6 +1269,9 @@ impl Workbench {
             });
         let scratch_dir = host.scratch_dir();
         let scratch_files = crate::scratch::list(&scratch_dir);
+        let recent_file_path = host.config_dir().join("recent-files.json");
+        let recent_store = crate::recent::RecentStore::load(&recent_file_path);
+        let recent_files = recent_store.project(&root);
         let bookmarks_file = host.config_dir().join("bookmarks.json");
         let bookmark_store = crate::bookmarks::BookmarkStore::load(&bookmarks_file);
         let bookmarks = bookmark_store.project(&root).to_vec();
@@ -1370,6 +1381,10 @@ impl Workbench {
             scratch_name_input,
             scratch_status: "Create or open a scratch file".into(),
             _scratch_input_subscription: scratch_input_subscription,
+            recent_store,
+            recent_file_path,
+            recent_files,
+            recent_status: "Open a file to build a recent list".into(),
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -1621,6 +1636,7 @@ impl Workbench {
             SidebarMode::GitHub => self.refresh_github(cx),
             SidebarMode::Logcat => self.refresh_logcat_devices(cx),
             SidebarMode::Scratch => self.refresh_scratches(cx),
+            SidebarMode::Recent => self.refresh_recent(cx),
             SidebarMode::Http => self.refresh_http(cx),
             SidebarMode::Database => self.refresh_db(cx),
             SidebarMode::Remote => self.refresh_remote(cx),
@@ -3894,6 +3910,7 @@ impl Workbench {
 
     fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if let Some(doc) = self.store.get(&DocumentKey::for_ui_path(&path)).copied() {
+            self.record_recent_file(&path, cx);
             self.activate(doc, cx);
             return;
         }
@@ -3902,8 +3919,14 @@ impl Workbench {
             .values()
             .any(|document| document.path == path)
         {
-            if let Some((doc, _)) = self.documents.iter().find(|(_, d)| d.path == path) {
-                self.activate(*doc, cx);
+            if let Some(doc) = self
+                .documents
+                .iter()
+                .find(|(_, document)| document.path == path)
+                .map(|(doc, _)| *doc)
+            {
+                self.record_recent_file(&path, cx);
+                self.activate(doc, cx);
             }
             return;
         }
@@ -4264,6 +4287,7 @@ impl Workbench {
                     .update(cx, |input, cx| input.set_content(name, cx));
                 self.create_scratch(cx);
             }
+            Command::ShowRecent => self.select_sidebar(SidebarMode::Recent, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
             Command::ShowDatabase => self.select_sidebar(SidebarMode::Database, cx),
@@ -4323,6 +4347,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         let key = DocumentKey::Path(info.path.0.clone());
+        self.record_recent_file(&info.path.0, cx);
         if let Some(existing) = self.store.get(&key).copied() {
             self.activate(existing, cx);
             return;
@@ -5515,6 +5540,31 @@ impl Workbench {
         self.open_path(file.path, cx);
     }
 
+    fn record_recent_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.recent_store.record(&self.root, path, 50);
+        self.recent_files = self.recent_store.project(&self.root);
+        self.recent_status = match self.recent_store.save(&self.recent_file_path) {
+            Ok(()) => format!("{} recent files", self.recent_files.len()).into(),
+            Err(error) => format!("Recent files save failed: {error}").into(),
+        };
+        if self.sidebar_mode == SidebarMode::Recent {
+            cx.notify();
+        }
+    }
+
+    fn refresh_recent(&mut self, cx: &mut Context<Self>) {
+        self.recent_files = self.recent_store.project(&self.root);
+        self.recent_status = format!("{} recent files", self.recent_files.len()).into();
+        cx.notify();
+    }
+
+    fn open_recent(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.recent_files.get(index).cloned() else {
+            return;
+        };
+        self.open_path(path, cx);
+    }
+
     fn stage_all(&mut self, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = self
             .git_status
@@ -5941,6 +5991,7 @@ impl Workbench {
             SidebarMode::Profiler => "Profiler",
             SidebarMode::Logcat => "Logcat",
             SidebarMode::Scratch => "Scratch",
+            SidebarMode::Recent => "Recent",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
             SidebarMode::Database => "Database",
@@ -6448,6 +6499,25 @@ impl Workbench {
         self.scratch_files
             .first()
             .map(|file| file.name.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_recent(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Recent, cx);
+    }
+
+    pub fn recent_count(&self) -> usize {
+        self.recent_files.len()
+    }
+
+    pub fn recent_status_text(&self) -> String {
+        self.recent_status.to_string()
+    }
+
+    pub fn recent_first(&self) -> String {
+        self.recent_files
+            .first()
+            .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default()
     }
 
@@ -10896,6 +10966,96 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_recent(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let root = crate::bookmarks::project_key(&self.root);
+        let prefix = format!("{root}/");
+        let mut rows = div()
+            .id("recent-files")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.recent_files.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child("No recent files"),
+            );
+        }
+        for (index, path) in self.recent_files.iter().take(200).enumerate() {
+            let full = path.to_string_lossy();
+            let label = full.strip_prefix(&prefix).unwrap_or(&full).to_owned();
+            rows = rows.child(
+                div()
+                    .id(("recent-file", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.5))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_recent(index, cx);
+                    }))
+                    .child(
+                        div()
+                            .w(px(18.))
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child((index + 1).to_string()),
+                    )
+                    .child(div().flex_1().truncate().child(label)),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("recent-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_recent(cx);
+                            }))
+                            .child("Refresh"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.recent_status.clone()),
+                    ),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut results = div()
@@ -12482,6 +12642,7 @@ impl Render for Workbench {
         let profiler = self.render_profiler(cx);
         let logcat = self.render_logcat(cx);
         let scratch = self.render_scratch(cx);
+        let recent = self.render_recent(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
         let settings = self.render_settings(cx);
@@ -12500,6 +12661,7 @@ impl Render for Workbench {
             SidebarMode::Profiler => profiler,
             SidebarMode::Logcat => logcat,
             SidebarMode::Scratch => scratch,
+            SidebarMode::Recent => recent,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
             SidebarMode::Settings => settings,
@@ -12527,6 +12689,7 @@ impl Render for Workbench {
             ("PROF", SidebarMode::Profiler),
             ("LOGCAT", SidebarMode::Logcat),
             ("SCR", SidebarMode::Scratch),
+            ("RCNT", SidebarMode::Recent),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
             ("DB", SidebarMode::Database),
