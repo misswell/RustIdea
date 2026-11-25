@@ -450,6 +450,28 @@ fn main() {
             }
             Err(error) => eprintln!("POC_LSP_CODE_ACTIONS_ERROR {}", error.message),
         }
+        let line_count = backend.text.lines().count() as u32;
+        let last_column = backend
+            .text
+            .lines()
+            .last()
+            .map(|line| line.encode_utf16().count() as u32)
+            .unwrap_or(0);
+        match backend.inlay_hints_blocking(ide_core::Range::new(
+            ide_core::Pos::new(0, 0),
+            ide_core::Pos::new(line_count.saturating_sub(1), last_column),
+        )) {
+            Ok(hints) => {
+                eprintln!("POC_LSP_INLAY_HINTS count={}", hints.len());
+                for hint in hints.iter().take(12) {
+                    eprintln!(
+                        "POC_LSP_INLAY_HINT {:?} {}:{} {:?}",
+                        hint.kind, hint.position.line, hint.position.col, hint.label
+                    );
+                }
+            }
+            Err(error) => eprintln!("POC_LSP_INLAY_HINTS_ERROR {}", error.message),
+        }
         match backend.definition_blocking(
             line,
             column.saturating_sub(5),

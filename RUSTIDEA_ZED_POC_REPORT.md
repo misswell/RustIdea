@@ -33,8 +33,8 @@ The POC binary is `rustidea-zed-poc`. It builds and runs with:
   results into Zed's hover blocks and same-file `lsp_goto` results into Zed
   `LocationLink`s. Rename uses OpenIdea `lsp_prepare_rename` plus
   `lsp_rename`/`apply_workspace_edit`; document highlights use
-  `lsp_document_highlights`. Inlay hints and semantic tokens remain explicit
-  empty stubs in this POC.
+  `lsp_document_highlights`. Inlay-hint mapping now calls
+  `lsp_inlay_hints`; semantic tokens remain an explicit empty stub.
 - An OpenIdea event pump that converts `IdeEvent::Diagnostics` into a Zed
   `DiagnosticSet` and calls `Buffer::update_diagnostics`, with one stable Zed
   language-server id per OpenIdea diagnostic producer.
@@ -242,6 +242,10 @@ outside the project root are not watched by this POC.
   point, `Editor::set_code_action_provider`. It asks
   `ide_host::ops::lsp::lsp_code_actions` for actions and applies a chosen action
   through `lsp_apply_code_action`, keeping OpenIdea as the edit authority.
+- `OpenIdeaSemanticsProvider::inlay_hints` maps OpenIdea label/part/tooltip/
+  padding/kind data into Zed `InlayHint`s. The live TypeScript and Rust
+  language-server runs below returned `count=0`, so rendering of a real inlay
+  hint is not claimed; the conversion path is compiled but not visually proven.
 - The POC has a headless Java/Maven end-to-end run mode using the same OpenIdea
   Host, project, document and LSP services.
 

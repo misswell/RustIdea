@@ -283,6 +283,27 @@ impl OpenIdeaBridge {
         self.runtime.block_on(self.resolve_completion(item))
     }
 
+    pub async fn inlay_hints(
+        &self,
+        range: ide_core::Range,
+    ) -> IdeResult<Vec<ide_lsp::types::InlayHint>> {
+        let host = self.host.clone();
+        let doc = self.doc;
+        self.runtime
+            .spawn(
+                async move { ide_host::ops::lsp::lsp_inlay_hints(&host, WINDOW, doc, range).await },
+            )
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn inlay_hints_blocking(
+        &self,
+        range: ide_core::Range,
+    ) -> IdeResult<Vec<ide_lsp::types::InlayHint>> {
+        self.runtime.block_on(self.inlay_hints(range))
+    }
+
     pub async fn definition(
         &self,
         line: u32,

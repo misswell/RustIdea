@@ -1,15 +1,17 @@
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use collections::{HashMap, HashSet};
 use editor::{GotoDefinitionKind, RenameTarget, SemanticsProvider};
 use futures::future::Shared;
 use gpui::{App, AppContext as _, Entity, Task};
-use language::{Anchor, Buffer, BufferRow};
+use language::{Anchor, Buffer, BufferRow, language_settings::InlayHintKind};
 use project::lsp_store::{BufferSemanticTokens, CacheInlayHints, InvalidationStrategy};
 use project::{
-    DocumentHighlight, Hover, HoverBlock, HoverBlockKind, InlayHint, LocationLink,
-    ProjectTransaction,
+    DocumentHighlight, Hover, HoverBlock, HoverBlockKind, InlayHint, InlayHintLabel,
+    InlayHintLabelPart, InlayHintLabelPartTooltip, InlayHintTooltip, InlayId, LocationLink,
+    ProjectTransaction, ResolveState,
 };
 use text::ToOffset;
 
@@ -19,11 +21,15 @@ use crate::backend::OpenIdeaBridge;
 /// this POC; the remaining required surfaces return empty values explicitly.
 pub struct OpenIdeaSemanticsProvider {
     backend: Arc<OpenIdeaBridge>,
+    next_inlay_id: Arc<AtomicUsize>,
 }
 
 impl OpenIdeaSemanticsProvider {
     pub fn new(backend: Arc<OpenIdeaBridge>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            next_inlay_id: Arc::new(AtomicUsize::new(1)),
+        }
     }
 
     fn position(&self, buffer: &Entity<Buffer>, position: Anchor, cx: &App) -> (u32, u32) {
@@ -77,11 +83,19 @@ impl SemanticsProvider for OpenIdeaSemanticsProvider {
 
     fn applicable_inlay_chunks(
         &self,
-        _buffer: &Entity<Buffer>,
-        _ranges: &[Range<Anchor>],
-        _cx: &mut App,
+        buffer: &Entity<Buffer>,
+        ranges: &[Range<Anchor>],
+        cx: &mut App,
     ) -> Vec<Range<BufferRow>> {
-        Vec::new()
+        let snapshot = buffer.read(cx).snapshot();
+        ranges
+            .iter()
+            .map(|range| {
+                let start = snapshot.offset_to_point(range.start.to_offset(&snapshot));
+                let end = snapshot.offset_to_point(range.end.to_offset(&snapshot));
+                start.row..end.row.saturating_add(1)
+            })
+            .collect()
     }
 
     fn invalidate_inlay_hints(&self, _for_buffers: &HashSet<language::BufferId>, _cx: &mut App) {}
@@ -89,12 +103,89 @@ impl SemanticsProvider for OpenIdeaSemanticsProvider {
     fn inlay_hints(
         &self,
         _invalidate: InvalidationStrategy,
-        _buffer: Entity<Buffer>,
-        _ranges: Vec<Range<Anchor>>,
-        _known_chunks: Option<(clock::Global, HashSet<Range<BufferRow>>)>,
-        _cx: &mut App,
+        buffer: Entity<Buffer>,
+        ranges: Vec<Range<Anchor>>,
+        known_chunks: Option<(clock::Global, HashSet<Range<BufferRow>>)>,
+        cx: &mut App,
     ) -> Option<HashMap<Range<BufferRow>, Task<anyhow::Result<CacheInlayHints>>>> {
-        None
+        let snapshot = buffer.read(cx).snapshot();
+        let known = known_chunks.map(|(_, chunks)| chunks).unwrap_or_default();
+        let mut requests = HashMap::default();
+        for range in ranges {
+            let start = snapshot.offset_to_point(range.start.to_offset(&snapshot));
+            let end = snapshot.offset_to_point(range.end.to_offset(&snapshot));
+            let rows = start.row..end.row.saturating_add(1);
+            if known
+                .iter()
+                .any(|known| known.start <= rows.start && known.end >= rows.end)
+            {
+                continue;
+            }
+            let ide_range = ide_core::Range::new(
+                ide_core::Pos::new(start.row, start.column),
+                ide_core::Pos::new(end.row, end.column),
+            );
+            let backend = self.backend.clone();
+            let snapshot = snapshot.clone();
+            let next_id = self.next_inlay_id.clone();
+            let task = cx.background_spawn(async move {
+                let hints = backend
+                    .inlay_hints(ide_range)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                let hints = hints
+                    .into_iter()
+                    .map(|hint| {
+                        let position = snapshot.anchor_before(text::PointUtf16::new(
+                            hint.position.line,
+                            hint.position.col,
+                        ));
+                        let label = if hint.parts.is_empty() {
+                            InlayHintLabel::String(hint.label)
+                        } else {
+                            InlayHintLabel::LabelParts(
+                                hint.parts
+                                    .into_iter()
+                                    .map(|part| InlayHintLabelPart {
+                                        value: part.value,
+                                        tooltip: part
+                                            .tooltip
+                                            .map(InlayHintLabelPartTooltip::String),
+                                        location: None,
+                                        command: None,
+                                    })
+                                    .collect(),
+                            )
+                        };
+                        let id = InlayId::Hint(next_id.fetch_add(1, Ordering::Relaxed));
+                        (
+                            id,
+                            InlayHint {
+                                position,
+                                label,
+                                kind: Some(match hint.kind {
+                                    ide_lsp::types::InlayKind::Type => InlayHintKind::Type,
+                                    ide_lsp::types::InlayKind::Parameter => {
+                                        InlayHintKind::Parameter
+                                    }
+                                    ide_lsp::types::InlayKind::Other => InlayHintKind::Type,
+                                }),
+                                padding_left: hint.padding_left,
+                                padding_right: hint.padding_right,
+                                tooltip: hint.tooltip.map(InlayHintTooltip::String),
+                                text_edits: None,
+                                resolve_state: ResolveState::Resolved,
+                            },
+                        )
+                    })
+                    .collect();
+                let mut cache = HashMap::default();
+                cache.insert(lsp::LanguageServerId(1), hints);
+                Ok(cache)
+            });
+            requests.insert(rows, task);
+        }
+        Some(requests)
     }
 
     fn semantic_tokens(
@@ -106,7 +197,7 @@ impl SemanticsProvider for OpenIdeaSemanticsProvider {
     }
 
     fn supports_inlay_hints(&self, _buffer: &Entity<Buffer>, _cx: &mut App) -> bool {
-        false
+        true
     }
 
     fn supports_semantic_tokens(&self, _buffer: &Entity<Buffer>, _cx: &mut App) -> bool {
