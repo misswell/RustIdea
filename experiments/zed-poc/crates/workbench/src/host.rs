@@ -211,6 +211,12 @@ impl NativeHost {
         self.host.config_dir.clone()
     }
 
+    pub fn scratch_dir(&self) -> PathBuf {
+        let dir = self.host.data_dir.join("scratches");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
     pub fn start() -> Result<Arc<Self>> {
         let config_dir = ide_host::data_dirs::config_dir(IDENTIFIER)
             .map_err(anyhow::Error::msg)

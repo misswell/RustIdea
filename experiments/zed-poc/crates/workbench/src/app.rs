@@ -42,6 +42,7 @@ enum SidebarMode {
     Heap,
     Profiler,
     Logcat,
+    Scratch,
     Outline,
     Problems,
     Database,
@@ -98,6 +99,8 @@ enum Command {
     ShowHeap,
     ShowProfiler,
     ShowLogcat,
+    ShowScratches,
+    NewScratch,
     ShowOutline,
     ShowProblems,
     ShowDatabase,
@@ -128,7 +131,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 46] = [
+    const ALL: [Command; 48] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -148,6 +151,8 @@ impl Command {
         Command::ShowHeap,
         Command::ShowProfiler,
         Command::ShowLogcat,
+        Command::ShowScratches,
+        Command::NewScratch,
         Command::ShowOutline,
         Command::ShowProblems,
         Command::ShowDatabase,
@@ -198,6 +203,8 @@ impl Command {
             Command::ShowHeap => "Show Heap Snapshot",
             Command::ShowProfiler => "Show CPU Profile",
             Command::ShowLogcat => "Show Logcat",
+            Command::ShowScratches => "Show Scratch Files",
+            Command::NewScratch => "New Scratch File",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
             Command::ShowDatabase => "Show Database",
@@ -430,6 +437,26 @@ fn short_log_time(time: &str) -> &str {
     }
 }
 
+fn format_age(modified_ms: u64) -> String {
+    if modified_ms == 0 {
+        return "unknown".into();
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(modified_ms);
+    let seconds = now_ms.saturating_sub(modified_ms) / 1_000;
+    if seconds < 60 {
+        format!("{seconds}s ago")
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
+    }
+}
+
 fn utf16_prefix(text: &str, units: u32) -> String {
     let mut consumed = 0u32;
     let mut end = text.len();
@@ -657,6 +684,11 @@ pub struct Workbench {
     logcat_busy: bool,
     _logcat_device_subscription: Subscription,
     _logcat_filter_subscription: Subscription,
+    scratch_dir: PathBuf,
+    scratch_files: Vec<crate::scratch::ScratchFile>,
+    scratch_name_input: Entity<TextInput>,
+    scratch_status: gpui::SharedString,
+    _scratch_input_subscription: Subscription,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -1193,6 +1225,21 @@ impl Workbench {
                 cx.notify();
             }
         });
+        let scratch_name_input = cx.new(|cx| {
+            TextInput::new(
+                "Scratch file name (notes, Main.java…) then Enter",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let scratch_input_subscription = cx.subscribe(&scratch_name_input, |app, _, event, cx| {
+            if let TextInputEvent::Submit(_) = event {
+                app.create_scratch(cx);
+            }
+        });
         let setting_edit_input = cx.new(|cx| {
             TextInput::new(
                 "Setting value",
@@ -1212,6 +1259,8 @@ impl Workbench {
                 }
                 _ => {}
             });
+        let scratch_dir = host.scratch_dir();
+        let scratch_files = crate::scratch::list(&scratch_dir);
         let bookmarks_file = host.config_dir().join("bookmarks.json");
         let bookmark_store = crate::bookmarks::BookmarkStore::load(&bookmarks_file);
         let bookmarks = bookmark_store.project(&root).to_vec();
@@ -1316,6 +1365,11 @@ impl Workbench {
             logcat_busy: false,
             _logcat_device_subscription: logcat_device_subscription,
             _logcat_filter_subscription: logcat_filter_subscription,
+            scratch_dir,
+            scratch_files,
+            scratch_name_input,
+            scratch_status: "Create or open a scratch file".into(),
+            _scratch_input_subscription: scratch_input_subscription,
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -1566,6 +1620,7 @@ impl Workbench {
             SidebarMode::Services => self.refresh_docker(cx),
             SidebarMode::GitHub => self.refresh_github(cx),
             SidebarMode::Logcat => self.refresh_logcat_devices(cx),
+            SidebarMode::Scratch => self.refresh_scratches(cx),
             SidebarMode::Http => self.refresh_http(cx),
             SidebarMode::Database => self.refresh_db(cx),
             SidebarMode::Remote => self.refresh_remote(cx),
@@ -4197,6 +4252,18 @@ impl Workbench {
             Command::ShowHeap => self.select_sidebar(SidebarMode::Heap, cx),
             Command::ShowProfiler => self.select_sidebar(SidebarMode::Profiler, cx),
             Command::ShowLogcat => self.select_sidebar(SidebarMode::Logcat, cx),
+            Command::ShowScratches => self.select_sidebar(SidebarMode::Scratch, cx),
+            Command::NewScratch => {
+                self.select_sidebar(SidebarMode::Scratch, cx);
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or_default();
+                let name = format!("scratch-{stamp}.md");
+                self.scratch_name_input
+                    .update(cx, |input, cx| input.set_content(name, cx));
+                self.create_scratch(cx);
+            }
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
             Command::ShowDatabase => self.select_sidebar(SidebarMode::Database, cx),
@@ -5402,6 +5469,52 @@ impl Workbench {
         }
     }
 
+    fn refresh_scratches(&mut self, cx: &mut Context<Self>) {
+        self.scratch_files = crate::scratch::list(&self.scratch_dir);
+        self.scratch_status = format!("{} scratch files", self.scratch_files.len()).into();
+        cx.notify();
+    }
+
+    fn create_scratch(&mut self, cx: &mut Context<Self>) {
+        let raw = self.scratch_name_input.read(cx).content().trim().to_owned();
+        let Some(name) = crate::scratch::sanitize_file_name(&raw) else {
+            self.scratch_status = "Enter a flat file name without path separators".into();
+            cx.notify();
+            return;
+        };
+        let path = self.scratch_dir.join(&name);
+        let created = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => {
+                self.scratch_status = format!("Could not create scratch: {error}").into();
+                cx.notify();
+                return;
+            }
+        };
+        self.scratch_status = if created {
+            format!("Created {name}").into()
+        } else {
+            format!("Opened existing {name}").into()
+        };
+        self.scratch_name_input
+            .update(cx, |input, cx| input.set_content("", cx));
+        self.refresh_scratches(cx);
+        self.open_path(path, cx);
+    }
+
+    fn open_scratch(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(file) = self.scratch_files.get(index).cloned() else {
+            return;
+        };
+        self.scratch_status = format!("Opened {}", file.name).into();
+        self.open_path(file.path, cx);
+    }
+
     fn stage_all(&mut self, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = self
             .git_status
@@ -5827,6 +5940,7 @@ impl Workbench {
             SidebarMode::Heap => "Heap",
             SidebarMode::Profiler => "Profiler",
             SidebarMode::Logcat => "Logcat",
+            SidebarMode::Scratch => "Scratch",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
             SidebarMode::Database => "Database",
@@ -6311,6 +6425,29 @@ impl Workbench {
         self.logcat_lines
             .first()
             .map(|line| format!("{} {}: {}", line.level.letter(), line.tag, line.message))
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_scratch(&mut self, name: String, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Scratch, cx);
+        self.scratch_name_input.update(cx, |input, cx| {
+            input.set_content(name, cx);
+        });
+        self.create_scratch(cx);
+    }
+
+    pub fn scratch_count(&self) -> usize {
+        self.scratch_files.len()
+    }
+
+    pub fn scratch_status_text(&self) -> String {
+        self.scratch_status.to_string()
+    }
+
+    pub fn scratch_first(&self) -> String {
+        self.scratch_files
+            .first()
+            .map(|file| file.name.clone())
             .unwrap_or_default()
     }
 
@@ -10635,6 +10772,130 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_scratch(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("scratch-files")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.scratch_files.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child("No scratch files"),
+            );
+        }
+        for (index, file) in self.scratch_files.iter().take(500).enumerate() {
+            rows = rows.child(
+                div()
+                    .id(("scratch-file", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.5))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_scratch(index, cx);
+                    }))
+                    .child(div().flex_1().truncate().child(file.name.clone()))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child(format_age(file.modified_ms)),
+                    ),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("scratch-new")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                let stamp = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|duration| duration.as_secs())
+                                    .unwrap_or_default();
+                                let name = format!("scratch-{stamp}.md");
+                                this.scratch_name_input.update(cx, |input, cx| {
+                                    input.set_content(name, cx);
+                                });
+                                this.create_scratch(cx);
+                            }))
+                            .child("New"),
+                    )
+                    .child(
+                        div()
+                            .id("scratch-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_scratches(cx);
+                            }))
+                            .child("Refresh"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.scratch_status.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.scratch_name_input.clone()),
+            )
+            .child(rows)
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(8.5))
+                    .text_color(theme.faint)
+                    .truncate()
+                    .child(self.scratch_dir.display().to_string()),
+            )
+            .into_any_element()
+    }
+
     fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut results = div()
@@ -12220,6 +12481,7 @@ impl Render for Workbench {
         let heap = self.render_heap(cx);
         let profiler = self.render_profiler(cx);
         let logcat = self.render_logcat(cx);
+        let scratch = self.render_scratch(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
         let settings = self.render_settings(cx);
@@ -12237,6 +12499,7 @@ impl Render for Workbench {
             SidebarMode::Heap => heap,
             SidebarMode::Profiler => profiler,
             SidebarMode::Logcat => logcat,
+            SidebarMode::Scratch => scratch,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
             SidebarMode::Settings => settings,
@@ -12263,6 +12526,7 @@ impl Render for Workbench {
             ("HEAP", SidebarMode::Heap),
             ("PROF", SidebarMode::Profiler),
             ("LOGCAT", SidebarMode::Logcat),
+            ("SCR", SidebarMode::Scratch),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
             ("DB", SidebarMode::Database),
