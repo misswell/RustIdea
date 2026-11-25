@@ -646,6 +646,22 @@ impl NativeHost {
         .await
     }
 
+    pub fn mcp_list(&self) -> IdeResult<Vec<ide_agent::McpServer>> {
+        ide_host::ops::agent::mcp_list(&self.host, MAIN_WINDOW)
+    }
+
+    pub fn mcp_set_enabled(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> IdeResult<Vec<ide_agent::McpServer>> {
+        ide_host::ops::agent::mcp_set_enabled(&self.host, MAIN_WINDOW, id, enabled)
+    }
+
+    pub fn mcp_remove(&self, id: String) -> IdeResult<Vec<ide_agent::McpServer>> {
+        ide_host::ops::agent::mcp_remove(&self.host, MAIN_WINDOW, id)
+    }
+
     pub async fn tools_list(&self) -> IdeResult<Vec<ide_tools::ToolInfo>> {
         self.run(
             move |host| async move { ide_host::ops::tools::tools_list(&host, MAIN_WINDOW).await },

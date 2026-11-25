@@ -151,6 +151,8 @@ pub struct Workbench {
     agent_selected: usize,
     agent_tasks: Vec<ide_agent::AgentTask>,
     agent_task_status: gpui::SharedString,
+    mcp_servers: Vec<ide_agent::McpServer>,
+    mcp_status: gpui::SharedString,
     tools: Vec<ide_tools::ToolInfo>,
     tools_selected: usize,
     tools_status: gpui::SharedString,
@@ -311,6 +313,8 @@ impl Workbench {
             agent_selected: 0,
             agent_tasks: Vec::new(),
             agent_task_status: "No agent tasks".into(),
+            mcp_servers: Vec::new(),
+            mcp_status: "No MCP servers".into(),
             tools: Vec::new(),
             tools_selected: 0,
             tools_status: "Select TOOLS to load tool status".into(),
@@ -830,6 +834,38 @@ impl Workbench {
             Err(error) => {
                 self.agents.clear();
                 self.agents_status = format!("Agents failed: {}", error.message).into();
+            }
+        }
+        match self.host.mcp_list() {
+            Ok(servers) => {
+                self.mcp_status = format!("{} MCP servers", servers.len()).into();
+                self.mcp_servers = servers;
+            }
+            Err(error) => {
+                self.mcp_servers.clear();
+                self.mcp_status = format!("MCP failed: {}", error.message).into();
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_mcp_server(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(server) = self.mcp_servers.get(index).cloned() else {
+            return;
+        };
+        let enabled = !server.enabled;
+        match self.host.mcp_set_enabled(server.id, enabled) {
+            Ok(servers) => {
+                self.mcp_servers = servers;
+                self.mcp_status = format!(
+                    "{} {}",
+                    server.name,
+                    if enabled { "enabled" } else { "disabled" }
+                )
+                .into();
+            }
+            Err(error) => {
+                self.mcp_status = format!("MCP update failed: {}", error.message).into();
             }
         }
         cx.notify();
@@ -2000,6 +2036,10 @@ impl Workbench {
         self.agent_tasks.len()
     }
 
+    pub fn mcp_count(&self) -> usize {
+        self.mcp_servers.len()
+    }
+
     pub fn tools_count(&self) -> usize {
         self.tools.len()
     }
@@ -2990,6 +3030,45 @@ impl Workbench {
                     ),
             );
         }
+        let mut mcp_rows = div()
+            .id("mcp-servers")
+            .flex_none()
+            .max_h(px(110.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, server) in self.mcp_servers.iter().take(80).enumerate() {
+            let enabled = server.enabled;
+            mcp_rows = mcp_rows.child(
+                div()
+                    .id(("mcp-server", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.))
+                    .text_color(if enabled { theme.text } else { theme.muted })
+                    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if enabled {
+                        theme.accent
+                    } else {
+                        theme.faint
+                    }))
+                    .child(div().flex_1().truncate().child(server.name.clone()))
+                    .child(
+                        div()
+                            .id(("mcp-toggle", index))
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_mcp_server(index, cx);
+                            }))
+                            .child(if enabled { "disable" } else { "enable" }),
+                    ),
+            );
+        }
         div()
             .size_full()
             .flex()
@@ -3062,6 +3141,15 @@ impl Workbench {
                     .child(self.agent_task_status.clone()),
             )
             .child(task_rows)
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(10.))
+                    .text_color(theme.faint)
+                    .child(self.mcp_status.clone()),
+            )
+            .child(mcp_rows)
             .when(self.agents.is_empty(), |view| {
                 view.child(
                     div()
