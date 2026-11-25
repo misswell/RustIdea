@@ -12021,6 +12021,7 @@ dependencies = [
  "ide-host",
  "ide-language",
  "ide-lsp",
+ "ide-run",
  "ide-sdk",
  "ide-text",
  "ide-tools",

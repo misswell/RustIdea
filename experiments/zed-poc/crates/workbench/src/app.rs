@@ -55,6 +55,11 @@ pub struct Workbench {
     status: gpui::SharedString,
     diagnostics: HashMap<PathBuf, usize>,
     window_handle: Option<gpui::WindowHandle<Workbench>>,
+    run_configs: Vec<ide_run::RunConfig>,
+    selected_run: usize,
+    running_run: Option<ide_run::RunInfo>,
+    run_output: String,
+    run_status: gpui::SharedString,
 }
 
 impl Workbench {
@@ -78,6 +83,8 @@ impl Workbench {
         let registry_for_initial = language_registry.clone();
         let split = std::env::var_os("RUSTIDEA_ZED_SMOKE_SPLIT").is_some();
         let status = format!("{} · {}", project.name, root.display());
+        let run_configs = host.run_configs().unwrap_or_default();
+        let run_status = format!("{} run configurations", run_configs.len()).into();
         let mut app = Self {
             host,
             language_registry,
@@ -97,6 +104,11 @@ impl Workbench {
             status: status.into(),
             diagnostics: HashMap::default(),
             window_handle,
+            run_configs,
+            selected_run: 0,
+            running_run: None,
+            run_output: String::new(),
+            run_status,
         };
         if let Some(document) = document {
             app.insert_document(document, &registry_for_initial, cx);
@@ -398,6 +410,91 @@ impl Workbench {
         .detach();
     }
 
+    fn start_selected_run(&mut self, cx: &mut Context<Self>) {
+        let Some(config) = self.run_configs.get(self.selected_run).cloned() else {
+            self.run_status = "No run configuration selected".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let emit: ide_host::ops::Emit<ide_run::OutputChunk> = Arc::new(move |chunk| {
+            let _ = out_tx.send(chunk);
+        });
+        self.run_output.clear();
+        self.run_status = format!("Starting {}…", config.name).into();
+        cx.spawn(async move |this, cx| {
+            let result = host.start_run(config, emit).await;
+            let started = result.is_ok();
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(info) => {
+                            app.run_status =
+                                format!("Running {} (pid {:?})", info.name, info.pid).into();
+                            app.running_run = Some(info);
+                        }
+                        Err(error) => {
+                            app.run_status = format!("Run failed: {}", error.message).into();
+                            app.running_run = None;
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+            if !started {
+                return;
+            }
+            while let Some(chunk) = out_rx.recv().await {
+                let text = match chunk {
+                    ide_run::OutputChunk::Stdout { text }
+                    | ide_run::OutputChunk::Stderr { text }
+                    | ide_run::OutputChunk::System { text } => text,
+                };
+                let handle = this
+                    .update(cx, |app, cx| {
+                        app.run_output.push_str(&text);
+                        if app.run_output.len() > 2_000_000 {
+                            let split = app.run_output.len().saturating_sub(1_800_000);
+                            app.run_output.drain(..split);
+                        }
+                        cx.notify();
+                        app.window_handle
+                    })
+                    .ok()
+                    .flatten();
+                refresh_window(handle, cx);
+            }
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.running_run = None;
+                    app.run_status = "Process finished".into();
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn stop_active_run(&mut self, cx: &mut Context<Self>) {
+        let Some(run) = self.running_run.as_ref() else {
+            return;
+        };
+        if let Err(error) = self.host.stop_run(run.id) {
+            self.run_status = format!("Stop failed: {}", error.message).into();
+        } else {
+            self.run_status = "Stopping…".into();
+        }
+        cx.notify();
+    }
+
     pub fn smoke_insert_marker(&mut self, marker: &str, cx: &mut Context<Self>) -> bool {
         let Some(doc) = self.active else {
             return false;
@@ -475,6 +572,18 @@ impl Workbench {
 
     pub fn smoke_editor_count(&self) -> usize {
         self.editors.len()
+    }
+
+    pub fn smoke_start_run(&mut self, cx: &mut Context<Self>) {
+        self.start_selected_run(cx);
+    }
+
+    pub fn smoke_run_status(&self) -> String {
+        self.run_status.to_string()
+    }
+
+    pub fn smoke_run_output(&self) -> &str {
+        &self.run_output
     }
 
     pub fn smoke_has_language(&self, cx: &gpui::App) -> bool {
@@ -556,6 +665,16 @@ impl Workbench {
             }
             IdeEvent::LanguageServer { name, status, .. } => {
                 self.status = format!("{name}: {status:?}").into();
+            }
+            IdeEvent::RunExited { run, code } => {
+                if self
+                    .running_run
+                    .as_ref()
+                    .is_some_and(|running| running.id == run)
+                {
+                    self.running_run = None;
+                    self.run_status = format!("Exited with {:?}", code).into();
+                }
             }
             IdeEvent::FsChanged {
                 modified, created, ..
@@ -715,6 +834,130 @@ impl Workbench {
         .track_scroll(&self.tree_scroll)
     }
 
+    fn render_run_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        if self.run_configs.is_empty() {
+            return div().into_any_element();
+        }
+        let running = self.running_run.is_some();
+        let mut configs = Vec::new();
+        for (index, config) in self.run_configs.iter().take(6).enumerate() {
+            let selected = index == self.selected_run;
+            configs.push(
+                div()
+                    .id(("run-config", index))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_size(px(11.))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.titlebar
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.text))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.selected_run = index;
+                        cx.notify();
+                    }))
+                    .child(config.name.clone()),
+            );
+        }
+        let mut lines: Vec<String> = self.run_output.lines().map(str::to_owned).collect();
+        if lines.len() > 200 {
+            lines.drain(..lines.len() - 200);
+        }
+        let mut output = div()
+            .id("run-output")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .p_2()
+            .font_family("Menlo")
+            .text_size(px(11.5))
+            .text_color(theme.text)
+            .flex()
+            .flex_col();
+        if lines.is_empty() {
+            output = output.child(
+                div()
+                    .text_color(theme.faint)
+                    .child("Run output appears here."),
+            );
+        } else {
+            output = output.children(lines.into_iter().map(|line| div().child(line)));
+        }
+        div()
+            .h(px(180.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .h(px(32.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .px_2()
+                            .text_size(px(11.))
+                            .text_color(theme.muted)
+                            .child("RUN"),
+                    )
+                    .children(configs)
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("start-run")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(11.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.start_selected_run(cx);
+                            }))
+                            .child("Run"),
+                    )
+                    .when(running, |row| {
+                        row.child(
+                            div()
+                                .id("stop-run")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(11.))
+                                .text_color(theme.error)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.stop_active_run(cx);
+                                }))
+                                .child("Stop"),
+                        )
+                    })
+                    .child(
+                        div()
+                            .px_2()
+                            .text_size(px(11.))
+                            .text_color(theme.muted)
+                            .child(self.run_status.clone()),
+                    ),
+            )
+            .child(output)
+            .into_any_element()
+    }
+
     fn toggle_tree_row(
         &mut self,
         index: usize,
@@ -767,6 +1010,7 @@ impl Render for Workbench {
             .and_then(|doc| self.editors.get(&(doc, true)).cloned());
         let project = self.render_project(cx).into_any_element();
         let tabs = self.render_tabs(cx).into_any_element();
+        let run_panel = self.render_run_panel(cx);
         div()
             .size_full()
             .flex()
@@ -854,6 +1098,7 @@ impl Render for Workbench {
                             ),
                     ),
             )
+            .child(run_panel)
             .child(
                 div()
                     .h(px(24.))

@@ -157,6 +157,7 @@ fn main() {
                     .expect("activate workbench window");
                 cx.activate(true);
                 let smoke_split = std::env::var_os("RUSTIDEA_ZED_SMOKE_SPLIT").is_some();
+                let smoke_run = std::env::var_os("RUSTIDEA_ZED_SMOKE_RUN").is_some();
                 let completion_position = std::env::var("RUSTIDEA_ZED_SMOKE_COMPLETION_POS")
                     .ok()
                     .and_then(|position| {
@@ -172,6 +173,9 @@ fn main() {
                             this.update(cx, |app, cx| {
                                 if smoke_split {
                                     app.smoke_enable_split(cx);
+                                }
+                                if smoke_run {
+                                    app.smoke_start_run(cx);
                                 }
                                 if let Some((line, column)) = completion_position {
                                     app.smoke_request_completion(line, column, cx);
@@ -191,10 +195,12 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
+                                    app.smoke_run_status(),
+                                    app.smoke_run_output().lines().last().unwrap_or_default(),
                                     app.smoke_active_text(cx).lines().next().unwrap_or_default()
                                 );
                                 cx.quit();

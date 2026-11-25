@@ -447,6 +447,25 @@ impl NativeHost {
             .ok()
             .flatten()
     }
+
+    pub fn run_configs(&self) -> IdeResult<Vec<ide_run::RunConfig>> {
+        ide_host::ops::run::configs(&self.host, MAIN_WINDOW)
+    }
+
+    pub async fn start_run(
+        &self,
+        config: ide_run::RunConfig,
+        on_output: ide_host::ops::Emit<ide_run::OutputChunk>,
+    ) -> IdeResult<ide_run::RunInfo> {
+        self.run(move |host| async move {
+            ide_host::ops::run::start(&host, MAIN_WINDOW, config, on_output).await
+        })
+        .await
+    }
+
+    pub fn stop_run(&self, run: ide_core::RunId) -> IdeResult<()> {
+        ide_host::ops::run::stop(&self.host, MAIN_WINDOW, run)
+    }
 }
 
 impl Drop for NativeHost {
