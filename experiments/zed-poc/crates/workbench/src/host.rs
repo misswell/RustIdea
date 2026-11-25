@@ -901,6 +901,25 @@ impl NativeHost {
         .await
     }
 
+    pub async fn notebook_edit(
+        &self,
+        id: String,
+        version: u32,
+        edit: ide_notebook::NotebookEdit,
+    ) -> IdeResult<ide_notebook::NotebookSnapshot> {
+        self.run(move |host| async move {
+            ide_host::ops::notebook::edit(&host, MAIN_WINDOW, id, version, edit).await
+        })
+        .await
+    }
+
+    pub async fn notebook_save(&self, id: String) -> IdeResult<ide_notebook::NotebookSnapshot> {
+        self.run(
+            move |host| async move { ide_host::ops::notebook::save(&host, MAIN_WINDOW, id).await },
+        )
+        .await
+    }
+
     pub async fn start_search(
         &self,
         query: ide_search::SearchQuery,

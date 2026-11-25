@@ -9,7 +9,9 @@ use gpui::{
     UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use ide_core::{DocId, IdeEvent, OutlineItem, Severity};
-use language::{BufferEvent, Diagnostic, DiagnosticEntry, DiagnosticMessage, DiagnosticSet};
+use language::{
+    Buffer, BufferEvent, Diagnostic, DiagnosticEntry, DiagnosticMessage, DiagnosticSet,
+};
 use lsp::LanguageServerId;
 use text::Point as TextPoint;
 
@@ -448,6 +450,10 @@ pub struct Workbench {
     notebook: Option<ide_notebook::NotebookSnapshot>,
     notebook_status: gpui::SharedString,
     notebook_running: bool,
+    notebook_edit_cell: Option<String>,
+    notebook_editor: Option<Entity<Editor>>,
+    notebook_edit_buffer: Option<Entity<Buffer>>,
+    notebook_edit_status: gpui::SharedString,
     agents: Vec<ide_agent::AgentProvider>,
     agents_status: gpui::SharedString,
     agent_prompt_input: Entity<TextInput>,
@@ -856,6 +862,10 @@ impl Workbench {
             notebook: None,
             notebook_status: "Open a .ipynb file to view cells".into(),
             notebook_running: false,
+            notebook_edit_cell: None,
+            notebook_editor: None,
+            notebook_edit_buffer: None,
+            notebook_edit_status: "Edit cell source".into(),
             agents: Vec::new(),
             agents_status: "Select AGENTS to load providers".into(),
             agent_prompt_input,
@@ -1576,6 +1586,113 @@ impl Workbench {
                         Err(error) => {
                             app.notebook_status =
                                 format!("Notebook execution failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn save_notebook(&mut self, cx: &mut Context<Self>) {
+        let Some(notebook) = self.notebook.clone() else {
+            self.notebook_status = "Open a notebook first".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let id = notebook.id.clone();
+        self.notebook_status = "Saving notebook…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.notebook_save(id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(notebook) => {
+                            app.notebook_status =
+                                format!("Saved · version {}", notebook.version).into();
+                            app.notebook = Some(notebook);
+                        }
+                        Err(error) => {
+                            app.notebook_status =
+                                format!("Notebook save failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_notebook_cell_editor(
+        &mut self,
+        cell: String,
+        source: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let buffer = cx.new(|cx| Buffer::local(source, cx));
+        let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.notebook_edit_cell = Some(cell);
+        self.notebook_edit_buffer = Some(buffer);
+        self.notebook_editor = Some(editor);
+        self.notebook_edit_status = "Edit cell source; Commit writes through OpenIDEA".into();
+        cx.notify();
+    }
+
+    fn commit_notebook_cell_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(cell) = self.notebook_edit_cell.take() else {
+            return;
+        };
+        let Some(buffer) = self.notebook_edit_buffer.take() else {
+            return;
+        };
+        self.notebook_editor = None;
+        let source = buffer.read(cx).snapshot().text();
+        let Some(notebook) = self.notebook.clone() else {
+            self.notebook_status = "Notebook is not open".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let id = notebook.id.clone();
+        let version = notebook.version;
+        self.notebook_status = "Updating cell…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .notebook_edit(
+                    id.clone(),
+                    version,
+                    ide_notebook::NotebookEdit::SetSource { cell, source },
+                )
+                .await;
+            let result = match result {
+                Ok(_) => host.notebook_save(id).await,
+                Err(error) => Err(error),
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(notebook) => {
+                            app.notebook_status =
+                                format!("Cell updated · version {}", notebook.version).into();
+                            app.notebook = Some(notebook);
+                        }
+                        Err(error) => {
+                            app.notebook_status =
+                                format!("Cell update failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -3757,6 +3874,32 @@ impl Workbench {
         self.select_sidebar(SidebarMode::Notebook, cx);
     }
 
+    pub fn smoke_notebook_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cell) = self
+            .notebook
+            .as_ref()
+            .and_then(|notebook| notebook.cells.first())
+            .cloned()
+        else {
+            return;
+        };
+        self.open_notebook_cell_editor(cell.id, cell.source, window, cx);
+        if let Some(buffer) = self.notebook_edit_buffer.clone() {
+            buffer.update(cx, |buffer, cx| {
+                buffer.edit([(0..0, "# rustidea notebook edit\n")], None, cx);
+            });
+        }
+        self.commit_notebook_cell_editor(cx);
+    }
+
+    pub fn notebook_first_source(&self) -> String {
+        self.notebook
+            .as_ref()
+            .and_then(|notebook| notebook.cells.first())
+            .map(|cell| cell.source.lines().next().unwrap_or_default().to_owned())
+            .unwrap_or_default()
+    }
+
     pub fn notebook_cell_count(&self) -> usize {
         self.notebook
             .as_ref()
@@ -4619,6 +4762,78 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_notebook_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(editor) = &self.notebook_editor else {
+            return div().into_any_element();
+        };
+        let theme = self.theme;
+        div()
+            .absolute()
+            .top(px(60.))
+            .left(px(220.))
+            .w(px(760.))
+            .h(px(520.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .text_size(px(10.5))
+                    .text_color(theme.muted)
+                    .child(self.notebook_edit_status.clone()),
+            )
+            .child(div().flex_1().min_h(px(0.)).child(editor.clone()))
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("notebook-edit-commit")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.commit_notebook_cell_editor(cx);
+                            }))
+                            .child("Commit"),
+                    )
+                    .child(
+                        div()
+                            .id("notebook-edit-cancel")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.notebook_editor = None;
+                                this.notebook_edit_buffer = None;
+                                this.notebook_edit_cell = None;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_agent_form_answer(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some((_, permission)) = &self.agent_answer_target else {
             return div().into_any_element();
@@ -5222,7 +5437,7 @@ impl Workbench {
             .into_any_element()
     }
 
-    fn render_notebook(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_notebook(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut cells = div()
             .id("notebook-cells")
@@ -5233,6 +5448,8 @@ impl Workbench {
             .flex_col();
         if let Some(notebook) = &self.notebook {
             for (index, cell) in notebook.cells.iter().take(500).enumerate() {
+                let cell_id = cell.id.clone();
+                let source = cell.source.clone();
                 let mut body = div()
                     .id(("notebook-cell", index))
                     .mx_2()
@@ -5247,15 +5464,41 @@ impl Workbench {
                     .gap(px(3.))
                     .child(
                         div()
-                            .text_size(px(9.))
-                            .text_color(theme.faint)
-                            .child(format!(
-                                "{}{}",
-                                cell.cell_type,
-                                cell.execution_count
-                                    .map(|count| format!(" [{count}]"))
-                                    .unwrap_or_default()
-                            )),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(9.))
+                                    .text_color(theme.faint)
+                                    .child(format!(
+                                        "{}{}",
+                                        cell.cell_type,
+                                        cell.execution_count
+                                            .map(|count| format!(" [{count}]"))
+                                            .unwrap_or_default()
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id(("notebook-edit", index))
+                                    .px_1()
+                                    .text_size(px(9.))
+                                    .text_color(theme.muted)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            this.open_notebook_cell_editor(
+                                                cell_id.clone(),
+                                                source.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .child("Edit"),
+                            ),
                     )
                     .child(
                         div()
@@ -5310,6 +5553,20 @@ impl Workbench {
                                 this.run_notebook(cx);
                             }))
                             .child("Run all"),
+                    )
+                    .child(
+                        div()
+                            .id("notebook-save")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.save_notebook(cx);
+                            }))
+                            .child("Save"),
                     )
                     .child(div().flex_1())
                     .child(
@@ -6973,7 +7230,7 @@ impl Render for Workbench {
             SidebarMode::Database => self.render_db(cx),
             SidebarMode::Http => self.render_http(cx),
             SidebarMode::Remote => self.render_remote(cx),
-            SidebarMode::Notebook => self.render_notebook(cx),
+            SidebarMode::Notebook => self.render_notebook(window, cx),
             SidebarMode::Mcp => self.render_mcp(cx),
             SidebarMode::Agents => self.render_agents(cx),
             SidebarMode::Plugins => self.render_plugins(cx),
@@ -7023,6 +7280,7 @@ impl Render for Workbench {
         let symbol_search = self.render_symbol_search(cx);
         let setting_editor = self.render_setting_editor(cx);
         let agent_form_answer = self.render_agent_form_answer(cx);
+        let notebook_editor = self.render_notebook_editor(cx);
         div()
             .size_full()
             .relative()
@@ -7150,6 +7408,7 @@ impl Render for Workbench {
             .child(symbol_search)
             .child(setting_editor)
             .child(agent_form_answer)
+            .child(notebook_editor)
     }
 }
 

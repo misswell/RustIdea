@@ -386,7 +386,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   and the variables/stack/frames UI are still pending;
 - Notebook opens the active `.ipynb` through `ops::notebook::open`, renders
   code/markdown cells and stored outputs, and runs all code cells through
-  `ops::notebook::execute` (read-only viewer; cell editing is pending);
+  `ops::notebook::execute`; each cell opens a Zed-Editor modal for multi-line
+  source editing, and Commit uses `NotebookEdit::SetSource` followed by
+  `ops::notebook::save`; explicit Save and Run all are in the panel header;
 - buffer edits are sent incrementally to
   `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
   `DocPatched` events and diagnostics are applied back to Zed buffers;
@@ -409,7 +411,7 @@ Panel coverage at this commit:
 | Database | working (source/connect/query) | `ops::db` |
 | HTTP Client | working (parse/run/response) | `ide_http::run` |
 | Remote Host | working (SSH terminal, SFTP browse/preview) | `ops::term::spawn_ssh`, `SshManager` |
-| Notebook | read-only viewer + run all | `ops::notebook` |
+| Notebook | viewer + cell editor + save/run all | `ops::notebook` |
 | Agents | working (providers/tasks/timeline/prompt/cancel) | `ops::agent` |
 | MCP | list/toggle/add/update/remove stdio servers | `ops::agent::mcp_*` |
 | Tools | list/install | `ops::tools` |
@@ -524,6 +526,13 @@ settings_rows=466 font_family="Menlo"
 settings.toml: fontFamily = "Menlo"
 ```
 
+Notebook cell-edit smoke (fresh `.ipynb`, committed then saved):
+
+```text
+notebook_cells=1 notebook_first="# rustidea notebook edit"
+disk: source = ["# rustidea notebook edit\n", "print('NB EDIT OK')\n"]
+```
+
 MCP round-trip smoke in an isolated config/data root (add `/bin/echo` server,
 then remove it):
 
@@ -570,8 +579,8 @@ documents/project/sync/host: 24 passed; 0 failed
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
 - Plugin live UI contributions and per-capability consent UI, full debugger
-  session UI, notebook cell editing, remote file editing (browsing/preview
-  exists), structured question/form widgets and live subagent/form verification
+  session UI, notebook insert/delete/rich-output editing, remote file editing
+  (browsing/preview exists), structured question/form widgets and live subagent/form verification
   are not yet integrated. MCP add/update/remove is wired for stdio servers; HTTP/SSE editing
   still lives in settings. Settings edits booleans and JSON scalars; structured
   list/map editors are missing. Database/HTTP have working execution paths but no
