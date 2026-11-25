@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           export CARGO_TARGET_DIR="$RUNNER_TEMP/plugin-fixtures"
-          plugins/build.sh --check \
+          plugins/build.sh \
             crates/ide-plugin/tests/fixtures/files-events \
             crates/ide-plugin/tests/fixtures/path-events
           for manifest in crates/ide-plugin/tests/fixtures/*/plugin.toml; do

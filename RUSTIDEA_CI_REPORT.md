@@ -26,8 +26,9 @@ green result.
 8. `cargo clippy --locked --workspace --all-targets -- -D warnings`.
 
 The fixture step builds `files-events` and `path-events` with
-`plugins/build.sh --check` and rejects any checked-in `plugin.toml` fixture with
-a missing `dist/plugin.wasm`.
+`plugins/build.sh` (no cross-platform fingerprint comparison, because Windows
+checkout line endings differ) and rejects any checked-in `plugin.toml` fixture
+with a missing `dist/plugin.wasm`.
 
 ## Current status
 
