@@ -1,0 +1,263 @@
+mod backend;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use backend::OpenIdeaBridge;
+use editor::Editor;
+use gpui::{
+    App, AppContext as _, Bounds, Context, Focusable as _, KeyBinding, Subscription, Window,
+    WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
+};
+use gpui_platform::application;
+use language::{Buffer, BufferEvent};
+use settings::SettingsStore;
+use theme::LoadThemes;
+
+actions!(rustidea_poc, [SaveDocument]);
+
+struct PocApp {
+    editor: gpui::Entity<Editor>,
+    buffer: gpui::Entity<Buffer>,
+    backend: Arc<OpenIdeaBridge>,
+    backend_version: u32,
+    last_clock: clock::Global,
+    syncing: bool,
+    save_requested: bool,
+    status: gpui::SharedString,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl PocApp {
+    fn new(
+        backend: Arc<OpenIdeaBridge>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let text = backend.text.clone();
+        let buffer = cx.new(|cx| Buffer::local(text, cx));
+        let version = buffer.read(cx).snapshot().version().clone();
+        let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
+        let subscription = cx.subscribe(&buffer, |app, _, event: &BufferEvent, cx| {
+            if matches!(event, BufferEvent::Edited { .. }) {
+                app.sync_edits(cx);
+            }
+        });
+        window.focus(&editor.read(cx).focus_handle(cx), cx);
+        let status = format!(
+            "Zed buffer connected to OpenIDEA document {}",
+            backend.path.display()
+        );
+        Self {
+            editor,
+            buffer,
+            backend_version: backend.version,
+            last_clock: version,
+            backend,
+            syncing: false,
+            save_requested: false,
+            status: status.into(),
+            _subscriptions: vec![subscription],
+        }
+    }
+
+    fn sync_edits(&mut self, cx: &mut Context<Self>) {
+        if self.syncing {
+            return;
+        }
+        let snapshot = self.buffer.read(cx).snapshot();
+        let edits: Vec<text::Edit<text::OffsetUtf16>> = snapshot
+            .edits_since::<text::OffsetUtf16>(&self.last_clock)
+            .collect();
+        if edits.is_empty() {
+            return;
+        }
+        let changes = edits
+            .iter()
+            .map(|edit| ide_core::TextChange {
+                from: edit.old.start.0 as u32,
+                to: edit.old.end.0 as u32,
+                insert: snapshot
+                    .text_for_range(
+                        snapshot.offset_utf16_to_offset(edit.new.start)
+                            ..snapshot.offset_utf16_to_offset(edit.new.end),
+                    )
+                    .collect(),
+            })
+            .collect();
+        let request_clock = snapshot.version().clone();
+        self.last_clock = request_clock.clone();
+        self.syncing = true;
+        let base_version = self.backend_version;
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let result = backend
+                .edit(base_version, ide_core::ChangeSet { changes })
+                .await;
+            this.update(cx, |app, cx| {
+                app.syncing = false;
+                match result {
+                    Ok(version) => {
+                        app.backend_version = version;
+                        let current = app.buffer.read(cx).snapshot().version().clone();
+                        if current != request_clock {
+                            app.sync_edits(cx);
+                        } else if app.save_requested {
+                            app.save_requested = false;
+                            app.save(cx);
+                        }
+                    }
+                    Err(error) => {
+                        app.status = format!("OpenIDEA edit failed: {}", error.message).into();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn save(&mut self, cx: &mut Context<Self>) {
+        if self.syncing {
+            self.save_requested = true;
+            self.status = "Waiting for pending edits before save…".into();
+            cx.notify();
+            return;
+        }
+        let version = self.buffer.read(cx).snapshot().version().clone();
+        let backend = self.backend.clone();
+        let buffer = self.buffer.clone();
+        self.status = "Saving through the OpenIDEA Host…".into();
+        cx.spawn(async move |this, cx| {
+            let result = backend.save().await;
+            this.update(cx, |app, cx| {
+                match result {
+                    Ok(()) => {
+                        buffer.update(cx, |buffer, cx| {
+                            buffer.did_save(version, None, cx);
+                        });
+                        app.status = "Saved through the OpenIDEA Host".into();
+                    }
+                    Err(error) => {
+                        app.status = format!("OpenIDEA save failed: {}", error.message).into();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+}
+
+impl Drop for PocApp {
+    fn drop(&mut self) {
+        self.backend.close();
+    }
+}
+
+impl Render for PocApp {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .on_action(cx.listener(|this, _: &SaveDocument, _window, cx| {
+                this.save(cx);
+            }))
+            .child(
+                div()
+                    .h(px(24.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.))
+                    .text_color(gpui::rgb(0x9b9ea9))
+                    .child(self.status.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(self.editor.clone()),
+            )
+    }
+}
+
+fn main() {
+    let root = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../.."));
+    let file = std::env::args()
+        .nth(2)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("README.md"));
+    let backend = OpenIdeaBridge::start(&root, &file)
+        .unwrap_or_else(|error| panic!("open {} through OpenIDEA: {error:#}", file.display()));
+    let backend = Arc::new(backend);
+
+    application()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            if let Err(error) = assets::Assets.load_fonts(cx) {
+                panic!("load editor fonts: {error:#}");
+            }
+            let settings_store = SettingsStore::new(cx, &settings::default_settings());
+            cx.set_global(settings_store);
+            theme_settings::init(LoadThemes::All(Box::new(assets::Assets)), cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+            cx.bind_keys([KeyBinding::new("cmd-s", SaveDocument, None)]);
+
+            let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        let backend = backend.clone();
+                        cx.new(|cx| PocApp::new(backend, window, cx))
+                    },
+                )
+                .expect("open Zed editor window");
+            if let Ok(marker) = std::env::var("RUSTIDEA_POC_DEMO_EDIT") {
+                window
+                    .update(cx, |app, window, cx| {
+                        app.buffer.update(cx, |buffer, cx| {
+                            buffer.edit([(0..0, format!("{marker}\n"))], None, cx);
+                        });
+                        let marker = marker.clone();
+                        cx.spawn_in(window, async move |this, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(2))
+                                .await;
+                            this.update(cx, |app, cx| app.save(cx)).ok();
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(2))
+                                .await;
+                            this.update(cx, |app, cx| {
+                                if app.status.contains("Saved through the OpenIDEA Host") {
+                                    eprintln!("POC_SAVE_OK {marker}");
+                                } else {
+                                    eprintln!("POC_SAVE_FAILED {}", app.status);
+                                }
+                                cx.quit();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })
+                    .expect("run POC demo edit");
+            }
+            window
+                .update(cx, |_, window, _| window.activate_window())
+                .expect("activate window");
+            cx.activate(true);
+        });
+}

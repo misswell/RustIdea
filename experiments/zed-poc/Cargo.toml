@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = ["crates/poc"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+anyhow = "1"
+assets = { path = "../../third_party/zed/crates/assets" }
+clock = { path = "../../third_party/zed/crates/clock" }
+editor = { path = "../../third_party/zed/crates/editor" }
+gpui = { path = "../../third_party/zed/crates/gpui" }
+gpui_platform = { path = "../../third_party/zed/crates/gpui_platform" }
+ide-core = { path = "../../crates/ide-core" }
+ide-host = { path = "../../crates/ide-host" }
+ide-language = { path = "../../crates/ide-language" }
+ide-workspace = { path = "../../crates/ide-workspace" }
+language = { path = "../../third_party/zed/crates/language" }
+release_channel = { path = "../../third_party/zed/crates/release_channel" }
+semver = "1"
+settings = { path = "../../third_party/zed/crates/settings" }
+text = { path = "../../third_party/zed/crates/text" }
+theme = { path = "../../third_party/zed/crates/theme" }
+theme_settings = { path = "../../third_party/zed/crates/theme_settings" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+util = { path = "../../third_party/zed/crates/util", features = ["debug-embed"] }
+
+[patch.crates-io]
+cpal = { git = "https://github.com/RustAudio/cpal", rev = "e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7" }
+tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "cf5d3a63f9fa069fc32b9a73dc28830e427d5ee0" }
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/smol-rs/async-task", rev = "41fd3359c75e221bd8b187a8ee361aa309c1714c" }
+windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+livekit = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "fbda05eb278b4a7c5be8fc9b2a92e9b62e732236" }
+libwebrtc = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "fbda05eb278b4a7c5be8fc9b2a92e9b62e732236" }
+notify = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
+notify-types = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
+webrtc-sys = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "fbda05eb278b4a7c5be8fc9b2a92e9b62e732236" }
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+crash-context = { git = "https://github.com/rust-minidump/minidump-writer", rev = "911b04e09b79b736cc15cbe712e83e2d3f348bb9" }
+scratch = { path = "../../third_party/zed/tooling/corgi/patches/scratch" }
+
+[profile.dev]
+split-debuginfo = "unpacked"
+incremental = true
+codegen-units = 16
+debug = "limited"

@@ -1,4 +1,6 @@
 /target
+/third_party/zed
+/experiments/zed-poc/target
 /.DS_Store
 **/.DS_Store
 *.log

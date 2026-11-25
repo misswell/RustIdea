@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*"]
 # Plugins and the guest SDK build for wasm32-wasip2 in their own workspaces.
-exclude = ["sdk", "plugins"]
+exclude = ["sdk", "plugins", "experiments/zed-poc", "third_party/zed"]
 
 [workspace.package]
 version = "0.2.0"
