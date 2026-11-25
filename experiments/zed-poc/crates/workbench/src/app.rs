@@ -146,6 +146,11 @@ pub struct Workbench {
     remote_status: gpui::SharedString,
     agents: Vec<ide_agent::AgentProvider>,
     agents_status: gpui::SharedString,
+    agent_prompt_input: Entity<TextInput>,
+    _agent_prompt_subscription: Subscription,
+    agent_selected: usize,
+    agent_tasks: Vec<ide_agent::AgentTask>,
+    agent_task_status: gpui::SharedString,
     tools: Vec<ide_tools::ToolInfo>,
     tools_selected: usize,
     tools_status: gpui::SharedString,
@@ -222,6 +227,21 @@ impl Workbench {
                 app.commit_git(message.clone(), cx);
             }
         });
+        let agent_prompt_input = cx.new(|cx| {
+            TextInput::new(
+                "Describe a task for the selected agent…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let agent_prompt_subscription = cx.subscribe(&agent_prompt_input, |app, _, event, cx| {
+            if let TextInputEvent::Submit(_) = event {
+                app.start_agent_task(cx);
+            }
+        });
         let mut app = Self {
             host,
             language_registry,
@@ -286,6 +306,11 @@ impl Workbench {
             remote_status: "Select REMOTE to load SSH configurations".into(),
             agents: Vec::new(),
             agents_status: "Select AGENTS to load providers".into(),
+            agent_prompt_input,
+            _agent_prompt_subscription: agent_prompt_subscription,
+            agent_selected: 0,
+            agent_tasks: Vec::new(),
+            agent_task_status: "No agent tasks".into(),
             tools: Vec::new(),
             tools_selected: 0,
             tools_status: "Select TOOLS to load tool status".into(),
@@ -301,6 +326,43 @@ impl Workbench {
         };
         if let Some(document) = document {
             app.insert_document(document, &registry_for_initial, cx);
+        }
+        let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel();
+        if let Ok(tasks) = app.host.agent_subscribe(agent_tx) {
+            app.agent_tasks = tasks;
+            app.agent_task_status = format!("{} agent tasks", app.agent_tasks.len()).into();
+            cx.spawn(async move |this, cx| {
+                while let Some(event) = agent_rx.recv().await {
+                    let handle = this
+                        .update(cx, |app, cx| {
+                            match event {
+                                ide_agent::AgentEvent::Task { task } => {
+                                    if let Some(existing) = app
+                                        .agent_tasks
+                                        .iter_mut()
+                                        .find(|existing| existing.id == task.id)
+                                    {
+                                        *existing = *task;
+                                    } else {
+                                        app.agent_tasks.push(*task);
+                                    }
+                                }
+                                ide_agent::AgentEvent::Removed { id } => {
+                                    app.agent_tasks.retain(|task| task.id != id);
+                                }
+                                _ => {}
+                            }
+                            app.agent_task_status =
+                                format!("{} agent tasks", app.agent_tasks.len()).into();
+                            cx.notify();
+                            app.window_handle
+                        })
+                        .ok()
+                        .flatten();
+                    refresh_window(handle, cx);
+                }
+            })
+            .detach();
         }
         app.refresh_git(cx);
         let ui_events = app.host.take_events();
@@ -770,6 +832,57 @@ impl Workbench {
                 self.agents_status = format!("Agents failed: {}", error.message).into();
             }
         }
+        cx.notify();
+    }
+
+    fn start_agent_task(&mut self, cx: &mut Context<Self>) {
+        if self.agents.is_empty() {
+            self.refresh_agents(cx);
+        }
+        let Some(agent) = self.agents.get(self.agent_selected).cloned() else {
+            self.agent_task_status = "No agent provider selected".into();
+            cx.notify();
+            return;
+        };
+        let prompt = self.agent_prompt_input.read(cx).content().trim().to_owned();
+        if prompt.is_empty() {
+            self.agent_task_status = "Enter a task prompt".into();
+            cx.notify();
+            return;
+        }
+        if !agent.installed {
+            self.agent_task_status = format!("{} is not installed", agent.name).into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        let provider = agent.id.clone();
+        let name = agent.name.clone();
+        self.agent_task_status = format!("Starting a task with {name}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.agent_create(provider, prompt).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(task) => {
+                            app.agent_task_status = format!("Created task {}", task.title).into();
+                            app.agent_prompt_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                        }
+                        Err(error) => {
+                            app.agent_task_status =
+                                format!("Agent task failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1883,6 +1996,10 @@ impl Workbench {
         self.agents.len()
     }
 
+    pub fn agent_tasks_count(&self) -> usize {
+        self.agent_tasks.len()
+    }
+
     pub fn tools_count(&self) -> usize {
         self.tools.len()
     }
@@ -2794,12 +2911,13 @@ impl Workbench {
         let theme = self.theme;
         let mut rows = div()
             .id("agent-providers")
-            .flex_1()
-            .min_h(px(0.))
+            .flex_none()
+            .max_h(px(150.))
             .overflow_y_scroll()
             .flex()
             .flex_col();
         for (index, agent) in self.agents.iter().take(80).enumerate() {
+            let selected = index == self.agent_selected;
             rows = rows.child(
                 div()
                     .id(("agent", index))
@@ -2814,6 +2932,17 @@ impl Workbench {
                     } else {
                         theme.muted
                     })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.agent_selected = index;
+                        cx.notify();
+                    }))
                     .child(
                         div()
                             .w(px(6.))
@@ -2832,6 +2961,32 @@ impl Workbench {
                             .text_color(theme.faint)
                             .truncate()
                             .child(agent.program.clone()),
+                    ),
+            );
+        }
+        let mut task_rows = div()
+            .id("agent-tasks")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, task) in self.agent_tasks.iter().take(100).enumerate() {
+            task_rows = task_rows.child(
+                div()
+                    .id(("agent-task", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .text_size(px(10.5))
+                    .child(div().truncate().child(task.title.clone()))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child(format!("{:?} · {}", task.status, task.provider)),
                     ),
             );
         }
@@ -2872,7 +3027,41 @@ impl Workbench {
                             .child(self.agents_status.clone()),
                     ),
             )
+            .child(
+                div()
+                    .p_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(div().flex_1().child(self.agent_prompt_input.clone()))
+                    .child(
+                        div()
+                            .id("agent-start")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.start_agent_task(cx);
+                            }))
+                            .child("Start"),
+                    ),
+            )
             .child(rows)
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(10.))
+                    .text_color(theme.faint)
+                    .child(self.agent_task_status.clone()),
+            )
+            .child(task_rows)
             .when(self.agents.is_empty(), |view| {
                 view.child(
                     div()

@@ -608,6 +608,44 @@ impl NativeHost {
         ide_host::ops::agent::providers(&self.host, MAIN_WINDOW)
     }
 
+    pub fn agent_subscribe(
+        &self,
+        output: tokio::sync::mpsc::UnboundedSender<ide_agent::AgentEvent>,
+    ) -> IdeResult<Vec<ide_agent::AgentTask>> {
+        let emit: ide_host::ops::Emit<ide_agent::AgentEvent> = Arc::new(move |event| {
+            let _ = output.send(event);
+        });
+        ide_host::ops::agent::subscribe(&self.host, MAIN_WINDOW, emit)
+    }
+
+    pub async fn agent_create(
+        &self,
+        provider: String,
+        prompt: String,
+    ) -> IdeResult<ide_agent::AgentTask> {
+        self.run(move |host| async move {
+            ide_host::ops::agent::create(
+                &host,
+                MAIN_WINDOW,
+                ide_agent::NewAgentTask {
+                    project_root: None,
+                    prompt: ide_agent::AgentPrompt {
+                        text: prompt,
+                        files: Vec::new(),
+                        images: Vec::new(),
+                    },
+                    provider,
+                    config: Vec::new(),
+                    isolation: ide_agent::Isolation::Local,
+                    base: None,
+                    mcp_overrides: Default::default(),
+                },
+            )
+            .await
+        })
+        .await
+    }
+
     pub async fn tools_list(&self) -> IdeResult<Vec<ide_tools::ToolInfo>> {
         self.run(
             move |host| async move { ide_host::ops::tools::tools_list(&host, MAIN_WINDOW).await },

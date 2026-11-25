@@ -270,7 +270,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} agents={} tools={} plugins={} debug_attachables={} build_status={} build={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} agents={} agent_tasks={} tools={} plugins={} debug_attachables={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -299,6 +299,7 @@ fn main() {
                                     app.db_status(),
                                     app.remote_status(),
                                     app.agents_count(),
+                                    app.agent_tasks_count(),
                                     app.tools_count(),
                                     app.plugins_count(),
                                     app.debug_attachable_count(),
