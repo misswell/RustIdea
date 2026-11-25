@@ -254,6 +254,59 @@ fn display_json_value(value: &serde_json::Value) -> String {
     }
 }
 
+fn mcp_transport_label(transport: ide_agent::McpTransport) -> &'static str {
+    match transport {
+        ide_agent::McpTransport::Stdio => "stdio",
+        ide_agent::McpTransport::Http => "http",
+        ide_agent::McpTransport::Sse => "sse",
+    }
+}
+
+fn build_mcp_server_input(
+    id: Option<String>,
+    name: &str,
+    transport: ide_agent::McpTransport,
+    command: &str,
+    args: &str,
+    url: &str,
+) -> Result<ide_agent::McpServerInput, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("MCP server name is required".into());
+    }
+    let is_stdio = transport == ide_agent::McpTransport::Stdio;
+    let command = command.trim();
+    if is_stdio && command.is_empty() {
+        return Err("An MCP stdio server requires a command".into());
+    }
+    let url = url.trim();
+    if !is_stdio && url.is_empty() {
+        return Err(format!(
+            "An MCP {} server requires a URL",
+            mcp_transport_label(transport)
+        ));
+    }
+    Ok(ide_agent::McpServerInput {
+        id,
+        name: name.to_owned(),
+        scope: ide_agent::McpScope::User,
+        transport,
+        enabled: true,
+        command: is_stdio.then(|| command.to_owned()),
+        args: if is_stdio {
+            args.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        },
+        env: Vec::new(),
+        url: (!is_stdio).then(|| url.to_owned()),
+        headers: Vec::new(),
+        agents: Vec::new(),
+    })
+}
+
 fn utf16_prefix(text: &str, units: u32) -> String {
     let mut consumed = 0u32;
     let mut end = text.len();
@@ -479,9 +532,11 @@ pub struct Workbench {
     mcp_servers: Vec<ide_agent::McpServer>,
     mcp_status: gpui::SharedString,
     mcp_selected: Option<String>,
+    mcp_transport: ide_agent::McpTransport,
     mcp_name_input: Entity<TextInput>,
     mcp_command_input: Entity<TextInput>,
     mcp_args_input: Entity<TextInput>,
+    mcp_url_input: Entity<TextInput>,
     tools: Vec<ide_tools::ToolInfo>,
     tools_selected: usize,
     tools_status: gpui::SharedString,
@@ -674,6 +729,16 @@ impl Workbench {
         let mcp_args_input = cx.new(|cx| {
             TextInput::new(
                 "Arguments (space separated)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let mcp_url_input = cx.new(|cx| {
+            TextInput::new(
+                "Server URL (http:// or https://)",
                 theme.text,
                 theme.faint,
                 theme.selection,
@@ -928,9 +993,11 @@ impl Workbench {
             mcp_servers: Vec::new(),
             mcp_status: "No MCP servers".into(),
             mcp_selected: None,
+            mcp_transport: ide_agent::McpTransport::Stdio,
             mcp_name_input,
             mcp_command_input,
             mcp_args_input,
+            mcp_url_input,
             tools: Vec::new(),
             tools_selected: 0,
             tools_status: "Select TOOLS to load tool status".into(),
@@ -2014,6 +2081,7 @@ impl Workbench {
             return;
         };
         self.mcp_selected = Some(server.id.clone());
+        self.mcp_transport = server.transport;
         let name = server.name.clone();
         self.mcp_name_input
             .update(cx, |input, cx| input.set_content(name.clone(), cx));
@@ -2022,46 +2090,49 @@ impl Workbench {
         });
         self.mcp_args_input
             .update(cx, |input, cx| input.set_content(server.args.join(" "), cx));
+        self.mcp_url_input.update(cx, |input, cx| {
+            input.set_content(server.url.clone().unwrap_or_default(), cx)
+        });
         self.mcp_status = format!("Selected {name}").into();
         cx.notify();
     }
 
     fn new_mcp_server(&mut self, cx: &mut Context<Self>) {
         self.mcp_selected = None;
+        self.mcp_transport = ide_agent::McpTransport::Stdio;
         self.mcp_name_input
             .update(cx, |input, cx| input.set_content("", cx));
         self.mcp_command_input
             .update(cx, |input, cx| input.set_content("", cx));
         self.mcp_args_input
             .update(cx, |input, cx| input.set_content("", cx));
-        self.mcp_status = "New stdio MCP server".into();
+        self.mcp_url_input
+            .update(cx, |input, cx| input.set_content("", cx));
+        self.mcp_status = "New MCP server".into();
+        cx.notify();
+    }
+
+    fn set_mcp_transport(&mut self, transport: ide_agent::McpTransport, cx: &mut Context<Self>) {
+        self.mcp_transport = transport;
+        self.mcp_status = format!("Transport: {}", mcp_transport_label(transport)).into();
         cx.notify();
     }
 
     fn save_mcp_server(&mut self, cx: &mut Context<Self>) {
-        let name = self.mcp_name_input.read(cx).content().trim().to_owned();
-        let command = self.mcp_command_input.read(cx).content().trim().to_owned();
-        let args = self.mcp_args_input.read(cx).content().trim().to_owned();
-        if name.is_empty() || command.is_empty() {
-            self.mcp_status = "MCP name and command are required".into();
-            cx.notify();
-            return;
-        }
-        let input = ide_agent::McpServerInput {
-            id: self.mcp_selected.clone(),
-            name,
-            scope: ide_agent::McpScope::User,
-            transport: ide_agent::McpTransport::Stdio,
-            enabled: true,
-            command: Some(command),
-            args: args
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-            env: Vec::new(),
-            url: None,
-            headers: Vec::new(),
-            agents: Vec::new(),
+        let input = match build_mcp_server_input(
+            self.mcp_selected.clone(),
+            self.mcp_name_input.read(cx).content(),
+            self.mcp_transport,
+            self.mcp_command_input.read(cx).content(),
+            self.mcp_args_input.read(cx).content(),
+            self.mcp_url_input.read(cx).content(),
+        ) {
+            Ok(input) => input,
+            Err(error) => {
+                self.mcp_status = error.into();
+                cx.notify();
+                return;
+            }
         };
         match self.host.mcp_save(input) {
             Ok(servers) => {
@@ -4362,6 +4433,48 @@ impl Workbench {
         );
     }
 
+    pub fn smoke_mcp_transport_roundtrip(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Mcp, cx);
+        for (name, transport) in [
+            ("smoke-http", ide_agent::McpTransport::Http),
+            ("smoke-sse", ide_agent::McpTransport::Sse),
+        ] {
+            self.new_mcp_server(cx);
+            self.set_mcp_transport(transport, cx);
+            self.mcp_name_input.update(cx, |input, cx| {
+                input.set_content(name, cx);
+            });
+            self.mcp_url_input.update(cx, |input, cx| {
+                input.set_content("https://mcp.example.test/mcp", cx);
+            });
+            self.save_mcp_server(cx);
+            let Some(server) = self
+                .mcp_servers
+                .iter()
+                .find(|server| server.name == name)
+                .cloned()
+            else {
+                eprintln!(
+                    "WORKBENCH_MCP_TRANSPORT name={name} saved=false status={}",
+                    self.mcp_status
+                );
+                continue;
+            };
+            eprintln!(
+                "WORKBENCH_MCP_TRANSPORT name={name} transport={} url={:?} command={:?}",
+                mcp_transport_label(server.transport),
+                server.url,
+                server.command
+            );
+            self.mcp_selected = Some(server.id);
+            self.remove_selected_mcp_server(cx);
+        }
+        eprintln!(
+            "WORKBENCH_MCP_TRANSPORT remaining={}",
+            self.mcp_servers.len()
+        );
+    }
+
     pub fn smoke_quick_open(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
         self.fast_open = true;
         self.fast_open_input.update(cx, |input, cx| {
@@ -6578,6 +6691,48 @@ impl Workbench {
 
     fn render_mcp(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
+        let mut transport_row = div().flex().items_center().gap(px(3.));
+        for (index, transport) in [
+            ide_agent::McpTransport::Stdio,
+            ide_agent::McpTransport::Http,
+            ide_agent::McpTransport::Sse,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let selected = self.mcp_transport == transport;
+            transport_row = transport_row.child(
+                div()
+                    .id(("mcp-transport", index))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_size(px(9.5))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.accent_muted
+                    } else {
+                        theme.panel_alt
+                    })
+                    .border_1()
+                    .border_color(if selected { theme.accent } else { theme.border })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.set_mcp_transport(transport, cx);
+                    }))
+                    .child(mcp_transport_label(transport)),
+            );
+        }
+        let is_stdio = self.mcp_transport == ide_agent::McpTransport::Stdio;
+        let save_label = format!(
+            "{} {} server",
+            if self.mcp_selected.is_some() {
+                "Update"
+            } else {
+                "Add"
+            },
+            mcp_transport_label(self.mcp_transport).to_uppercase()
+        );
         let mut rows = div()
             .id("mcp-manage-list")
             .flex_1()
@@ -6588,6 +6743,7 @@ impl Workbench {
         for (index, server) in self.mcp_servers.iter().take(100).enumerate() {
             let selected = self.mcp_selected.as_deref() == Some(server.id.as_str());
             let enabled = server.enabled;
+            let scope = format!("{:?}", server.scope).to_lowercase();
             rows = rows.child(
                 div()
                     .id(("mcp-manage", index))
@@ -6618,7 +6774,11 @@ impl Workbench {
                         div()
                             .text_size(px(9.))
                             .text_color(theme.faint)
-                            .child(format!("{:?}", server.scope).to_lowercase()),
+                            .child(format!(
+                                "{} · {}",
+                                mcp_transport_label(server.transport),
+                                scope
+                            )),
                     )
                     .child(
                         div()
@@ -6695,8 +6855,12 @@ impl Workbench {
                     .flex_col()
                     .gap(px(4.))
                     .child(self.mcp_name_input.clone())
-                    .child(self.mcp_command_input.clone())
-                    .child(self.mcp_args_input.clone())
+                    .child(transport_row)
+                    .when(is_stdio, |form| {
+                        form.child(self.mcp_command_input.clone())
+                            .child(self.mcp_args_input.clone())
+                    })
+                    .when(!is_stdio, |form| form.child(self.mcp_url_input.clone()))
                     .child(
                         div()
                             .id("mcp-save")
@@ -6710,11 +6874,7 @@ impl Workbench {
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.save_mcp_server(cx);
                             }))
-                            .child(if self.mcp_selected.is_some() {
-                                "Update stdio server"
-                            } else {
-                                "Add stdio server"
-                            }),
+                            .child(save_label),
                     ),
             )
             .into_any_element()
@@ -8707,5 +8867,48 @@ mod tests {
         assert!(Command::ShowProblems.matches("problems"));
         assert!(Command::ShowProblems.matches("show pro"));
         assert!(!Command::ShowProblems.matches("market"));
+    }
+
+    #[test]
+    fn stdio_mcp_input_uses_command_and_rejects_missing_executable() {
+        let input = build_mcp_server_input(
+            None,
+            "echo",
+            ide_agent::McpTransport::Stdio,
+            " /bin/echo ",
+            "hello world",
+            "https://ignored.example.test",
+        )
+        .expect("stdio input");
+        assert_eq!(input.command.as_deref(), Some("/bin/echo"));
+        assert_eq!(input.args, ["hello", "world"]);
+        assert_eq!(input.url, None);
+        assert!(
+            build_mcp_server_input(None, "echo", ide_agent::McpTransport::Stdio, " ", "", "")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn http_and_sse_mcp_input_use_url_and_clear_stdio_fields() {
+        for transport in [ide_agent::McpTransport::Http, ide_agent::McpTransport::Sse] {
+            let input = build_mcp_server_input(
+                None,
+                "remote",
+                transport,
+                "/bin/ignored",
+                "--ignored",
+                " https://mcp.example.test/mcp ",
+            )
+            .expect("remote input");
+            assert_eq!(input.transport, transport);
+            assert_eq!(input.command, None);
+            assert!(input.args.is_empty());
+            assert_eq!(input.url.as_deref(), Some("https://mcp.example.test/mcp"));
+        }
+        assert!(
+            build_mcp_server_input(None, "remote", ide_agent::McpTransport::Http, "", "", " ")
+                .is_err()
+        );
     }
 }

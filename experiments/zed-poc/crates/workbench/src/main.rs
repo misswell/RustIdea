@@ -276,6 +276,8 @@ fn main() {
                 let smoke_market = std::env::var_os("RUSTIDEA_ZED_SMOKE_MARKET").is_some();
                 let smoke_mcp_roundtrip =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_MCP_ROUNDTRIP").is_some();
+                let smoke_mcp_transports =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_MCP_TRANSPORTS").is_some();
                 let smoke_quick_open = std::env::var("RUSTIDEA_ZED_SMOKE_QUICK_OPEN").ok();
                 let smoke_command_palette =
                     std::env::var("RUSTIDEA_ZED_SMOKE_COMMAND_PALETTE").ok();
@@ -350,6 +352,9 @@ fn main() {
                                 }
                                 if smoke_mcp_roundtrip {
                                     app.smoke_mcp_roundtrip(cx);
+                                }
+                                if smoke_mcp_transports {
+                                    app.smoke_mcp_transport_roundtrip(cx);
                                 }
                                 if let Some(query) = &smoke_quick_open {
                                     app.smoke_quick_open(query.clone(), window, cx);

@@ -357,7 +357,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   (`Entry`/`Append`/`Truncated`), creates a local agent task from the prompt
   field through `ops::agent::create`, sends follow-ups through
   `ops::agent::prompt`, and cancels a selected task; the Agents panel also
-  lists MCP status, and the dedicated MCP panel manages stdio servers through
+  lists MCP status, and the dedicated MCP panel manages stdio, HTTP and SSE
+  servers through
   `mcp_list`/`mcp_save`/`mcp_remove`/`mcp_set_enabled`; permission entries
   render their option buttons and cancel action through
   `ops::agent::respond`; subagent entries open their own timeline with a back
@@ -434,7 +435,7 @@ Panel coverage at this commit:
 | Remote Host | SSH terminal, SFTP browse/preview/edit | `ops::term::spawn_ssh`, `SshManager` |
 | Notebook | viewer + cell edit/insert/delete/type + save/run all | `ops::notebook` |
 | Agents | working (providers/tasks/timeline/prompt/cancel) | `ops::agent` |
-| MCP | list/toggle/add/update/remove stdio servers | `ops::agent::mcp_*` |
+| MCP | list/toggle/add/update/remove stdio/HTTP/SSE servers | `ops::agent::mcp_*` |
 | Tools | list/install | `ops::tools` |
 | Plugins | installed list + marketplace/preview/install + optional-capability consent | `PluginHost` |
 | Settings | filter + boolean toggles + JSON value editor | `ops::project::settings` / `set_settings` |
@@ -583,7 +584,16 @@ MCP round-trip smoke in an isolated config/data root (add `/bin/echo` server,
 then remove it):
 
 ```text
-WORKBENCH_MCP_ROUNDTRIP added=1 removed=0 status=New stdio MCP server
+WORKBENCH_MCP_ROUNDTRIP added=1 removed=0 status=New MCP server
+```
+
+MCP HTTP/SSE round-trip smoke (add a URL-backed server for each transport, then
+remove it):
+
+```text
+WORKBENCH_MCP_TRANSPORT name=smoke-http transport=http url=Some("https://mcp.example.test/mcp") command=None
+WORKBENCH_MCP_TRANSPORT name=smoke-sse transport=sse url=Some("https://mcp.example.test/mcp") command=None
+WORKBENCH_MCP_TRANSPORT remaining=0
 ```
 
 Build smoke on the Maven project:
@@ -628,8 +638,8 @@ documents/project/sync/host: 24 passed; 0 failed
   Unity attach, notebook rich-output editing, live
   remote-write verification (UI path exists), structured question/form widgets
   and live subagent/form verification
-  are not yet integrated. MCP add/update/remove is wired for stdio servers; HTTP/SSE editing
-  still lives in settings. Settings edits booleans and JSON scalars; structured
+  are not yet integrated. MCP add/update/remove is wired for stdio, HTTP and
+  SSE transports. Settings edits booleans and JSON scalars; structured
   list/map editors are missing. Database/HTTP have working execution paths but no
   source/request editors of their own. The Terminal now has a real VT screen
   and OpenIDEA PTY, but its mouse selection, hyperlinks, IME composition and
