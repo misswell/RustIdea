@@ -197,6 +197,17 @@ async fn forward(
 mod tests {
     use super::*;
     const ID: &str = "3f1c2b9a7d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8";
+
+    /// Tests that bind the locally chosen loopback port must not race each
+    /// other: an ephemeral port released by one tunnel can immediately be
+    /// assigned to another test's listener, which makes the "port is closed"
+    /// assertion succeed for the wrong reason.
+    #[cfg(unix)]
+    async fn network_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        LOCK.lock().await
+    }
+
     #[test]
     fn a_forwarded_connection_runs_the_server_as_a_relay() {
         let up = Up {
@@ -243,6 +254,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_tunnel_pipes_each_connection_through_docker_exec() {
+        let _network = network_test_guard().await;
         use std::os::unix::fs::PermissionsExt;
         use tokio::io::AsyncReadExt;
         let dir = tempfile::tempdir().unwrap();
@@ -305,6 +317,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn dropping_a_tunnel_closes_active_clients_and_reaps_children() {
+        let _network = network_test_guard().await;
         let (_dir, exec) = docker_script("echo $$; exec cat");
         let tunnel = Tunnel::listen(exec, 0, "localhost", 8000).await.unwrap();
         let port = tunnel.port();
@@ -361,6 +374,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn target_eof_closes_a_client_that_has_not_sent_eof() {
+        let _network = network_test_guard().await;
         let (_dir, exec) = docker_script("echo $$; printf done");
         let tunnel = Tunnel::listen(exec, 0, "localhost", 8000).await.unwrap();
         let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", tunnel.port()))
@@ -394,6 +408,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn stderr_is_drained_while_the_connection_is_open() {
+        let _network = network_test_guard().await;
         let (_dir, exec) =
             docker_script("dd if=/dev/zero bs=65536 count=4 >&2 2>/dev/null; printf done");
         let tunnel = Tunnel::listen(exec, 0, "localhost", 8000).await.unwrap();
@@ -412,6 +427,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn occupied_preferred_port_falls_back_to_a_free_loopback_port() {
+        let _network = network_test_guard().await;
         let (_dir, exec) = docker_script("exec cat");
         let busy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
