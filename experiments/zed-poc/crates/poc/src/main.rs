@@ -10,12 +10,15 @@ use backend::OpenIdeaBridge;
 use completion::OpenIdeaCompletionProvider;
 use semantics::OpenIdeaSemanticsProvider;
 use editor::Editor;
+use ide_core::IdeEvent;
 use gpui::{
     App, AppContext as _, Bounds, Context, Focusable as _, KeyBinding, Subscription, Window,
     WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
 use gpui_platform::application;
-use language::{Buffer, BufferEvent};
+use language::{
+    Buffer, BufferEvent, Diagnostic, DiagnosticEntry, DiagnosticMessage, DiagnosticSet,
+};
 use settings::SettingsStore;
 use theme::LoadThemes;
 
@@ -49,6 +52,14 @@ impl PocApp {
             editor.set_completion_provider(Some(Rc::new(provider)));
             editor.set_semantics_provider(Some(Rc::new(semantics)));
         });
+        if let Some(mut events) = backend.take_events() {
+            cx.spawn(async move |this, cx| {
+                while let Some(event) = events.recv().await {
+                    this.update(cx, |app, cx| app.handle_event(event, cx)).ok();
+                }
+            })
+            .detach();
+        }
         let subscription = cx.subscribe(&buffer, |app, _, event: &BufferEvent, cx| {
             if matches!(event, BufferEvent::Edited { .. }) {
                 app.sync_edits(cx);
@@ -127,6 +138,54 @@ impl PocApp {
             .ok();
         })
         .detach();
+        cx.notify();
+    }
+
+    fn handle_event(&mut self, event: IdeEvent, cx: &mut Context<Self>) {
+        let IdeEvent::Diagnostics {
+            path,
+            source,
+            items,
+        } = event
+        else {
+            return;
+        };
+        if path.0 != self.backend.path {
+            return;
+        }
+        let snapshot = self.buffer.read(cx).snapshot();
+        let entries: Vec<DiagnosticEntry<text::PointUtf16>> = items
+            .into_iter()
+            .map(|diagnostic| {
+                let range = text::PointUtf16::new(
+                    diagnostic.range.start.line,
+                    diagnostic.range.start.col,
+                )
+                    ..text::PointUtf16::new(
+                        diagnostic.range.end.line,
+                        diagnostic.range.end.col,
+                    );
+                let mut zed = Diagnostic::default();
+                zed.source = Some(source.clone());
+                zed.severity = match diagnostic.severity {
+                    ide_core::Severity::Error => lsp::DiagnosticSeverity::ERROR,
+                    ide_core::Severity::Warning => lsp::DiagnosticSeverity::WARNING,
+                    ide_core::Severity::Info => lsp::DiagnosticSeverity::INFORMATION,
+                    ide_core::Severity::Hint => lsp::DiagnosticSeverity::HINT,
+                };
+                zed.message = DiagnosticMessage::plain(diagnostic.message);
+                DiagnosticEntry::new(range, zed)
+            })
+            .collect();
+        let set = DiagnosticSet::new(entries, &snapshot);
+        eprintln!(
+            "POC_DIAGNOSTICS source={} count={}",
+            source,
+            set.len()
+        );
+        self.buffer.update(cx, |buffer, cx| {
+            buffer.update_diagnostics(lsp::LanguageServerId(1), set, cx);
+        });
         cx.notify();
     }
 

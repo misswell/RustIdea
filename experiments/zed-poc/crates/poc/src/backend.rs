@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context as _, Result};
 use ide_core::{ChangeSet, DocId, IdeEvent, IdeResult, SharedSink};
@@ -7,6 +7,7 @@ use ide_host::{Host, HostConfig};
 use ide_language::{LanguageRegistry, Syntax};
 use ide_workspace::DocumentInfo;
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 pub const WINDOW: &str = "main";
 const IDENTIFIER: &str = "com.guofeng.rustidea.zedpoc";
@@ -25,6 +26,7 @@ pub struct OpenIdeaBridge {
     pub text: String,
     pub version: u32,
     pub language: String,
+    events: Mutex<Option<UnboundedReceiver<IdeEvent>>>,
 }
 
 impl OpenIdeaBridge {
@@ -57,23 +59,26 @@ impl OpenIdeaBridge {
                 .enable_all()
                 .build()?,
         );
+        let (event_tx, event_rx) = unbounded_channel();
         let host = Arc::new(Host::new(HostConfig {
             config_dir,
             data_dir,
             local_data_dir,
             languages,
             syntax,
-            sink_for: Box::new(|_| {
-                let sink = Arc::new(|event: IdeEvent| {
+            sink_for: Box::new(move |_| {
+                let event_tx = event_tx.clone();
+                let sink = Arc::new(move |event: IdeEvent| {
                     if let IdeEvent::LanguageServer {
                         name,
                         status,
                         message,
                         ..
-                    } = event
+                    } = &event
                     {
                         eprintln!("OPENIDEA_LSP {name} {status:?} {message:?}");
                     }
+                    let _ = event_tx.send(event);
                 }) as SharedSink;
                 sink
             }),
@@ -98,7 +103,12 @@ impl OpenIdeaBridge {
             text: info.text,
             version: info.version,
             language: info.language.to_string(),
+            events: Mutex::new(Some(event_rx)),
         })
+    }
+
+    pub fn take_events(&self) -> Option<UnboundedReceiver<IdeEvent>> {
+        self.events.lock().ok()?.take()
     }
 
     pub async fn edit(&self, base_version: u32, changes: ChangeSet) -> IdeResult<u32> {

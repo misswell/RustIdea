@@ -31,6 +31,8 @@ The POC binary is `rustidea-zed-poc`. It builds and runs with:
   `Editor::set_semantics_provider`, which maps `ide_host::ops::lsp::lsp_hover`
   results into Zed's hover blocks. Definition, highlights, rename, inlay hints
   and semantic tokens are explicit empty stubs in this POC.
+- An OpenIdea event pump that converts `IdeEvent::Diagnostics` into a Zed
+  `DiagnosticSet` and calls `Buffer::update_diagnostics`.
 
 It does **not** create a Zed Project, does not start Zed LSP/index services, and
 does not contain a WebView.
@@ -135,6 +137,18 @@ POC_LSP_OK count=48
 The hover is returned by OpenIdea LSP and converted by the Zed semantics
 provider; the actual mouse-hover popover still needs an unlocked GUI session.
 
+Diagnostics bridge test with an intentional TypeScript type error:
+
+```text
+POC_DIAGNOSTICS source=typescript-language-server count=2
+```
+
+Two OpenIdea diagnostics were converted and applied to the Zed buffer. Visual
+underline rendering still needs GUI inspection; the POC currently maps every
+source to one synthetic language-server id, so multiple diagnostic producers
+will overwrite rather than merge until the final DiagnosticsBridge keeps a
+source-to-id map.
+
 ## Not yet done
 
 - License confirmation and the repository license change to
@@ -143,6 +157,7 @@ provider; the actual mouse-hover popover still needs an unlocked GUI session.
   Hover and completion are wired in the POC.
 - Completion documentation, `additionalTextEdits`, commit characters and
   completion resolve are not mapped yet.
+- Multi-source diagnostic merging (the POC uses one synthetic server id).
 - Replacing the existing RustIdea `Editor`/`DocumentBuffer` workbench entry with
   the Zed entity across tabs and splits.
 - Real window keyboard, Chinese IME, clipboard and visual verification on an

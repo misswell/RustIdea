@@ -54,9 +54,18 @@ index b6f79cc..8866fe6 100644
  /// Maximum number of parent elements to walk back when checking if an open tag
  /// is already closed.
 diff --git a/crates/language/src/language.rs b/crates/language/src/language.rs
-index d7a5cff..c599aca 100644
+index d7a5cff..18273a6 100644
 --- a/crates/language/src/language.rs
 +++ b/crates/language/src/language.rs
+@@ -110,7 +110,7 @@ pub use buffer::*;
+ pub use diagnostic::{
+     Diagnostic, DiagnosticMessage, DiagnosticSourceKind, RelatedInformation, RelatedLocation,
+ };
+-pub use diagnostic_set::{DiagnosticEntry, DiagnosticEntryRef, DiagnosticGroup};
++pub use diagnostic_set::{DiagnosticEntry, DiagnosticEntryRef, DiagnosticGroup, DiagnosticSet};
+ pub use language_registry::{
+     BinaryStatus, LanguageNotFound, LanguageQueries, LanguageRegistry, QueryFile,
+     QueryFileContents, QueryFiles,
 @@ -1210,7 +1210,7 @@ impl Language {
              let mut captures = cursor.captures(query, tree.root_node(), text.text_provider());
              let capture_refs = iter::from_fn(move || {
