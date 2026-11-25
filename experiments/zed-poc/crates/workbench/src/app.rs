@@ -38,6 +38,7 @@ enum SidebarMode {
     Git,
     GitLog,
     Services,
+    GitHub,
     Outline,
     Problems,
     Database,
@@ -84,6 +85,7 @@ enum Command {
     ShowGit,
     ShowGitLog,
     ShowServices,
+    ShowGitHub,
     ShowOutline,
     ShowProblems,
     ShowDatabase,
@@ -114,7 +116,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 42] = [
+    const ALL: [Command; 43] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -130,6 +132,7 @@ impl Command {
         Command::ShowGit,
         Command::ShowGitLog,
         Command::ShowServices,
+        Command::ShowGitHub,
         Command::ShowOutline,
         Command::ShowProblems,
         Command::ShowDatabase,
@@ -176,6 +179,7 @@ impl Command {
             Command::ShowGit => "Show Version Control",
             Command::ShowGitLog => "Show Git Log",
             Command::ShowServices => "Show Services",
+            Command::ShowGitHub => "Show GitHub Pull Requests",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
             Command::ShowDatabase => "Show Database",
@@ -585,6 +589,11 @@ pub struct Workbench {
     docker_status: gpui::SharedString,
     docker_tab: DockerTab,
     docker_busy: bool,
+    github_availability: Option<ide_github::GhAvailability>,
+    github_pulls: Vec<ide_github::PullRequestSummary>,
+    github_status: gpui::SharedString,
+    github_state: ide_github::PrStateFilter,
+    github_busy: bool,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -1156,6 +1165,11 @@ impl Workbench {
             docker_status: "Open Services to load Docker".into(),
             docker_tab: DockerTab::Containers,
             docker_busy: false,
+            github_availability: None,
+            github_pulls: Vec::new(),
+            github_status: "Open GitHub to load pull requests".into(),
+            github_state: ide_github::PrStateFilter::Open,
+            github_busy: false,
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -1404,6 +1418,7 @@ impl Workbench {
             SidebarMode::Git => self.refresh_git(cx),
             SidebarMode::GitLog => self.refresh_git_log(cx),
             SidebarMode::Services => self.refresh_docker(cx),
+            SidebarMode::GitHub => self.refresh_github(cx),
             SidebarMode::Http => self.refresh_http(cx),
             SidebarMode::Database => self.refresh_db(cx),
             SidebarMode::Remote => self.refresh_remote(cx),
@@ -4031,6 +4046,7 @@ impl Workbench {
             Command::ShowGit => self.select_sidebar(SidebarMode::Git, cx),
             Command::ShowGitLog => self.select_sidebar(SidebarMode::GitLog, cx),
             Command::ShowServices => self.select_sidebar(SidebarMode::Services, cx),
+            Command::ShowGitHub => self.select_sidebar(SidebarMode::GitHub, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
             Command::ShowDatabase => self.select_sidebar(SidebarMode::Database, cx),
@@ -4837,6 +4853,100 @@ impl Workbench {
         cx.notify();
     }
 
+    fn refresh_github(&mut self, cx: &mut Context<Self>) {
+        if self.github_busy {
+            return;
+        }
+        self.github_busy = true;
+        self.github_status = "Checking GitHub CLI…".into();
+        let host = self.host.clone();
+        let root = self.root.clone();
+        let state = self.github_state;
+        cx.spawn(async move |this, cx| {
+            let availability = host.github_availability(root.clone()).await;
+            let pulls = if matches!(&availability, Ok(ide_github::GhAvailability::Ready { .. })) {
+                Some(
+                    host.github_pr_list(
+                        root,
+                        ide_github::PrListQuery {
+                            state,
+                            author_me: false,
+                            review_requested: false,
+                            assignee_me: false,
+                            search: String::new(),
+                            limit: 100,
+                        },
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.github_busy = false;
+                    match availability {
+                        Ok(availability) => {
+                            app.github_status = match &availability {
+                                ide_github::GhAvailability::Ready { repo, login } => format!(
+                                    "{} · {}",
+                                    repo.name_with_owner,
+                                    login.as_deref().unwrap_or("signed in")
+                                )
+                                .into(),
+                                ide_github::GhAvailability::NotInstalled => {
+                                    "GitHub CLI (gh) is not installed".into()
+                                }
+                                ide_github::GhAvailability::NotLoggedIn { message } => {
+                                    format!("GitHub CLI is not signed in: {message}").into()
+                                }
+                                ide_github::GhAvailability::NotGitHub { message } => {
+                                    format!("No GitHub repository: {message}").into()
+                                }
+                                ide_github::GhAvailability::Error { message } => {
+                                    format!("GitHub failed: {message}").into()
+                                }
+                            };
+                            app.github_availability = Some(availability);
+                            if let Some(result) = pulls {
+                                match result {
+                                    Ok(pulls) => {
+                                        app.github_status = format!(
+                                            "{} · {} pull requests",
+                                            app.github_status,
+                                            pulls.len()
+                                        )
+                                        .into();
+                                        app.github_pulls = pulls;
+                                    }
+                                    Err(error) => {
+                                        app.github_pulls.clear();
+                                        app.github_status =
+                                            format!("Pull requests failed: {}", error.message)
+                                                .into();
+                                    }
+                                }
+                            } else {
+                                app.github_pulls.clear();
+                            }
+                        }
+                        Err(error) => {
+                            app.github_availability = None;
+                            app.github_pulls.clear();
+                            app.github_status = format!("GitHub failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn stage_all(&mut self, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = self
             .git_status
@@ -5258,6 +5368,7 @@ impl Workbench {
             SidebarMode::Git => "Git",
             SidebarMode::GitLog => "Git Log",
             SidebarMode::Services => "Services",
+            SidebarMode::GitHub => "GitHub",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
             SidebarMode::Database => "Database",
@@ -5636,6 +5747,25 @@ impl Workbench {
                     container.name, container.image, container.state
                 )
             })
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_github(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::GitHub, cx);
+    }
+
+    pub fn github_pull_count(&self) -> usize {
+        self.github_pulls.len()
+    }
+
+    pub fn github_status_text(&self) -> String {
+        self.github_status.to_string()
+    }
+
+    pub fn github_first_pull(&self) -> String {
+        self.github_pulls
+            .first()
+            .map(|pull| format!("#{} {}", pull.number, pull.title))
             .unwrap_or_default()
     }
 
@@ -9181,6 +9311,195 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_github(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let ready = self
+            .github_availability
+            .as_ref()
+            .is_some_and(|availability| {
+                matches!(availability, ide_github::GhAvailability::Ready { .. })
+            });
+        let mut rows = div()
+            .id("github-pulls")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if !ready {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(self.github_status.clone()),
+            );
+        } else if self.github_pulls.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(if self.github_busy {
+                        "Loading pull requests…"
+                    } else {
+                        "No pull requests"
+                    }),
+            );
+        }
+        for (index, pull) in self.github_pulls.iter().take(200).enumerate() {
+            let url = pull.url.clone();
+            let state_color = match pull.state {
+                ide_github::PrState::Open => theme.accent,
+                ide_github::PrState::Merged => theme.accent,
+                ide_github::PrState::Closed => theme.faint,
+            };
+            rows = rows.child(
+                div()
+                    .id(("github-pull", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        cx.open_url(&url);
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(10.5))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(state_color)
+                                    .child(format!("#{}", pull.number)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_color(theme.text)
+                                    .child(if pull.is_draft {
+                                        format!("Draft: {}", pull.title)
+                                    } else {
+                                        pull.title.clone()
+                                    }),
+                            )
+                            .when_some(pull.review_decision.clone(), |row, decision| {
+                                row.child(
+                                    div()
+                                        .text_size(px(8.5))
+                                        .text_color(theme.warning)
+                                        .child(decision),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child(pull.author.clone())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .truncate()
+                                    .child(format!("{} → {}", pull.head_ref, pull.base_ref)),
+                            )
+                            .child(format!("+{} −{}", pull.additions, pull.deletions)),
+                    ),
+            );
+        }
+        let tabs = [
+            (ide_github::PrStateFilter::Open, "Open"),
+            (ide_github::PrStateFilter::Closed, "Closed"),
+            (ide_github::PrStateFilter::Merged, "Merged"),
+            (ide_github::PrStateFilter::All, "All"),
+        ];
+        let mut tab_row = div().flex().items_center().gap(px(3.));
+        for (index, (tab, label)) in tabs.into_iter().enumerate() {
+            let selected = self.github_state == tab;
+            tab_row = tab_row.child(
+                div()
+                    .id(("github-tab", index))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_size(px(9.))
+                    .text_color(if selected { theme.text } else { theme.faint })
+                    .bg(if selected {
+                        theme.accent_muted
+                    } else {
+                        theme.panel_alt
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.github_state = tab;
+                        this.refresh_github(cx);
+                    }))
+                    .child(label),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("github-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.github_busy {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_github(cx);
+                            }))
+                            .child(if self.github_busy {
+                                "Loading…"
+                            } else {
+                                "Refresh"
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.github_status.clone()),
+                    ),
+            )
+            .child(div().px_2().py_1().child(tab_row))
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut results = div()
@@ -10762,6 +11081,7 @@ impl Render for Workbench {
         let git = self.render_git_panel(cx);
         let git_log = self.render_git_log(cx);
         let services = self.render_services(cx);
+        let github = self.render_github(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
         let settings = self.render_settings(cx);
@@ -10775,6 +11095,7 @@ impl Render for Workbench {
             SidebarMode::Git => git,
             SidebarMode::GitLog => git_log,
             SidebarMode::Services => services,
+            SidebarMode::GitHub => github,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
             SidebarMode::Settings => settings,
@@ -10797,6 +11118,7 @@ impl Render for Workbench {
             ("GIT", SidebarMode::Git),
             ("LOG", SidebarMode::GitLog),
             ("SRV", SidebarMode::Services),
+            ("GH", SidebarMode::GitHub),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
             ("DB", SidebarMode::Database),

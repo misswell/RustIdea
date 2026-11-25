@@ -1237,6 +1237,33 @@ impl NativeHost {
         })
         .await
     }
+
+    pub async fn github_availability(
+        &self,
+        root: PathBuf,
+    ) -> IdeResult<ide_github::GhAvailability> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || ide_github::availability(&root))
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.to_string()))
+        })
+        .await
+    }
+
+    pub async fn github_pr_list(
+        &self,
+        root: PathBuf,
+        query: ide_github::PrListQuery,
+    ) -> IdeResult<Vec<ide_github::PullRequestSummary>> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || ide_github::list(&root, &query))
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
 }
 
 impl Drop for NativeHost {

@@ -6240,6 +6240,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ide-github"
+version = "0.2.0"
+dependencies = [
+ "ide-core",
+ "ide-vcs",
+ "serde",
+ "serde_json",
+ "specta",
+ "tracing",
+ "which",
+]
+
+[[package]]
 name = "ide-heap"
 version = "0.2.0"
 dependencies = [
@@ -12023,6 +12036,7 @@ dependencies = [
  "ide-dap",
  "ide-db",
  "ide-docker",
+ "ide-github",
  "ide-host",
  "ide-http",
  "ide-index",
