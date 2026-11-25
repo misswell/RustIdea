@@ -357,10 +357,12 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - Cmd-P opens a native quick-open overlay backed by
   `ops::nav::find_files`; typing re-queries the project index and clicking or
   submitting opens the selected file;
-- Cmd-Shift-P opens a native command palette with 32 commands covering file
+- Cmd-Shift-P opens a native command palette with 33 commands covering file
   save/close, splits, every sidebar and bottom panel, run/build/rebuild and
   backend refreshes; filtering is local and execution uses the same methods as
   the buttons;
+- Cmd-Shift-O opens Go to Symbol, backed by `ops::nav::find_symbols`; results
+  show container/path and navigate to the symbol's file/line;
 - the bottom panel also has a Build tool window backed by
   `ops::build::build_model` / `ops::build::build_run`: it streams build
   `Started`, `Step`, `Output`, `Message` and `Progress` events and shows the
@@ -390,7 +392,8 @@ Panel coverage at this commit:
 |---|---|---|
 | Project tree | working | `ops::fs::read_dir` |
 | Quick Open (Cmd-P) | working | `ops::nav::find_files` |
-| Command Palette (Cmd-Shift-P) | working (32 commands) | local dispatch |
+| Command Palette (Cmd-Shift-P) | working (33 commands) | local dispatch |
+| Go to Symbol (Cmd-Shift-O) | working | `ops::nav::find_symbols` |
 | Find in Files | working | `ops::search` |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
@@ -491,6 +494,12 @@ Command-palette smoke:
 
 ```text
 commands=1 command_first="Show Problems" sidebar=Problems
+```
+
+Go-to-symbol smoke:
+
+```text
+symbols=1 symbol_first="App · src/main/java/com/example/App.java"
 ```
 
 MCP round-trip smoke in an isolated config/data root (add `/bin/echo` server,

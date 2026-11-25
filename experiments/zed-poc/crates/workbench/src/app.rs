@@ -57,6 +57,7 @@ enum Command {
     CloseTab,
     ToggleSplit,
     QuickOpen,
+    GoToSymbol,
     ShowProject,
     ShowSearch,
     ShowGit,
@@ -88,11 +89,12 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 32] = [
+    const ALL: [Command; 33] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
         Command::QuickOpen,
+        Command::GoToSymbol,
         Command::ShowProject,
         Command::ShowSearch,
         Command::ShowGit,
@@ -129,6 +131,7 @@ impl Command {
             Command::CloseTab => "Close tab",
             Command::ToggleSplit => "Toggle split editor",
             Command::QuickOpen => "Quick open file",
+            Command::GoToSymbol => "Go to symbol",
             Command::ShowProject => "Show Project",
             Command::ShowSearch => "Show Find in Files",
             Command::ShowGit => "Show Version Control",
@@ -442,6 +445,13 @@ pub struct Workbench {
     command_palette_selected: usize,
     pending_command: Option<Command>,
     _command_palette_subscription: Subscription,
+    symbol_search: bool,
+    symbol_input: Entity<TextInput>,
+    symbol_query: String,
+    symbol_results: Vec<ide_index::SymbolMatch>,
+    symbol_selected: usize,
+    symbol_status: gpui::SharedString,
+    _symbol_subscription: Subscription,
     plugins: Vec<ide_host::plugins::PluginInfo>,
     plugins_status: gpui::SharedString,
     market_plugins: Vec<ide_host::plugins::MarketPlugin>,
@@ -625,6 +635,51 @@ impl Workbench {
                     cx.notify();
                 }
             });
+        let symbol_input = cx.new(|cx| {
+            TextInput::new(
+                "Search project symbols…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let symbol_subscription = cx.subscribe(&symbol_input, |app, _, event, cx| match event {
+            TextInputEvent::Change(query) => {
+                app.symbol_query = query.clone();
+                app.search_symbols(query.clone(), cx);
+            }
+            TextInputEvent::MoveSelection(delta) => {
+                if app.symbol_results.is_empty() {
+                    return;
+                }
+                let last = app.symbol_results.len() - 1;
+                let current = app.symbol_selected.min(last);
+                app.symbol_selected = if *delta < 0 {
+                    current.saturating_sub(1)
+                } else {
+                    (current + 1).min(last)
+                };
+                cx.notify();
+            }
+            TextInputEvent::Submit(_) => {
+                if let Some(result) = app.symbol_results.get(app.symbol_selected).cloned() {
+                    app.schedule_goto(
+                        result.path.0.clone(),
+                        result.range.start.line,
+                        result.range.start.col,
+                        cx,
+                    );
+                    app.symbol_search = false;
+                }
+                cx.notify();
+            }
+            TextInputEvent::Cancel => {
+                app.symbol_search = false;
+                cx.notify();
+            }
+        });
         let mut app = Self {
             host,
             language_registry,
@@ -728,6 +783,13 @@ impl Workbench {
             command_palette_selected: 0,
             pending_command: None,
             _command_palette_subscription: command_palette_subscription,
+            symbol_search: false,
+            symbol_input,
+            symbol_query: String::new(),
+            symbol_results: Vec::new(),
+            symbol_selected: 0,
+            symbol_status: "Type a symbol name".into(),
+            _symbol_subscription: symbol_subscription,
             plugins: Vec::new(),
             plugins_status: "Select PLUGINS to load installed plugins".into(),
             market_plugins: Vec::new(),
@@ -2338,6 +2400,84 @@ impl Workbench {
         cx.notify();
     }
 
+    fn toggle_symbol_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.symbol_search = !self.symbol_search;
+        if self.symbol_search {
+            self.command_palette = false;
+            self.fast_open = false;
+            self.symbol_selected = 0;
+            let focus = self.symbol_input.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    fn search_symbols(&mut self, query: String, cx: &mut Context<Self>) {
+        let query = query.trim().to_owned();
+        if query.is_empty() {
+            self.symbol_results.clear();
+            self.symbol_status = "Type a symbol name".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .find_symbols(query.clone(), ide_index::SymbolFilter::All, 60)
+                .await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    if !app.symbol_search || app.symbol_input.read(cx).content() != query {
+                        return app.window_handle;
+                    }
+                    match result {
+                        Ok(results) => {
+                            app.symbol_status = format!("{} symbols", results.len()).into();
+                            app.symbol_results = results;
+                            app.symbol_selected = 0;
+                        }
+                        Err(error) => {
+                            app.symbol_status =
+                                format!("Symbol search failed: {}", error.message).into();
+                            app.symbol_results.clear();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+    }
+
+    fn schedule_goto(&mut self, path: PathBuf, line: u32, column: u32, cx: &mut Context<Self>) {
+        let open = self
+            .documents
+            .values()
+            .any(|document| document.path == path);
+        self.pending_goto = Some((path.clone(), line, column));
+        if !open {
+            self.open_path(path, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_symbol_result(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(result) = self.symbol_results.get(index).cloned() else {
+            return;
+        };
+        self.symbol_search = false;
+        self.open_or_goto(
+            result.path.0,
+            result.range.start.line,
+            result.range.start.col,
+            window,
+            cx,
+        );
+    }
+
     fn filtered_commands(&self) -> Vec<Command> {
         let query = self.command_palette_query.to_lowercase();
         Command::ALL
@@ -2389,6 +2529,12 @@ impl Workbench {
                 self.fast_open = true;
                 self.fast_open_selected = 0;
                 let focus = self.fast_open_input.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            Command::GoToSymbol => {
+                self.symbol_search = true;
+                self.symbol_selected = 0;
+                let focus = self.symbol_input.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
             Command::ShowProject => self.select_sidebar(SidebarMode::Project, cx),
@@ -3281,6 +3427,33 @@ impl Workbench {
         }
     }
 
+    pub fn smoke_symbol_search(
+        &mut self,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.symbol_search = true;
+        self.symbol_input.update(cx, |input, cx| {
+            input.set_content(query.clone(), cx);
+        });
+        let focus = self.symbol_input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.search_symbols(query, cx);
+        cx.notify();
+    }
+
+    pub fn symbol_count(&self) -> usize {
+        self.symbol_results.len()
+    }
+
+    pub fn symbol_first(&self) -> String {
+        self.symbol_results
+            .first()
+            .map(|symbol| format!("{} · {}", symbol.name, symbol.rel_path))
+            .unwrap_or_default()
+    }
+
     pub fn plugins_count(&self) -> usize {
         self.plugins.len()
     }
@@ -3712,6 +3885,100 @@ impl Workbench {
                     .text_size(px(9.5))
                     .text_color(theme.faint)
                     .child(format!("{} commands · ⌘⇧P", commands.len())),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
+    fn render_symbol_search(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if !self.symbol_search {
+            return div().into_any_element();
+        }
+        let theme = self.theme;
+        let mut rows = div()
+            .id("symbol-results")
+            .flex_1()
+            .min_h(px(0.))
+            .max_h(px(360.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, symbol) in self.symbol_results.iter().take(60).enumerate() {
+            let selected = index == self.symbol_selected;
+            rows = rows.child(
+                div()
+                    .id(("symbol-result", index))
+                    .h(px(34.))
+                    .px_2()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .text_size(px(10.5))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.symbol_selected = index;
+                        this.open_symbol_result(index, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().truncate().child(symbol.name.clone()))
+                            .when_some(symbol.container.clone(), |row, container| {
+                                row.child(
+                                    div()
+                                        .text_size(px(9.))
+                                        .text_color(theme.faint)
+                                        .child(container),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(symbol.rel_path.clone()),
+                    ),
+            );
+        }
+        div()
+            .absolute()
+            .top(px(70.))
+            .left(px(280.))
+            .w(px(600.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .h(px(36.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.symbol_input.clone()),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(9.5))
+                    .text_color(theme.faint)
+                    .child(self.symbol_status.clone()),
             )
             .child(rows)
             .into_any_element()
@@ -6114,6 +6381,7 @@ impl Render for Workbench {
         let run_panel = self.render_bottom_panel(window, cx);
         let quick_open = self.render_quick_open(cx);
         let command_palette = self.render_command_palette(cx);
+        let symbol_search = self.render_symbol_search(cx);
         div()
             .size_full()
             .relative()
@@ -6140,6 +6408,11 @@ impl Render for Workbench {
             .on_action(
                 cx.listener(|this, _: &crate::ToggleCommandPalette, window, cx| {
                     this.toggle_command_palette(window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::ToggleSymbolSearch, window, cx| {
+                    this.toggle_symbol_search(window, cx);
                 }),
             )
             .child(
@@ -6233,6 +6506,7 @@ impl Render for Workbench {
             )
             .child(quick_open)
             .child(command_palette)
+            .child(symbol_search)
     }
 }
 

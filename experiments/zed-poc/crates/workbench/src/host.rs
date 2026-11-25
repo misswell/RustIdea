@@ -905,6 +905,18 @@ impl NativeHost {
         .await
     }
 
+    pub async fn find_symbols(
+        &self,
+        query: String,
+        filter: ide_index::SymbolFilter,
+        limit: u32,
+    ) -> IdeResult<Vec<ide_index::SymbolMatch>> {
+        self.run(move |host| async move {
+            ide_host::ops::nav::find_symbols(&host, MAIN_WINDOW, query, filter, limit).await
+        })
+        .await
+    }
+
     pub async fn git_status(&self) -> IdeResult<Vec<ide_vcs::FileStatus>> {
         self.run(move |host| async move { ide_host::ops::vcs::status(&host, MAIN_WINDOW).await })
             .await
