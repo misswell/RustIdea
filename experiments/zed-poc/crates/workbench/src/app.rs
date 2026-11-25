@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use editor::Editor;
 use gpui::{
-    ClickEvent, Context, Entity, Focusable as _, Subscription, UniformListScrollHandle, Window,
-    div, prelude::*, px, uniform_list,
+    ClickEvent, Context, Entity, Focusable as _, SharedString, Subscription,
+    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use ide_core::{DocId, IdeEvent, OutlineItem, Severity};
 use language::{BufferEvent, Diagnostic, DiagnosticEntry, DiagnosticMessage, DiagnosticSet};
@@ -1934,6 +1934,32 @@ impl Workbench {
             Ok(()) => self.agent_task_status = "Cancelled".into(),
             Err(error) => {
                 self.agent_task_status = format!("Cancel failed: {}", error.message).into();
+            }
+        }
+        cx.notify();
+    }
+
+    fn respond_agent_permission(
+        &mut self,
+        task: String,
+        permission: u32,
+        option: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        match self
+            .host
+            .agent_respond_permission(task, permission, option.clone())
+        {
+            Ok(()) => {
+                self.agent_task_status = if option.is_some() {
+                    "Permission answered".into()
+                } else {
+                    "Permission cancelled".into()
+                };
+            }
+            Err(error) => {
+                self.agent_task_status =
+                    format!("Permission answer failed: {}", error.message).into();
             }
         }
         cx.notify();
@@ -5453,28 +5479,83 @@ impl Workbench {
         if let Some(task_id) = &self.agent_selected_task
             && let Some(entries) = self.agent_entries.get(task_id)
         {
+            let task_id = task_id.clone();
             for (_, entry) in entries.iter().take(500) {
                 let (role, text) = agent_entry_display(entry);
                 if text.trim().is_empty() {
                     continue;
                 }
-                timeline = timeline.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.))
-                        .child(
+                let mut row = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(if role == "Error" {
+                                theme.error
+                            } else {
+                                theme.faint
+                            })
+                            .child(role),
+                    )
+                    .child(div().text_size(px(10.)).text_color(theme.text).child(text));
+                if let ide_agent::AgentEntry::Permission {
+                    id,
+                    options,
+                    chosen: None,
+                    ..
+                } = entry
+                {
+                    let mut actions = div().flex().flex_wrap().gap_1();
+                    let permission = *id;
+                    let task = task_id.clone();
+                    for option in options {
+                        let option_id = option.id.clone();
+                        let task = task.clone();
+                        actions = actions.child(
                             div()
-                                .text_size(px(8.5))
-                                .text_color(if role == "Error" {
-                                    theme.error
-                                } else {
-                                    theme.faint
-                                })
-                                .child(role),
-                        )
-                        .child(div().text_size(px(10.)).text_color(theme.text).child(text)),
-                );
+                                .id(SharedString::from(format!(
+                                    "permission-{permission}-{option_id}"
+                                )))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(theme.accent_muted)
+                                .text_size(px(9.))
+                                .text_color(theme.text)
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.respond_agent_permission(
+                                        task.clone(),
+                                        permission,
+                                        Some(option_id.clone()),
+                                        cx,
+                                    );
+                                }))
+                                .child(option.name.clone()),
+                        );
+                    }
+                    let task = task_id.clone();
+                    actions = actions.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "permission-{permission}-cancel"
+                            )))
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.error)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.respond_agent_permission(task.clone(), permission, None, cx);
+                            }))
+                            .child("Cancel"),
+                    );
+                    row = row.child(actions);
+                }
+                timeline = timeline.child(row);
             }
         }
         div()

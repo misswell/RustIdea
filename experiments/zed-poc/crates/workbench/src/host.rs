@@ -748,6 +748,15 @@ impl NativeHost {
         ide_host::ops::agent::cancel(&self.host, MAIN_WINDOW, task, None)
     }
 
+    pub fn agent_respond_permission(
+        &self,
+        task: String,
+        permission: u32,
+        option: Option<String>,
+    ) -> IdeResult<()> {
+        ide_host::ops::agent::respond(&self.host, MAIN_WINDOW, task, permission, option)
+    }
+
     pub async fn tools_list(&self) -> IdeResult<Vec<ide_tools::ToolInfo>> {
         self.run(
             move |host| async move { ide_host::ops::tools::tools_list(&host, MAIN_WINDOW).await },
