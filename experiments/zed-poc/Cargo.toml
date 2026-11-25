@@ -11,7 +11,9 @@ license = "GPL-3.0-or-later"
 anyhow = "1"
 assets = { path = "../../third_party/zed/crates/assets" }
 clock = { path = "../../third_party/zed/crates/clock" }
+collections = { path = "../../third_party/zed/crates/collections" }
 editor = { path = "../../third_party/zed/crates/editor" }
+futures = "0.3"
 gpui = { path = "../../third_party/zed/crates/gpui" }
 gpui_platform = { path = "../../third_party/zed/crates/gpui_platform" }
 ide-core = { path = "../../crates/ide-core" }
@@ -21,6 +23,7 @@ ide-lsp = { path = "../../crates/ide-lsp" }
 ide-workspace = { path = "../../crates/ide-workspace" }
 language = { path = "../../third_party/zed/crates/language" }
 multi_buffer = { path = "../../third_party/zed/crates/multi_buffer" }
+lsp = { path = "../../third_party/zed/crates/lsp" }
 project = { path = "../../third_party/zed/crates/project" }
 release_channel = { path = "../../third_party/zed/crates/release_channel" }
 semver = "1"

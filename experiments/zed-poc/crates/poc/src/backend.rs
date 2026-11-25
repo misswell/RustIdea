@@ -163,18 +163,29 @@ impl OpenIdeaBridge {
         line: u32,
         column: u32,
     ) -> IdeResult<Option<ide_lsp::types::Hover>> {
+        self.runtime.block_on(self.hover(line, column))
+    }
+
+    pub async fn hover(
+        &self,
+        line: u32,
+        column: u32,
+    ) -> IdeResult<Option<ide_lsp::types::Hover>> {
         let host = self.host.clone();
         let doc = self.doc;
-        self.runtime.block_on(async move {
-            ide_host::ops::lsp::lsp_hover(
-                &host,
-                WINDOW,
-                ide_core::RequestId::next(),
-                doc,
-                ide_core::Pos::new(line, column),
-            )
+        self.runtime
+            .spawn(async move {
+                ide_host::ops::lsp::lsp_hover(
+                    &host,
+                    WINDOW,
+                    ide_core::RequestId::next(),
+                    doc,
+                    ide_core::Pos::new(line, column),
+                )
+                .await
+            })
             .await
-        })
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
 
     pub fn reopen_blocking(&mut self) -> IdeResult<DocumentInfo> {

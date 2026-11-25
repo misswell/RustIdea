@@ -1,5 +1,6 @@
 mod backend;
 mod completion;
+mod semantics;
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -7,6 +8,7 @@ use std::sync::Arc;
 
 use backend::OpenIdeaBridge;
 use completion::OpenIdeaCompletionProvider;
+use semantics::OpenIdeaSemanticsProvider;
 use editor::Editor;
 use gpui::{
     App, AppContext as _, Bounds, Context, Focusable as _, KeyBinding, Subscription, Window,
@@ -42,8 +44,10 @@ impl PocApp {
         let version = buffer.read(cx).snapshot().version().clone();
         let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
         let provider = OpenIdeaCompletionProvider::new(backend.clone());
+        let semantics = OpenIdeaSemanticsProvider::new(backend.clone());
         editor.update(cx, |editor, _| {
             editor.set_completion_provider(Some(Rc::new(provider)));
+            editor.set_semantics_provider(Some(Rc::new(semantics)));
         });
         let subscription = cx.subscribe(&buffer, |app, _, event: &BufferEvent, cx| {
             if matches!(event, BufferEvent::Edited { .. }) {
@@ -262,7 +266,14 @@ fn main() {
             ),
             Err(error) => eprintln!("POC_LSP_REOPEN_ERROR {}", error.message),
         }
-        match backend.hover_blocking(1, 16) {
+        let hover_position = std::env::var("RUSTIDEA_POC_HOVER_POS")
+            .ok()
+            .and_then(|position| {
+                let (line, column) = position.split_once(':')?;
+                Some((line.parse().ok()?, column.parse().ok()?))
+            })
+            .unwrap_or((1, 16));
+        match backend.hover_blocking(hover_position.0, hover_position.1) {
             Ok(Some(hover)) => eprintln!("POC_LSP_HOVER {:?}", hover.contents.value),
             Ok(None) => eprintln!("POC_LSP_HOVER none"),
             Err(error) => eprintln!("POC_LSP_HOVER_ERROR {}", error.message),

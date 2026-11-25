@@ -27,6 +27,10 @@ The POC binary is `rustidea-zed-poc`. It builds and runs with:
   `Editor::set_completion_provider`, which maps `ide_host::ops::lsp::lsp_completion`
   results (including snippet defaults and replacement ranges) into Zed's native
   completion menu.
+- `OpenIdeaSemanticsProvider`, installed with
+  `Editor::set_semantics_provider`, which maps `ide_host::ops::lsp::lsp_hover`
+  results into Zed's hover blocks. Definition, highlights, rename, inlay hints
+  and semantic tokens are explicit empty stubs in this POC.
 
 It does **not** create a Zed Project, does not start Zed LSP/index services, and
 does not contain a WebView.
@@ -112,12 +116,31 @@ This opens the real Zed completion menu code path at the end of `text.` and
 shows that the provider received 48 OpenIdea completions. It does not claim
 interactive selection/clipboard/IME acceptance.
 
+Hover backend test on the same TypeScript file:
+
+```sh
+RUSTIDEA_POC_TRUST=1 RUSTIDEA_POC_LSP_TEST=1 RUSTIDEA_POC_LSP_POS=1:5 \
+RUSTIDEA_POC_HOVER_POS=0:6 \
+  experiments/zed-poc/target/debug/rustidea-zed-poc \
+  /tmp/zed-poc-lsp-ts /tmp/zed-poc-lsp-ts/test.ts
+```
+
+Output:
+
+```text
+POC_LSP_HOVER "\n```typescript\nconst text: \"hello\"\n```\n"
+POC_LSP_OK count=48
+```
+
+The hover is returned by OpenIdea LSP and converted by the Zed semantics
+provider; the actual mouse-hover popover still needs an unlocked GUI session.
+
 ## Not yet done
 
 - License confirmation and the repository license change to
   GPL-3.0-or-later. No GPL release is produced from this branch.
-- Hover/definition/rename provider wiring (`SemanticsProvider`) and the
-  diagnostics bridge. Zed completion itself is wired in the POC.
+- Definition/highlights/rename provider wiring and the diagnostics bridge.
+  Hover and completion are wired in the POC.
 - Completion documentation, `additionalTextEdits`, commit characters and
   completion resolve are not mapped yet.
 - Replacing the existing RustIdea `Editor`/`DocumentBuffer` workbench entry with
