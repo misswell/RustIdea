@@ -703,6 +703,13 @@ impl NativeHost {
         ide_host::ops::agent::mcp_remove(&self.host, MAIN_WINDOW, id)
     }
 
+    pub fn mcp_save(
+        &self,
+        input: ide_agent::McpServerInput,
+    ) -> IdeResult<Vec<ide_agent::McpServer>> {
+        ide_host::ops::agent::mcp_save(&self.host, MAIN_WINDOW, input)
+    }
+
     pub async fn agent_prompt(&self, task: String, prompt: String) -> IdeResult<()> {
         self.run(move |host| async move {
             ide_host::ops::agent::prompt(

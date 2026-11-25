@@ -36,6 +36,7 @@ enum SidebarMode {
     Http,
     Remote,
     Notebook,
+    Mcp,
     Agents,
     Plugins,
     Tools,
@@ -297,6 +298,10 @@ pub struct Workbench {
     agent_task_status: gpui::SharedString,
     mcp_servers: Vec<ide_agent::McpServer>,
     mcp_status: gpui::SharedString,
+    mcp_selected: Option<String>,
+    mcp_name_input: Entity<TextInput>,
+    mcp_command_input: Entity<TextInput>,
+    mcp_args_input: Entity<TextInput>,
     tools: Vec<ide_tools::ToolInfo>,
     tools_selected: usize,
     tools_status: gpui::SharedString,
@@ -395,6 +400,36 @@ impl Workbench {
                 app.start_agent_task(cx);
             }
         });
+        let mcp_name_input = cx.new(|cx| {
+            TextInput::new(
+                "MCP server name",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let mcp_command_input = cx.new(|cx| {
+            TextInput::new(
+                "Command (e.g. npx)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let mcp_args_input = cx.new(|cx| {
+            TextInput::new(
+                "Arguments (space separated)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
         let mut app = Self {
             host,
             language_registry,
@@ -475,6 +510,10 @@ impl Workbench {
             agent_task_status: "No agent tasks".into(),
             mcp_servers: Vec::new(),
             mcp_status: "No MCP servers".into(),
+            mcp_selected: None,
+            mcp_name_input,
+            mcp_command_input,
+            mcp_args_input,
             tools: Vec::new(),
             tools_selected: 0,
             tools_status: "Select TOOLS to load tool status".into(),
@@ -596,6 +635,9 @@ impl Workbench {
         if self.sidebar_mode == SidebarMode::Notebook {
             self.refresh_notebook(cx);
         }
+        if self.sidebar_mode == SidebarMode::Mcp {
+            self.refresh_mcp(cx);
+        }
         cx.notify();
     }
 
@@ -611,6 +653,7 @@ impl Workbench {
             SidebarMode::Database => self.refresh_db(cx),
             SidebarMode::Remote => self.refresh_remote(cx),
             SidebarMode::Notebook => self.refresh_notebook(cx),
+            SidebarMode::Mcp => self.refresh_mcp(cx),
             SidebarMode::Agents => self.refresh_agents(cx),
             SidebarMode::Tools => self.refresh_tools(cx),
             SidebarMode::Plugins => self.refresh_plugins(cx),
@@ -1175,14 +1218,113 @@ impl Workbench {
                 self.agents_status = format!("Agents failed: {}", error.message).into();
             }
         }
+        self.refresh_mcp(cx);
+        cx.notify();
+    }
+
+    fn refresh_mcp(&mut self, cx: &mut Context<Self>) {
         match self.host.mcp_list() {
             Ok(servers) => {
                 self.mcp_status = format!("{} MCP servers", servers.len()).into();
                 self.mcp_servers = servers;
+                if self
+                    .mcp_selected
+                    .as_ref()
+                    .is_some_and(|id| !self.mcp_servers.iter().any(|server| &server.id == id))
+                {
+                    self.mcp_selected = None;
+                }
             }
             Err(error) => {
                 self.mcp_servers.clear();
                 self.mcp_status = format!("MCP failed: {}", error.message).into();
+            }
+        }
+        cx.notify();
+    }
+
+    fn select_mcp_server(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(server) = self.mcp_servers.get(index).cloned() else {
+            return;
+        };
+        self.mcp_selected = Some(server.id.clone());
+        let name = server.name.clone();
+        self.mcp_name_input
+            .update(cx, |input, cx| input.set_content(name.clone(), cx));
+        self.mcp_command_input.update(cx, |input, cx| {
+            input.set_content(server.command.clone().unwrap_or_default(), cx)
+        });
+        self.mcp_args_input
+            .update(cx, |input, cx| input.set_content(server.args.join(" "), cx));
+        self.mcp_status = format!("Selected {name}").into();
+        cx.notify();
+    }
+
+    fn new_mcp_server(&mut self, cx: &mut Context<Self>) {
+        self.mcp_selected = None;
+        self.mcp_name_input
+            .update(cx, |input, cx| input.set_content("", cx));
+        self.mcp_command_input
+            .update(cx, |input, cx| input.set_content("", cx));
+        self.mcp_args_input
+            .update(cx, |input, cx| input.set_content("", cx));
+        self.mcp_status = "New stdio MCP server".into();
+        cx.notify();
+    }
+
+    fn save_mcp_server(&mut self, cx: &mut Context<Self>) {
+        let name = self.mcp_name_input.read(cx).content().trim().to_owned();
+        let command = self.mcp_command_input.read(cx).content().trim().to_owned();
+        let args = self.mcp_args_input.read(cx).content().trim().to_owned();
+        if name.is_empty() || command.is_empty() {
+            self.mcp_status = "MCP name and command are required".into();
+            cx.notify();
+            return;
+        }
+        let input = ide_agent::McpServerInput {
+            id: self.mcp_selected.clone(),
+            name,
+            scope: ide_agent::McpScope::User,
+            transport: ide_agent::McpTransport::Stdio,
+            enabled: true,
+            command: Some(command),
+            args: args
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+            env: Vec::new(),
+            url: None,
+            headers: Vec::new(),
+            agents: Vec::new(),
+        };
+        match self.host.mcp_save(input) {
+            Ok(servers) => {
+                self.mcp_servers = servers;
+                self.mcp_status = "MCP server saved".into();
+                self.mcp_selected = None;
+            }
+            Err(error) => {
+                self.mcp_status = format!("MCP save failed: {}", error.message).into();
+            }
+        }
+        cx.notify();
+    }
+
+    fn remove_selected_mcp_server(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.mcp_selected.clone() else {
+            self.mcp_status = "Select an MCP server first".into();
+            cx.notify();
+            return;
+        };
+        match self.host.mcp_remove(id) {
+            Ok(servers) => {
+                self.mcp_servers = servers;
+                self.mcp_selected = None;
+                self.mcp_status = "MCP server removed".into();
+                self.new_mcp_server(cx);
+            }
+            Err(error) => {
+                self.mcp_status = format!("MCP remove failed: {}", error.message).into();
             }
         }
         cx.notify();
@@ -3768,6 +3910,150 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_mcp(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("mcp-manage-list")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, server) in self.mcp_servers.iter().take(100).enumerate() {
+            let selected = self.mcp_selected.as_deref() == Some(server.id.as_str());
+            let enabled = server.enabled;
+            rows = rows.child(
+                div()
+                    .id(("mcp-manage", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.5))
+                    .text_color(if enabled { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.select_mcp_server(index, cx);
+                    }))
+                    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if enabled {
+                        theme.accent
+                    } else {
+                        theme.faint
+                    }))
+                    .child(div().flex_1().truncate().child(server.name.clone()))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child(format!("{:?}", server.scope).to_lowercase()),
+                    )
+                    .child(
+                        div()
+                            .id(("mcp-manage-toggle", index))
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_mcp_server(index, cx);
+                            }))
+                            .child(if enabled { "off" } else { "on" }),
+                    ),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("mcp-new")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.new_mcp_server(cx);
+                            }))
+                            .child("New"),
+                    )
+                    .child(
+                        div()
+                            .id("mcp-remove")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.error)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.remove_selected_mcp_server(cx);
+                            }))
+                            .child("Remove"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.mcp_status.clone()),
+                    ),
+            )
+            .child(rows)
+            .child(
+                div()
+                    .flex_none()
+                    .p_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(self.mcp_name_input.clone())
+                    .child(self.mcp_command_input.clone())
+                    .child(self.mcp_args_input.clone())
+                    .child(
+                        div()
+                            .id("mcp-save")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.save_mcp_server(cx);
+                            }))
+                            .child(if self.mcp_selected.is_some() {
+                                "Update stdio server"
+                            } else {
+                                "Add stdio server"
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_agents(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut rows = div()
@@ -5143,6 +5429,7 @@ impl Render for Workbench {
             SidebarMode::Http => self.render_http(cx),
             SidebarMode::Remote => self.render_remote(cx),
             SidebarMode::Notebook => self.render_notebook(cx),
+            SidebarMode::Mcp => self.render_mcp(cx),
             SidebarMode::Agents => self.render_agents(cx),
             SidebarMode::Plugins => self.render_plugins(cx),
             SidebarMode::Tools => self.render_tools(cx),
@@ -5157,6 +5444,7 @@ impl Render for Workbench {
             ("HTTP", SidebarMode::Http),
             ("SSH", SidebarMode::Remote),
             ("NB", SidebarMode::Notebook),
+            ("MCP", SidebarMode::Mcp),
             ("AGT", SidebarMode::Agents),
             ("PLG", SidebarMode::Plugins),
             ("TLS", SidebarMode::Tools),
