@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -512,6 +512,7 @@ pub struct Workbench {
     market_loading: bool,
     market_selected: usize,
     plugin_preview: Option<ide_host::plugins::InstallPreview>,
+    plugin_consent_optional: BTreeSet<String>,
     plugin_preview_status: gpui::SharedString,
     plugin_install_busy: bool,
     debug_attachables: Vec<ide_dap::attach::AttachableProcess>,
@@ -928,6 +929,7 @@ impl Workbench {
             market_loading: false,
             market_selected: 0,
             plugin_preview: None,
+            plugin_consent_optional: BTreeSet::new(),
             plugin_preview_status: "Select a marketplace plugin to preview".into(),
             plugin_install_busy: false,
             debug_attachables: Vec::new(),
@@ -2371,6 +2373,7 @@ impl Workbench {
         let id = plugin.entry.id.clone();
         let host = self.host.clone();
         self.plugin_preview = None;
+        self.plugin_consent_optional.clear();
         self.plugin_preview_status = format!("Downloading {}…", plugin.entry.name).into();
         cx.spawn(async move |this, cx| {
             let result = host.plugin_preview(id).await;
@@ -2390,6 +2393,7 @@ impl Workbench {
                                 }
                             )
                             .into();
+                            app.plugin_consent_optional.clear();
                             app.plugin_preview = Some(preview);
                         }
                         Err(error) => {
@@ -2419,14 +2423,21 @@ impl Workbench {
         }
         let host = self.host.clone();
         let id = preview.id.clone();
+        let optional = self
+            .plugin_consent_optional
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let signer_change = preview.signer_changed;
         self.plugin_install_busy = true;
         self.plugin_preview_status = format!(
-            "Installing {}… (optional capabilities are not granted)",
-            preview.name
+            "Installing {}… with {} optional grants",
+            preview.name,
+            optional.len()
         )
         .into();
         cx.spawn(async move |this, cx| {
-            let result = host.plugin_install(id).await;
+            let result = host.plugin_install(id, optional, signer_change).await;
             let handle = this
                 .update(cx, |app, cx| {
                     app.plugin_install_busy = false;
@@ -6484,6 +6495,7 @@ impl Workbench {
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.market_selected = index;
                         this.plugin_preview = None;
+                        this.plugin_consent_optional.clear();
                         this.plugin_preview_status = "Preview the selected plugin".into();
                         cx.notify();
                     }))
@@ -6551,19 +6563,39 @@ impl Workbench {
                 );
             }
             for capability in &preview.capabilities {
-                preview_panel =
-                    preview_panel.child(div().text_size(px(9.)).text_color(theme.faint).child(
-                        format!(
-                            "{} · {:?}{}",
-                            capability.id,
-                            capability.risk,
-                            if capability.optional {
-                                " (optional)"
-                            } else {
-                                ""
-                            }
-                        ),
-                    ));
+                let optional = capability.optional;
+                let id = capability.id.clone();
+                let selected = self.plugin_consent_optional.contains(&id);
+                let label = format!(
+                    "{} {} · {:?}{}",
+                    if optional {
+                        if selected { "[x]" } else { "[ ]" }
+                    } else {
+                        "[required]"
+                    },
+                    id,
+                    capability.risk,
+                    if optional { "" } else { " · required" }
+                );
+                preview_panel = preview_panel.child(
+                    div()
+                        .id(SharedString::from(format!("capability-{id}")))
+                        .text_size(px(9.))
+                        .text_color(if optional { theme.muted } else { theme.faint })
+                        .when(optional, |row| {
+                            row.cursor_pointer().on_click(cx.listener(
+                                move |this, _: &ClickEvent, _, cx| {
+                                    if this.plugin_consent_optional.contains(&id) {
+                                        this.plugin_consent_optional.remove(&id);
+                                    } else {
+                                        this.plugin_consent_optional.insert(id.clone());
+                                    }
+                                    cx.notify();
+                                },
+                            ))
+                        })
+                        .child(label),
+                );
             }
             for warning in &preview.warnings {
                 preview_panel = preview_panel.child(

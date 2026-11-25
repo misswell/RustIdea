@@ -378,10 +378,10 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   final error/warning counts and duration;
 - Plugins loads the installed plugin host in a blocking task and lists installed
   `PluginInfo` rows (the current RustIdea identifier has none installed); it
-  also loads the official marketplace (138 entries), previews a downloaded
+  also loads the official marketplace (139 entries), previews a downloaded
   package with signature/capability metadata (`Checkstyle 0.1.0`, 4
-  capabilities, signed), and wires install through `install_from_dir` with
-  default consent (optional capabilities are deliberately not granted);
+  capabilities, signed), renders each optional capability as a checkbox, and
+  installs with the selected optional grants through `install_from_dir`;
 - Debug scans `ops::debug::debug_attachable_processes` and lists debug-capable
   run configurations. The panel is a process/browse surface; starting a session
   and the variables/stack/frames UI are still pending;
@@ -416,7 +416,7 @@ Panel coverage at this commit:
 | Agents | working (providers/tasks/timeline/prompt/cancel) | `ops::agent` |
 | MCP | list/toggle/add/update/remove stdio servers | `ops::agent::mcp_*` |
 | Tools | list/install | `ops::tools` |
-| Plugins | installed list + marketplace/preview/install | `PluginHost` |
+| Plugins | installed list + marketplace/preview/install + optional-capability consent | `PluginHost` |
 | Settings | filter + boolean toggles + JSON value editor | `ops::project::settings` / `set_settings` |
 | Debug | attachable-process browse only | `ops::debug::debug_attachable_processes` |
 | Terminal | working VT screen | Zed `terminal` + `ops::term` |
@@ -579,7 +579,7 @@ documents/project/sync/host: 24 passed; 0 failed
 - External-change reload/conflict handling in the Zed Buffer path (the POC only
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
-- Plugin live UI contributions and per-capability consent UI, full debugger
+- Plugin live UI contributions, full debugger
   session UI, notebook insert/delete/rich-output editing, live remote-write
   verification (UI path exists), structured question/form widgets and live
   subagent/form verification

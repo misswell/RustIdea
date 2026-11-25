@@ -649,12 +649,20 @@ impl NativeHost {
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
 
-    pub async fn plugin_install(&self, id: String) -> IdeResult<ide_host::plugins::PluginInfo> {
+    pub async fn plugin_install(
+        &self,
+        id: String,
+        optional: Vec<String>,
+        signer_change: bool,
+    ) -> IdeResult<ide_host::plugins::PluginInfo> {
         let host = self.plugin_host()?;
         self.runtime
             .spawn_blocking(move || {
                 let dir = host.download_market_plugin(&id)?;
-                let consent = ide_host::plugins::Consent::default();
+                let consent = ide_host::plugins::Consent {
+                    optional,
+                    signer_change,
+                };
                 host.install_from_dir(&dir, &consent)
             })
             .await
