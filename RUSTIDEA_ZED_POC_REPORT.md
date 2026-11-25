@@ -321,6 +321,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   run, streams stdout/stderr/system output and shows the exit status;
 - a native Find in Files panel uses the shared GPUI `TextInput` and the
   OpenIDEA `ops::search` streaming engine, with clickable file/line results;
+- the Find in Files panel also replaces every current match through
+  `replace_in_files` (one undoable patch per file, open buffers updated,
+  preserve-case option, cancellable backend request) and re-runs the search;
 - a native Git tool window shows the branch, changed files, stage/unstage
   actions and a commit-message field backed by `ide-vcs`;
 - the editor now binds core Zed actions: caret movement/selection, backspace/
@@ -427,6 +430,7 @@ Panel coverage at this commit:
 | Go to Symbol (Cmd-Shift-O) | working | `ops::nav::find_symbols` |
 | Find Usages (Alt-F7) | working | `ops::lsp::lsp_references` |
 | Find in Files | working | `ops::search` |
+| Replace in Files | working (all current matches, preserve case) | `ops::search::replace_in_files` |
 | TODO | working (comment scan/navigation/filters) | `ops::search` regex + comment context |
 | Dependencies | Maven/Gradle/sbt modules and libraries with filter | `ops::build::build_model` + `ide-build` |
 | Coverage | import lcov/JaCoCo/Go/SimpleCov reports, sort, per-file percentages, file navigation | `ops::coverage::coverage_import` |
@@ -607,6 +611,13 @@ todo=2 todo_status=2 TODO items · 1 files scanned
 todo_first="src/main/java/com/example/App.java:4"
 ```
 
+Replace-in-files smoke (`alpha` → `omega` in a two-line text file):
+
+```text
+WORKBENCH_REPLACE replacements=3 files=1 failed=0
+disk: ["omega omega\n", "beta omega\n"]
+```
+
 Dependencies smoke on a Maven project with one direct JUnit dependency:
 
 ```text
@@ -646,7 +657,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host: 24 passed; 0 failed
+documents/project/sync/host/build/coverage/todo: 38 passed; 0 failed
 ```
 
 ## Not yet done

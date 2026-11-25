@@ -1084,6 +1084,30 @@ impl NativeHost {
         .await
     }
 
+    pub async fn replace_in_files(
+        &self,
+        query: ide_search::SearchQuery,
+        replacement: String,
+        preserve_case: bool,
+        targets: Vec<ide_search::ReplaceTarget>,
+        on_event: ide_host::ops::Channel<ide_search::ReplaceEvent>,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::search::replace_in_files(
+                &host,
+                MAIN_WINDOW,
+                ide_core::RequestId::next(),
+                query,
+                replacement,
+                preserve_case,
+                targets,
+                on_event,
+            )
+            .await
+        })
+        .await
+    }
+
     pub async fn find_files(
         &self,
         query: String,

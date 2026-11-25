@@ -304,6 +304,7 @@ fn main() {
                 let smoke_notebook_add =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK_ADD").is_some();
                 let smoke_search = std::env::var("RUSTIDEA_ZED_SMOKE_SEARCH").ok();
+                let smoke_replace = std::env::var("RUSTIDEA_ZED_SMOKE_REPLACE").ok();
                 let smoke_todo = std::env::var_os("RUSTIDEA_ZED_SMOKE_TODO").is_some();
                 let smoke_dependencies =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_DEPENDENCIES").is_some();
@@ -435,6 +436,9 @@ fn main() {
                                 }
                                 if smoke_debug_attach {
                                     app.smoke_debug_attach(cx);
+                                }
+                                if let Some(replacement) = &smoke_replace {
+                                    app.smoke_replace(replacement.clone(), cx);
                                 }
                             })
                             .ok();

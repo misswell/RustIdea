@@ -325,6 +325,27 @@ fn build_mcp_server_input(
     })
 }
 
+fn search_replace_targets(results: &[ide_search::FileMatches]) -> Vec<ide_search::ReplaceTarget> {
+    results
+        .iter()
+        .filter_map(|file| {
+            let mut positions = BTreeSet::new();
+            for line in &file.matches {
+                for &(start, _) in &line.ranges {
+                    positions.insert(ide_core::Pos::new(
+                        line.line,
+                        line.text_offset.saturating_add(start),
+                    ));
+                }
+            }
+            (!positions.is_empty()).then(|| ide_search::ReplaceTarget {
+                path: file.path.clone(),
+                only: Some(positions.into_iter().collect()),
+            })
+        })
+        .collect()
+}
+
 fn utf16_prefix(text: &str, units: u32) -> String {
     let mut consumed = 0u32;
     let mut end = text.len();
@@ -481,6 +502,11 @@ pub struct Workbench {
     search_results: Vec<ide_search::FileMatches>,
     search_status: gpui::SharedString,
     _search_subscription: Subscription,
+    search_replace_input: Entity<TextInput>,
+    search_replacement: String,
+    _search_replace_subscription: Subscription,
+    search_preserve_case: bool,
+    search_replacing: bool,
     todo_items: Vec<crate::todo::TodoItem>,
     todo_status: gpui::SharedString,
     todo_case_sensitive: bool,
@@ -678,6 +704,24 @@ impl Workbench {
             }
             TextInputEvent::MoveSelection(_) => {}
         });
+        let search_replace_input = cx.new(|cx| {
+            TextInput::new(
+                "Replace with… (Enter replaces every match)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let search_replace_subscription =
+            cx.subscribe(&search_replace_input, |app, _, event, cx| match event {
+                TextInputEvent::Submit(_) => app.replace_search_results(cx),
+                TextInputEvent::Change(replacement) => {
+                    app.search_replacement = replacement.clone();
+                }
+                _ => {}
+            });
         let git_message_input = cx.new(|cx| {
             TextInput::new(
                 "Commit message…",
@@ -989,6 +1033,11 @@ impl Workbench {
             search_results: Vec::new(),
             search_status: "Type a pattern and press Enter".into(),
             _search_subscription: search_subscription,
+            search_replace_input,
+            search_replacement: String::new(),
+            _search_replace_subscription: search_replace_subscription,
+            search_preserve_case: true,
+            search_replacing: false,
             todo_items: Vec::new(),
             todo_status: "Open TODO to scan the project".into(),
             todo_case_sensitive: true,
@@ -4283,6 +4332,105 @@ impl Workbench {
         cx.notify();
     }
 
+    fn replace_search_results(&mut self, cx: &mut Context<Self>) {
+        if self.search_replacing {
+            return;
+        }
+        let pattern = self.search_pattern.trim().to_owned();
+        if pattern.is_empty() {
+            self.search_status = "Enter a search pattern before replacing".into();
+            cx.notify();
+            return;
+        }
+        let targets = search_replace_targets(&self.search_results);
+        if targets.is_empty() {
+            self.search_status = "No current search matches to replace".into();
+            cx.notify();
+            return;
+        }
+        let replacement = self.search_replacement.clone();
+        let preserve_case = self.search_preserve_case;
+        let query = ide_search::SearchQuery {
+            pattern: pattern.clone(),
+            is_regex: false,
+            case_sensitive: false,
+            whole_word: false,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            scope: ide_search::SearchScope::Project,
+            max_matches: 10_000,
+            context: ide_search::SearchContext::Any,
+        };
+        let host = self.host.clone();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = ide_host::ops::Channel::new(move |event: ide_search::ReplaceEvent| {
+            let _ = event_tx.send(event);
+        });
+        self.search_replacing = true;
+        self.search_status = format!("Replacing {} matches…", targets.len()).into();
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .replace_in_files(query, replacement, preserve_case, targets, events)
+                .await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.search_replacing = false;
+                    match result {
+                        Ok(()) => {
+                            let mut summary = None;
+                            let mut failed = Vec::new();
+                            while let Ok(event) = event_rx.try_recv() {
+                                match event {
+                                    ide_search::ReplaceEvent::Done { summary: done } => {
+                                        summary = Some(done);
+                                    }
+                                    ide_search::ReplaceEvent::Failed { path, message, .. } => {
+                                        failed.push(format!("{}: {message}", path.0.display()));
+                                    }
+                                    ide_search::ReplaceEvent::File { .. } => {}
+                                }
+                            }
+                            app.search_status = match summary {
+                                Some(summary) => {
+                                    eprintln!(
+                                        "WORKBENCH_REPLACE replacements={} files={} failed={}",
+                                        summary.replacements, summary.files, summary.failed
+                                    );
+                                    format!(
+                                        "Replaced {} matches in {} files{}",
+                                        summary.replacements,
+                                        summary.files,
+                                        if summary.failed > 0 {
+                                            format!(
+                                                " · {} failed: {}",
+                                                summary.failed,
+                                                failed.join("; ")
+                                            )
+                                        } else {
+                                            String::new()
+                                        }
+                                    )
+                                    .into()
+                                }
+                                None => "Replace finished without a summary".into(),
+                            };
+                            app.start_search(pattern.clone(), cx);
+                        }
+                        Err(error) => {
+                            app.search_status = format!("Replace failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn refresh_todo(&mut self, cx: &mut Context<Self>) {
         self.todo_generation = self.todo_generation.wrapping_add(1);
         let generation = self.todo_generation;
@@ -5009,6 +5157,10 @@ impl Workbench {
 
     pub fn smoke_search(&mut self, pattern: &str, cx: &mut Context<Self>) {
         self.sidebar_mode = SidebarMode::Search;
+        self.search_pattern = pattern.to_owned();
+        self.search_input.update(cx, |input, cx| {
+            input.set_content(pattern, cx);
+        });
         self.start_search(pattern.to_owned(), cx);
     }
 
@@ -5018,6 +5170,18 @@ impl Workbench {
 
     pub fn smoke_search_files(&self) -> usize {
         self.search_results.len()
+    }
+
+    pub fn smoke_replace(&mut self, replacement: String, cx: &mut Context<Self>) {
+        self.search_replacement = replacement.clone();
+        self.search_replace_input.update(cx, |input, cx| {
+            input.set_content(replacement, cx);
+        });
+        self.replace_search_results(cx);
+    }
+
+    pub fn search_status(&self) -> String {
+        self.search_status.to_string()
     }
 
     pub fn smoke_todo(&mut self, cx: &mut Context<Self>) {
@@ -8266,6 +8430,90 @@ impl Workbench {
             )
             .child(
                 div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.search_replace_input.clone()),
+            )
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("search-replace-all")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.search_replacing {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.replace_search_results(cx);
+                            }))
+                            .child(if self.search_replacing {
+                                "Replacing…"
+                            } else {
+                                "Replace All"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("search-preserve-case")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.search_preserve_case {
+                                theme.text
+                            } else {
+                                theme.faint
+                            })
+                            .bg(if self.search_preserve_case {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.search_preserve_case = !this.search_preserve_case;
+                                cx.notify();
+                            }))
+                            .child("Preserve case"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child(format!(
+                                "{} matches",
+                                self.search_results
+                                    .iter()
+                                    .map(|file| file
+                                        .matches
+                                        .iter()
+                                        .map(|line| line.ranges.len())
+                                        .sum::<usize>())
+                                    .sum::<usize>()
+                            )),
+                    ),
+            )
+            .child(
+                div()
                     .px_2()
                     .py_1()
                     .text_size(px(10.5))
@@ -9762,5 +10010,23 @@ mod tests {
             build_mcp_server_input(None, "remote", ide_agent::McpTransport::Http, "", "", " ")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn replace_targets_keep_each_match_position_once() {
+        let file = ide_search::FileMatches {
+            path: ide_core::IpcPath("/tmp/App.java".into()),
+            rel_path: "src/App.java".into(),
+            matches: vec![ide_search::LineMatch {
+                line: 3,
+                text: "TODO and TODO".into(),
+                ranges: vec![(0, 4), (8, 12), (0, 4)],
+                text_offset: 2,
+            }],
+        };
+        let targets = search_replace_targets(&[file]);
+        assert_eq!(targets.len(), 1);
+        let only = targets[0].only.as_ref().expect("selected matches");
+        assert_eq!(only, &[ide_core::Pos::new(3, 2), ide_core::Pos::new(3, 10)]);
     }
 }
