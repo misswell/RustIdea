@@ -440,7 +440,7 @@ Panel coverage at this commit:
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers | `ide-docker` |
 | GitHub | repository/login status, PR list by state, details/files/checks/review comments, open in browser | `ide-github` |
-| Heap | import `.hprof`, analyze, object/class summary, class table by retained size | `ops::heap::debug_heap_open/classes` |
+| Heap | import `.hprof`, class table, class object pages, GC-root path | `ops::heap::debug_heap_open/classes/dominators/path` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, source navigation | `ide-profiler` |
 | Logcat | adb devices, streaming threadtime log, level/text filters | `adb` process |
 | Scratch | list/create/edit scratch files in the app data directory | local workspace + `ops::doc` |
@@ -690,6 +690,13 @@ heap_status=rustidea-heap-sample.hprof · 8 objects · 7 classes
 heap_first="java.lang.Class · 7"
 ```
 
+Heap class object page smoke:
+
+```text
+heap_object_rows=7 heap_objects_status=7 objects
+heap_object_first="java.lang.Class 0x100000001"
+```
+
 Node CPU profile smoke with one `.cpuprofile`:
 
 ```text
@@ -778,9 +785,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent:
   Compose lifecycle controls are missing. GitHub lists and filters pull
   requests and shows details/checks/review comments, but the diff view,
   review submission and timeline actions are missing. Heap imports and lists
-  classes, but capture from a live JVM,
-  dominator pages, instance details, path-to-GC-root and snapshot comparison
-  are missing. Profiler imports Node CPU profiles and lists methods, but
+  classes and object pages with GC-root paths, but capture from a live JVM,
+  snapshot comparison and richer instance/field detail are missing. Profiler
+  imports Node CPU profiles and lists methods, but
   recording new profiles, Python/JVM/perf formats and the call-tree view are
   missing. Logcat lists devices, streams and filters threadtime output, but the
   Android Studio query grammar, filter history and log export are missing. The

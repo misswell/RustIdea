@@ -472,6 +472,26 @@ fn format_age(modified_ms: u64) -> String {
     }
 }
 
+fn heap_edge_label(edge: &ide_heap::HeapEdge) -> String {
+    use ide_heap::HeapEdge;
+    match edge {
+        HeapEdge::Field { name } if !name.is_empty() => format!("field {name}"),
+        HeapEdge::Field { .. } => "field".into(),
+        HeapEdge::Element { index } => format!("element [{index}]"),
+        HeapEdge::Static { name } => format!("static {name}"),
+        HeapEdge::ClassOf => "class of".into(),
+        HeapEdge::SuperClass => "superclass".into(),
+        HeapEdge::ClassLoader => "class loader".into(),
+        HeapEdge::Root { root, thread } => format!(
+            "GC root {root:?}{}",
+            thread
+                .as_ref()
+                .map(|thread| format!(" ({thread})"))
+                .unwrap_or_default()
+        ),
+    }
+}
+
 fn utf16_prefix(text: &str, units: u32) -> String {
     let mut consumed = 0u32;
     let mut end = text.len();
@@ -691,6 +711,12 @@ pub struct Workbench {
     heap_status: gpui::SharedString,
     heap_busy: bool,
     _heap_input_subscription: Subscription,
+    heap_selected_class: Option<u32>,
+    heap_class_name: Option<String>,
+    heap_objects: Vec<ide_heap::HeapObjectRow>,
+    heap_objects_total: u32,
+    heap_objects_status: gpui::SharedString,
+    heap_path_text: String,
     profile: Option<ide_profiler::Profile>,
     profile_dir_input: Entity<TextInput>,
     profile_status: gpui::SharedString,
@@ -1405,6 +1431,12 @@ impl Workbench {
             heap_status: "Import an .hprof heap snapshot".into(),
             heap_busy: false,
             _heap_input_subscription: heap_input_subscription,
+            heap_selected_class: None,
+            heap_class_name: None,
+            heap_objects: Vec::new(),
+            heap_objects_total: 0,
+            heap_objects_status: "Select a class to list objects".into(),
+            heap_path_text: String::new(),
             profile: None,
             profile_dir_input,
             profile_status: "Import a folder of .cpuprofile files".into(),
@@ -5500,6 +5532,114 @@ impl Workbench {
         cx.notify();
     }
 
+    fn open_heap_class(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(class) = self.heap_classes.get(index).cloned() else {
+            return;
+        };
+        let Some(snapshot) = self.heap_info.as_ref().map(|info| info.id) else {
+            return;
+        };
+        self.heap_selected_class = Some(class.class_index);
+        self.heap_class_name = Some(class.name.clone());
+        self.heap_objects.clear();
+        self.heap_objects_total = 0;
+        self.heap_path_text.clear();
+        self.heap_objects_status = format!("Loading objects of {}…", class.name).into();
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.heap_dominators(snapshot, class.class_index).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(page) => {
+                            app.heap_objects_total = page.total;
+                            app.heap_objects_status = format!("{} objects", page.total).into();
+                            app.heap_objects = page.rows;
+                        }
+                        Err(error) => {
+                            app.heap_objects.clear();
+                            app.heap_objects_status =
+                                format!("Heap objects failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn close_heap_class(&mut self, cx: &mut Context<Self>) {
+        self.heap_selected_class = None;
+        self.heap_class_name = None;
+        self.heap_objects.clear();
+        self.heap_objects_total = 0;
+        self.heap_path_text.clear();
+        cx.notify();
+    }
+
+    fn inspect_heap_object(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(object) = self.heap_objects.get(index).map(|row| row.object) else {
+            return;
+        };
+        let Some(snapshot) = self.heap_info.as_ref().map(|info| info.id) else {
+            return;
+        };
+        let host = self.host.clone();
+        let label = self
+            .heap_objects
+            .get(index)
+            .map(|row| format!("{} {}", row.class_name, row.address))
+            .unwrap_or_default();
+        self.heap_objects_status = format!("Finding GC path for {label}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.heap_path(snapshot, object).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(Some(path)) => {
+                            let mut lines = Vec::new();
+                            for (index, step) in path.steps.iter().enumerate() {
+                                lines.push(format!(
+                                    "{} {}",
+                                    step.object.class_name, step.object.address
+                                ));
+                                if index + 1 < path.steps.len() {
+                                    lines.push(format!("  ← {}", heap_edge_label(&step.via)));
+                                }
+                            }
+                            if path.omitted > 0 {
+                                lines.push(format!("  … {} steps omitted", path.omitted));
+                            }
+                            app.heap_path_text = lines.join("\n");
+                            app.heap_objects_status =
+                                format!("GC path · {} steps", path.steps.len()).into();
+                        }
+                        Ok(None) => {
+                            app.heap_path_text.clear();
+                            app.heap_objects_status = "Object is unreachable from a GC root".into();
+                        }
+                        Err(error) => {
+                            app.heap_path_text.clear();
+                            app.heap_objects_status =
+                                format!("GC path failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn open_profile(&mut self, cx: &mut Context<Self>) {
         if self.profile_busy {
             return;
@@ -6631,6 +6771,27 @@ impl Workbench {
         self.heap_classes
             .first()
             .map(|class| format!("{} · {}", class.name, class.count))
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_heap_objects(&mut self, cx: &mut Context<Self>) {
+        if !self.heap_classes.is_empty() {
+            self.open_heap_class(0, cx);
+        }
+    }
+
+    pub fn heap_object_row_count(&self) -> usize {
+        self.heap_objects.len()
+    }
+
+    pub fn heap_objects_status_text(&self) -> String {
+        self.heap_objects_status.to_string()
+    }
+
+    pub fn heap_first_object(&self) -> String {
+        self.heap_objects
+            .first()
+            .map(|object| format!("{} {}", object.class_name, object.address))
             .unwrap_or_default()
     }
 
@@ -10932,6 +11093,9 @@ impl Workbench {
     }
 
     fn render_heap(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if self.heap_selected_class.is_some() {
+            return self.render_heap_objects(cx);
+        }
         let theme = self.theme;
         let mut rows = div()
             .id("heap-classes")
@@ -10966,6 +11130,10 @@ impl Workbench {
                     .border_b_1()
                     .border_color(theme.border)
                     .hover(|style| style.bg(theme.panel_alt))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_heap_class(index, cx);
+                    }))
                     .child(
                         div()
                             .flex_1()
@@ -11063,6 +11231,140 @@ impl Workbench {
                     .child(self.heap_path_input.clone()),
             )
             .child(rows)
+            .into_any_element()
+    }
+
+    fn render_heap_objects(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("heap-objects")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.heap_objects.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(self.heap_objects_status.clone()),
+            );
+        }
+        for (index, object) in self.heap_objects.iter().take(200).enumerate() {
+            rows = rows.child(
+                div()
+                    .id(("heap-object", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(9.5))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.inspect_heap_object(index, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div().truncate().text_color(theme.text).child(
+                                    object
+                                        .preview
+                                        .clone()
+                                        .unwrap_or_else(|| object.address.clone()),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(8.5))
+                                    .text_color(theme.faint)
+                                    .child(object.address.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(theme.accent)
+                            .child(format_bytes(object.retained)),
+                    ),
+            );
+        }
+        let path_panel = if self.heap_path_text.is_empty() {
+            div().into_any_element()
+        } else {
+            div()
+                .id("heap-path")
+                .flex_none()
+                .max_h(px(140.))
+                .overflow_y_scroll()
+                .p_2()
+                .border_t_1()
+                .border_color(theme.border)
+                .bg(theme.panel_alt)
+                .font_family("Menlo")
+                .text_size(px(9.))
+                .text_color(theme.muted)
+                .child(self.heap_path_text.clone())
+                .into_any_element()
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("heap-class-back")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.close_heap_class(cx);
+                            }))
+                            .child("← Classes"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .child(self.heap_class_name.clone().unwrap_or_default()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child(format!(
+                                "{} of {}",
+                                self.heap_objects.len(),
+                                self.heap_objects_total
+                            )),
+                    ),
+            )
+            .child(rows)
+            .child(path_panel)
             .into_any_element()
     }
 

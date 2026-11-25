@@ -25,6 +25,7 @@ ide-coverage = { path = "../../../../crates/ide-coverage" }
 ide-db = { path = "../../../../crates/ide-db" }
 ide-docker = { path = "../../../../crates/ide-docker" }
 ide-github = { path = "../../../../crates/ide-github" }
+ide-heap = { path = "../../../../crates/ide-heap" }
 ide-dap = { path = "../../../../crates/ide-dap" }
 ide-host.workspace = true
 ide-http = { path = "../../../../crates/ide-http" }
@@ -67,5 +68,4 @@ unicode-segmentation = "1"
 util.workspace = true
 
 [dev-dependencies]
-ide-heap = { path = "../../../../crates/ide-heap" }
 tempfile = "3"

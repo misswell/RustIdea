@@ -1342,6 +1342,39 @@ impl NativeHost {
         .await
     }
 
+    pub async fn heap_dominators(
+        &self,
+        snapshot: ide_host::ops::heap::HeapSnapshotId,
+        class_index: u32,
+    ) -> IdeResult<ide_host::ops::heap::HeapObjectPage> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            ide_host::ops::heap::debug_heap_dominators(
+                &host,
+                MAIN_WINDOW,
+                snapshot,
+                None,
+                Some(class_index),
+                0,
+                200,
+            )
+            .await
+        })
+        .await
+    }
+
+    pub async fn heap_path(
+        &self,
+        snapshot: ide_host::ops::heap::HeapSnapshotId,
+        object: ide_host::ops::heap::HeapObjectRef,
+    ) -> IdeResult<Option<ide_host::ops::heap::HeapRootPath>> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            ide_host::ops::heap::debug_heap_path(&host, MAIN_WINDOW, snapshot, object).await
+        })
+        .await
+    }
+
     pub async fn heap_close(&self, snapshot: ide_host::ops::heap::HeapSnapshotId) -> IdeResult<()> {
         self.run(move |host| async move {
             host.require_trust(MAIN_WINDOW)?;
