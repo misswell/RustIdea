@@ -32,6 +32,7 @@ enum SidebarMode {
     Project,
     Search,
     Todo,
+    Dependencies,
     Git,
     Outline,
     Problems,
@@ -65,6 +66,7 @@ enum Command {
     ShowProject,
     ShowSearch,
     ShowTodo,
+    ShowDependencies,
     ShowGit,
     ShowOutline,
     ShowProblems,
@@ -92,10 +94,11 @@ enum Command {
     RefreshRemote,
     RefreshDatabase,
     RefreshTodo,
+    RefreshDependencies,
 }
 
 impl Command {
-    const ALL: [Command; 36] = [
+    const ALL: [Command; 38] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -105,6 +108,7 @@ impl Command {
         Command::ShowProject,
         Command::ShowSearch,
         Command::ShowTodo,
+        Command::ShowDependencies,
         Command::ShowGit,
         Command::ShowOutline,
         Command::ShowProblems,
@@ -132,6 +136,7 @@ impl Command {
         Command::RefreshRemote,
         Command::RefreshDatabase,
         Command::RefreshTodo,
+        Command::RefreshDependencies,
     ];
 
     fn label(self) -> &'static str {
@@ -145,6 +150,7 @@ impl Command {
             Command::ShowProject => "Show Project",
             Command::ShowSearch => "Show Find in Files",
             Command::ShowTodo => "Show TODO",
+            Command::ShowDependencies => "Show Dependencies",
             Command::ShowGit => "Show Version Control",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
@@ -172,6 +178,7 @@ impl Command {
             Command::RefreshRemote => "Refresh SSH configurations",
             Command::RefreshDatabase => "Refresh data sources",
             Command::RefreshTodo => "Refresh TODO items",
+            Command::RefreshDependencies => "Refresh build dependencies",
         }
     }
 
@@ -475,6 +482,13 @@ pub struct Workbench {
     todo_case_sensitive: bool,
     todo_comments_only: bool,
     todo_generation: u64,
+    dependency_modules: Vec<crate::build_tools::BuildModuleRow>,
+    dependency_coordinates: Vec<ide_build::DependencyCoordinate>,
+    dependency_status: gpui::SharedString,
+    dependency_filter_input: Entity<TextInput>,
+    dependency_filter: String,
+    dependency_show_modules: bool,
+    _dependency_filter_subscription: Subscription,
     git_status: Vec<ide_vcs::FileStatus>,
     git_branch: Option<ide_vcs::BranchInfo>,
     git_message_input: Entity<TextInput>,
@@ -883,6 +897,23 @@ impl Workbench {
                     cx.notify();
                 }
             });
+        let dependency_filter_input = cx.new(|cx| {
+            TextInput::new(
+                "Filter modules and dependencies…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let dependency_filter_subscription =
+            cx.subscribe(&dependency_filter_input, |app, _, event, cx| {
+                if let TextInputEvent::Change(filter) = event {
+                    app.dependency_filter = filter.clone();
+                    cx.notify();
+                }
+            });
         let setting_edit_input = cx.new(|cx| {
             TextInput::new(
                 "Setting value",
@@ -937,6 +968,13 @@ impl Workbench {
             todo_case_sensitive: true,
             todo_comments_only: true,
             todo_generation: 0,
+            dependency_modules: Vec::new(),
+            dependency_coordinates: Vec::new(),
+            dependency_status: "Open Dependencies to load build tools".into(),
+            dependency_filter_input,
+            dependency_filter: String::new(),
+            dependency_show_modules: true,
+            _dependency_filter_subscription: dependency_filter_subscription,
             git_status: Vec::new(),
             git_branch: None,
             git_message_input,
@@ -1197,6 +1235,7 @@ impl Workbench {
             SidebarMode::Tools => self.refresh_tools(cx),
             SidebarMode::Plugins => self.refresh_plugins(cx),
             SidebarMode::Todo => self.refresh_todo(cx),
+            SidebarMode::Dependencies => self.refresh_dependencies(cx),
             _ => {}
         }
         cx.notify();
@@ -2719,6 +2758,45 @@ impl Workbench {
         cx.notify();
     }
 
+    fn refresh_dependencies(&mut self, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.dependency_status = "Loading build modules…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.build_model().await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(model) => {
+                            app.dependency_modules = crate::build_tools::module_rows(&root, &model);
+                            app.dependency_coordinates =
+                                crate::build_tools::dependency_rows(&root, &model);
+                            app.dependency_status = format!(
+                                "{} modules · {} dependencies",
+                                app.dependency_modules.len(),
+                                app.dependency_coordinates.len()
+                            )
+                            .into();
+                            app.build_model = Some(model);
+                        }
+                        Err(error) => {
+                            app.dependency_modules.clear();
+                            app.dependency_coordinates.clear();
+                            app.dependency_status =
+                                format!("Build tools failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn run_build(&mut self, kind: ide_build::compile::BuildKind, cx: &mut Context<Self>) {
         if self.build_running {
             return;
@@ -3645,6 +3723,7 @@ impl Workbench {
             Command::ShowProject => self.select_sidebar(SidebarMode::Project, cx),
             Command::ShowSearch => self.select_sidebar(SidebarMode::Search, cx),
             Command::ShowTodo => self.select_sidebar(SidebarMode::Todo, cx),
+            Command::ShowDependencies => self.select_sidebar(SidebarMode::Dependencies, cx),
             Command::ShowGit => self.select_sidebar(SidebarMode::Git, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
@@ -3693,6 +3772,7 @@ impl Workbench {
             Command::RefreshRemote => self.refresh_remote(cx),
             Command::RefreshDatabase => self.refresh_db(cx),
             Command::RefreshTodo => self.refresh_todo(cx),
+            Command::RefreshDependencies => self.refresh_dependencies(cx),
         }
         cx.notify();
     }
@@ -4638,6 +4718,7 @@ impl Workbench {
             SidebarMode::Project => "Project",
             SidebarMode::Search => "Search",
             SidebarMode::Todo => "TODO",
+            SidebarMode::Dependencies => "Dependencies",
             SidebarMode::Git => "Git",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
@@ -4863,6 +4944,36 @@ impl Workbench {
         self.todo_items
             .first()
             .map(|item| format!("{}:{}", item.rel_path, item.line + 1))
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_dependencies(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Dependencies, cx);
+    }
+
+    pub fn dependency_module_count(&self) -> usize {
+        self.dependency_modules.len()
+    }
+
+    pub fn dependency_library_count(&self) -> usize {
+        self.dependency_coordinates.len()
+    }
+
+    pub fn dependency_status(&self) -> String {
+        self.dependency_status.to_string()
+    }
+
+    pub fn dependency_first_module(&self) -> String {
+        self.dependency_modules
+            .first()
+            .map(|module| module.label.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn dependency_first_library(&self) -> String {
+        self.dependency_coordinates
+            .first()
+            .map(crate::build_tools::coordinate_label)
             .unwrap_or_default()
     }
 
@@ -8214,6 +8325,186 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_dependencies(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let filter = self.dependency_filter.to_lowercase();
+        let mut rows = div()
+            .id("build-dependencies")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.dependency_show_modules {
+            for (index, module) in self.dependency_modules.iter().take(500).enumerate() {
+                if !filter.is_empty()
+                    && !module.label.to_lowercase().contains(&filter)
+                    && !module.detail.to_lowercase().contains(&filter)
+                {
+                    continue;
+                }
+                let path = module.path.clone();
+                rows = rows.child(
+                    div()
+                        .id(("build-module", index))
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(10.5))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.panel_alt))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.open_path(path.clone(), cx);
+                        }))
+                        .child(div().flex_1().truncate().child(module.label.clone()))
+                        .child(
+                            div()
+                                .max_w(px(145.))
+                                .truncate()
+                                .text_size(px(9.))
+                                .text_color(theme.faint)
+                                .child(module.detail.clone()),
+                        ),
+                );
+            }
+        } else {
+            for (index, dependency) in self.dependency_coordinates.iter().take(1_000).enumerate() {
+                let label = crate::build_tools::coordinate_label(dependency);
+                if !filter.is_empty() && !label.to_lowercase().contains(&filter) {
+                    continue;
+                }
+                rows = rows.child(
+                    div()
+                        .id(("build-dependency", index))
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(10.5))
+                        .hover(|style| style.bg(theme.panel_alt))
+                        .child(div().flex_1().min_w(px(0.)).truncate().child(label))
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(theme.faint)
+                                .child(crate::build_tools::source_label(dependency)),
+                        ),
+                );
+            }
+        }
+        if self.dependency_modules.is_empty()
+            && self.dependency_coordinates.is_empty()
+            && !self.dependency_status.starts_with("Loading")
+        {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child("No Maven, Gradle or sbt modules found"),
+            );
+        }
+        let show_modules = self.dependency_show_modules;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("dependencies-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_dependencies(cx);
+                            }))
+                            .child("Sync"),
+                    )
+                    .child(
+                        div()
+                            .id("dependencies-modules")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if show_modules {
+                                theme.text
+                            } else {
+                                theme.faint
+                            })
+                            .bg(if show_modules {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.dependency_show_modules = true;
+                                cx.notify();
+                            }))
+                            .child("Modules"),
+                    )
+                    .child(
+                        div()
+                            .id("dependencies-libraries")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if show_modules {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(if show_modules {
+                                theme.panel_alt
+                            } else {
+                                theme.accent_muted
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.dependency_show_modules = false;
+                                cx.notify();
+                            }))
+                            .child("Libraries"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.dependency_status.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.dependency_filter_input.clone()),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_bottom_panel(
         &mut self,
         _window: &mut Window,
@@ -8912,6 +9203,7 @@ impl Render for Workbench {
         let project = self.render_project(cx).into_any_element();
         let search = self.render_search_panel(cx);
         let todo = self.render_todo(cx);
+        let dependencies = self.render_dependencies(cx);
         let git = self.render_git_panel(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
@@ -8920,6 +9212,7 @@ impl Render for Workbench {
             SidebarMode::Project => project,
             SidebarMode::Search => search,
             SidebarMode::Todo => todo,
+            SidebarMode::Dependencies => dependencies,
             SidebarMode::Git => git,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
@@ -8937,6 +9230,7 @@ impl Render for Workbench {
             ("PRJ", SidebarMode::Project),
             ("SRC", SidebarMode::Search),
             ("TODO", SidebarMode::Todo),
+            ("DEP", SidebarMode::Dependencies),
             ("GIT", SidebarMode::Git),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
