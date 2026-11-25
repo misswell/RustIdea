@@ -359,7 +359,11 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   `Started`, `Step`, `Output`, `Message` and `Progress` events and shows the
   final error/warning counts and duration;
 - Plugins loads the installed plugin host in a blocking task and lists installed
-  `PluginInfo` rows (the current RustIdea identifier has none installed);
+  `PluginInfo` rows (the current RustIdea identifier has none installed); it
+  also loads the official marketplace (138 entries), previews a downloaded
+  package with signature/capability metadata (`Checkstyle 0.1.0`, 4
+  capabilities, signed), and wires install through `install_from_dir` with
+  default consent (optional capabilities are deliberately not granted);
 - Debug scans `ops::debug::debug_attachable_processes` and lists debug-capable
   run configurations. The panel is a process/browse surface; starting a session
   and the variables/stack/frames UI are still pending;
@@ -483,10 +487,10 @@ documents/project/sync/host: 24 passed; 0 failed
 - External-change reload/conflict handling in the Zed Buffer path (the POC only
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
-- Plugin UI contributions/marketplace install flow, full debugger session UI,
-  notebook cell editing, remote file editing (browsing/preview exists), the
-  agent permission responses/subagent drill-down and MCP add/edit/remove are
-  not yet integrated. Database/HTTP have working execution paths but no
+- Plugin live UI contributions and per-capability consent UI, full debugger
+  session UI, notebook cell editing, remote file editing (browsing/preview
+  exists), the agent permission responses/subagent drill-down and MCP
+  add/edit/remove are not yet integrated. Database/HTTP have working execution paths but no
   source/request editors of their own. The Terminal now has a real VT screen
   and OpenIDEA PTY, but its mouse selection, hyperlinks, IME and resize path
   are not yet verified or complete.

@@ -306,6 +306,13 @@ pub struct Workbench {
     build_running: bool,
     plugins: Vec<ide_host::plugins::PluginInfo>,
     plugins_status: gpui::SharedString,
+    market_plugins: Vec<ide_host::plugins::MarketPlugin>,
+    market_status: gpui::SharedString,
+    market_loading: bool,
+    market_selected: usize,
+    plugin_preview: Option<ide_host::plugins::InstallPreview>,
+    plugin_preview_status: gpui::SharedString,
+    plugin_install_busy: bool,
     debug_attachables: Vec<ide_dap::attach::AttachableProcess>,
     debug_selected: usize,
     debug_status: gpui::SharedString,
@@ -477,6 +484,13 @@ impl Workbench {
             build_running: false,
             plugins: Vec::new(),
             plugins_status: "Select PLUGINS to load installed plugins".into(),
+            market_plugins: Vec::new(),
+            market_status: "Marketplace not loaded".into(),
+            market_loading: false,
+            market_selected: 0,
+            plugin_preview: None,
+            plugin_preview_status: "Select a marketplace plugin to preview".into(),
+            plugin_install_busy: false,
             debug_attachables: Vec::new(),
             debug_selected: 0,
             debug_status: "Select DEBUG to scan attachable processes".into(),
@@ -1465,6 +1479,135 @@ impl Workbench {
                             app.plugins.clear();
                             app.plugins_status =
                                 format!("Plugins failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_market(&mut self, cx: &mut Context<Self>) {
+        if self.market_loading {
+            return;
+        }
+        let host = self.host.clone();
+        self.market_loading = true;
+        self.market_status = "Loading marketplace…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.plugin_market().await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.market_loading = false;
+                    match result {
+                        Ok(plugins) => {
+                            app.market_status =
+                                format!("{} marketplace plugins", plugins.len()).into();
+                            app.market_plugins = plugins;
+                            if std::env::var_os("RUSTIDEA_ZED_SMOKE_MARKET_PREVIEW").is_some()
+                                && !app.market_plugins.is_empty()
+                            {
+                                app.preview_market_plugin(cx);
+                            }
+                        }
+                        Err(error) => {
+                            app.market_status =
+                                format!("Marketplace failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn preview_market_plugin(&mut self, cx: &mut Context<Self>) {
+        let Some(plugin) = self.market_plugins.get(self.market_selected) else {
+            self.plugin_preview_status = "No marketplace plugin selected".into();
+            cx.notify();
+            return;
+        };
+        let id = plugin.entry.id.clone();
+        let host = self.host.clone();
+        self.plugin_preview = None;
+        self.plugin_preview_status = format!("Downloading {}…", plugin.entry.name).into();
+        cx.spawn(async move |this, cx| {
+            let result = host.plugin_preview(id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(preview) => {
+                            app.plugin_preview_status = format!(
+                                "{} {} · {} capabilities · {}",
+                                preview.name,
+                                preview.version,
+                                preview.capabilities.len(),
+                                if preview.unsigned {
+                                    "UNSIGNED"
+                                } else {
+                                    "signed"
+                                }
+                            )
+                            .into();
+                            app.plugin_preview = Some(preview);
+                        }
+                        Err(error) => {
+                            app.plugin_preview_status =
+                                format!("Preview failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn install_previewed_plugin(&mut self, cx: &mut Context<Self>) {
+        let Some(preview) = self.plugin_preview.clone() else {
+            self.plugin_preview_status = "Preview the plugin first".into();
+            cx.notify();
+            return;
+        };
+        if self.plugin_install_busy {
+            return;
+        }
+        let host = self.host.clone();
+        let id = preview.id.clone();
+        self.plugin_install_busy = true;
+        self.plugin_preview_status = format!(
+            "Installing {}… (optional capabilities are not granted)",
+            preview.name
+        )
+        .into();
+        cx.spawn(async move |this, cx| {
+            let result = host.plugin_install(id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.plugin_install_busy = false;
+                    match result {
+                        Ok(plugin) => {
+                            app.plugin_preview_status =
+                                format!("Installed {} {}", plugin.name, plugin.version).into();
+                            app.refresh_plugins(cx);
+                        }
+                        Err(error) => {
+                            app.plugin_preview_status =
+                                format!("Install failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -2510,6 +2653,23 @@ impl Workbench {
 
     pub fn plugins_count(&self) -> usize {
         self.plugins.len()
+    }
+
+    pub fn smoke_market(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Plugins, cx);
+        self.refresh_market(cx);
+    }
+
+    pub fn market_count(&self) -> usize {
+        self.market_plugins.len()
+    }
+
+    pub fn market_status(&self) -> &gpui::SharedString {
+        &self.market_status
+    }
+
+    pub fn plugin_preview_status(&self) -> &gpui::SharedString {
+        &self.plugin_preview_status
     }
 
     pub fn smoke_debug(&mut self, cx: &mut Context<Self>) {
@@ -4008,8 +4168,8 @@ impl Workbench {
         let theme = self.theme;
         let mut rows = div()
             .id("plugin-list")
-            .flex_1()
-            .min_h(px(0.))
+            .flex_none()
+            .max_h(px(120.))
             .overflow_y_scroll()
             .flex()
             .flex_col();
@@ -4050,6 +4210,127 @@ impl Workbench {
                         ),
                 );
         }
+        let mut market_rows = div()
+            .id("market-list")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, plugin) in self.market_plugins.iter().take(200).enumerate() {
+            let installed = plugin.installed.as_deref();
+            let compatible = plugin.compatible;
+            let selected = index == self.market_selected;
+            market_rows = market_rows.child(
+                div()
+                    .id(("market-plugin", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .text_size(px(10.5))
+                    .text_color(if compatible { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.market_selected = index;
+                        this.plugin_preview = None;
+                        this.plugin_preview_status = "Preview the selected plugin".into();
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().truncate().child(plugin.entry.name.clone()))
+                            .child(
+                                div()
+                                    .text_size(px(9.))
+                                    .text_color(theme.faint)
+                                    .child(plugin.entry.version.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(if installed.is_some() {
+                                theme.accent
+                            } else {
+                                theme.faint
+                            })
+                            .truncate()
+                            .child(format!(
+                                "{}{}{}",
+                                installed
+                                    .map(|version| format!("installed {version} · "))
+                                    .unwrap_or_default(),
+                                plugin.entry.publisher,
+                                plugin
+                                    .publisher_name
+                                    .as_ref()
+                                    .map(|name| format!(" ({name})"))
+                                    .unwrap_or_default()
+                            )),
+                    ),
+            );
+        }
+        let mut preview_panel = div()
+            .id("plugin-preview")
+            .flex_none()
+            .max_h(px(180.))
+            .overflow_y_scroll()
+            .p_2()
+            .border_t_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_size(px(9.5))
+                    .text_color(theme.faint)
+                    .child(self.plugin_preview_status.clone()),
+            );
+        if let Some(preview) = &self.plugin_preview {
+            if !preview.description.is_empty() {
+                preview_panel = preview_panel.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(theme.muted)
+                        .child(preview.description.clone()),
+                );
+            }
+            for capability in &preview.capabilities {
+                preview_panel =
+                    preview_panel.child(div().text_size(px(9.)).text_color(theme.faint).child(
+                        format!(
+                            "{} · {:?}{}",
+                            capability.id,
+                            capability.risk,
+                            if capability.optional {
+                                " (optional)"
+                            } else {
+                                ""
+                            }
+                        ),
+                    ));
+            }
+            for warning in &preview.warnings {
+                preview_panel = preview_panel.child(
+                    div()
+                        .text_size(px(9.))
+                        .text_color(theme.warning)
+                        .child(warning.clone()),
+                );
+            }
+        }
         div()
             .size_full()
             .flex()
@@ -4078,6 +4359,49 @@ impl Workbench {
                             }))
                             .child("Refresh"),
                     )
+                    .child(
+                        div()
+                            .id("plugins-market")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_market(cx);
+                            }))
+                            .child("Market"),
+                    )
+                    .child(
+                        div()
+                            .id("plugins-preview")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.preview_market_plugin(cx);
+                            }))
+                            .child("Preview"),
+                    )
+                    .child(
+                        div()
+                            .id("plugins-install")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.install_previewed_plugin(cx);
+                            }))
+                            .child("Install"),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
@@ -4088,6 +4412,18 @@ impl Workbench {
                     ),
             )
             .child(rows)
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(9.5))
+                    .text_color(theme.faint)
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(self.market_status.clone()),
+            )
+            .child(market_rows)
+            .child(preview_panel)
             .when(self.plugins.is_empty(), |view| {
                 view.child(
                     div()

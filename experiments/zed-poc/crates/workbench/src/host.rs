@@ -584,6 +584,12 @@ impl NativeHost {
     }
 
     pub fn plugins_snapshot(&self) -> IdeResult<ide_host::plugins::PluginsSnapshot> {
+        let host = self.plugin_host()?;
+        host.load_all();
+        Ok(host.list(None))
+    }
+
+    fn plugin_host(&self) -> IdeResult<Arc<ide_host::plugins::PluginHost>> {
         let host = self
             .plugin_host
             .get_or_init(|| {
@@ -594,14 +600,49 @@ impl NativeHost {
                     sink,
                     Default::default(),
                 )
-                .map(Arc::new)
+                .map(|host| {
+                    host.set_default_market_url(Some(
+                        ide_host::plugins::OFFICIAL_MARKET_INDEX.to_owned(),
+                    ));
+                    Arc::new(host)
+                })
                 .map_err(|error| error.message)
             })
             .as_ref()
             .map_err(|message| ide_core::IdeError::internal(message.clone()))?
             .clone();
-        host.load_all();
-        Ok(host.list(None))
+        Ok(host)
+    }
+
+    pub async fn plugin_market(&self) -> IdeResult<Vec<ide_host::plugins::MarketPlugin>> {
+        let host = self.plugin_host()?;
+        self.runtime
+            .spawn_blocking(move || host.market_listing(true))
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub async fn plugin_preview(&self, id: String) -> IdeResult<ide_host::plugins::InstallPreview> {
+        let host = self.plugin_host()?;
+        self.runtime
+            .spawn_blocking(move || {
+                let dir = host.download_market_plugin(&id)?;
+                host.preview_install(&dir)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub async fn plugin_install(&self, id: String) -> IdeResult<ide_host::plugins::PluginInfo> {
+        let host = self.plugin_host()?;
+        self.runtime
+            .spawn_blocking(move || {
+                let dir = host.download_market_plugin(&id)?;
+                let consent = ide_host::plugins::Consent::default();
+                host.install_from_dir(&dir, &consent)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
 
     pub fn agent_providers(&self) -> IdeResult<Vec<ide_agent::AgentProvider>> {

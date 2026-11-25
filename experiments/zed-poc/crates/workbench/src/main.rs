@@ -198,6 +198,7 @@ fn main() {
                 let smoke_tools = std::env::var_os("RUSTIDEA_ZED_SMOKE_TOOLS").is_some();
                 let smoke_build = std::env::var_os("RUSTIDEA_ZED_SMOKE_BUILD").is_some();
                 let smoke_plugins = std::env::var_os("RUSTIDEA_ZED_SMOKE_PLUGINS").is_some();
+                let smoke_market = std::env::var_os("RUSTIDEA_ZED_SMOKE_MARKET").is_some();
                 let smoke_debug = std::env::var_os("RUSTIDEA_ZED_SMOKE_DEBUG").is_some();
                 let smoke_notebook =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK").is_some();
@@ -248,6 +249,9 @@ fn main() {
                                 if smoke_plugins {
                                     app.smoke_plugins(cx);
                                 }
+                                if smoke_market {
+                                    app.smoke_market(cx);
+                                }
                                 if smoke_debug {
                                     app.smoke_debug(cx);
                                 }
@@ -275,7 +279,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} agents={} agent_tasks={} mcp={} tools={} plugins={} debug_attachables={} build_status={} build={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} debug_attachables={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -309,6 +313,9 @@ fn main() {
                                     app.mcp_count(),
                                     app.tools_count(),
                                     app.plugins_count(),
+                                    app.market_count(),
+                                    app.market_status(),
+                                    app.plugin_preview_status(),
                                     app.debug_attachable_count(),
                                     app.build_status(),
                                     app.build_output().lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default(),
