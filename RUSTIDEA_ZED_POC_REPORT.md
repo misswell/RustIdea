@@ -344,8 +344,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   marked-range path now forwards committed IME text and reports cursor bounds;
 - the sidebar is now a compact multi-panel workbench: Project, Search, TODO,
   Dependencies, Coverage, Bookmarks, Git, Git Log, Services, GitHub, Heap,
-  Profiler, Logcat, Scratch, Recent, Outline, Problems, Database, HTTP, Remote,
-  Notebook, MCP, Agents, Plugins, Tools and Settings;
+  Profiler, Logcat, Scratch, Recent, Analysis, Outline, Problems, Database,
+  HTTP, Remote, Notebook, MCP, Agents, Plugins, Tools and Settings;
 - Outline calls OpenIDEA's LSP/tree-sitter `doc_outline` and navigates
   selection; Problems aggregates real backend diagnostics and navigates to
   file/line;
@@ -378,7 +378,7 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - Cmd-P opens a native quick-open overlay backed by
   `ops::nav::find_files`; typing re-queries the project index and clicking or
   submitting opens the selected file;
-- Cmd-Shift-P opens a native command palette with 50 commands covering file
+- Cmd-Shift-P opens a native command palette with 51 commands covering file
   save/close, splits, every sidebar and bottom panel, run/build/rebuild and
   backend refreshes; filtering is local and execution uses the same methods as
   the buttons;
@@ -428,7 +428,7 @@ Panel coverage at this commit:
 | Project tree | working | `ops::fs::read_dir` |
 | Quick Open (Cmd-P) | working | `ops::nav::find_files` |
 | Zed default macOS keymap | loaded (603 bindings) | `settings::KeymapFile` |
-| Command Palette (Cmd-Shift-P) | working (50 commands) | local dispatch |
+| Command Palette (Cmd-Shift-P) | working (51 commands) | local dispatch |
 | Go to Symbol (Cmd-Shift-O) | working | `ops::nav::find_symbols` |
 | Find Usages (Alt-F7) | working | `ops::lsp::lsp_references` |
 | Find in Files | regex/case/whole-word + navigation | `ops::search` |
@@ -446,6 +446,7 @@ Panel coverage at this commit:
 | Scratch | list/create/edit scratch files in the app data directory | local workspace + `ops::doc` |
 | Recent Files | per-project MRU list persisted in app config | local store |
 | Save a Copy | writes the active unsaved buffer text to a chosen path | `save_file_copy` |
+| Analysis | Locate Duplicates with identifier/literal normalisation, clickable fragments | `ops::analysis::analysis_locate_duplicates` |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
@@ -732,6 +733,13 @@ WORKBENCH_SAVE_COPY ok path=/tmp/rustidea-saveas-smoke/copy.txt
 disk: copy.txt contains the active buffer text
 ```
 
+Locate Duplicates smoke on two Java files with the same method body:
+
+```text
+duplicate_groups=1 duplicate_status=1 duplicate groups · 2 files · 374 tokens · 1 ms
+duplicate_first="src/main/java/com/example/DupA.java:1"
+```
+
 Build smoke on the Maven project:
 
 ```text
@@ -794,7 +802,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent:
   Scratch panel lists and creates files, but the language chooser and template
   shortcuts are missing. Save As currently saves a copy: the OpenIDEA document
   layer only supports re-keying untitled buffers, not renaming an existing file.
-  The Terminal now has a real VT screen
+  Analysis runs Locate Duplicates but Inspect Code and structural search/replace
+  are missing. The Terminal now has a real VT screen
   and OpenIDEA PTY, but its mouse selection, hyperlinks, IME composition and
   resize path are not yet verified or complete (the IME input handler is
   wired, but locked-screen visual/IME verification is still unavailable).

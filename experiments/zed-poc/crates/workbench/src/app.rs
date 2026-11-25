@@ -44,6 +44,7 @@ enum SidebarMode {
     Logcat,
     Scratch,
     Recent,
+    Analysis,
     Outline,
     Problems,
     Database,
@@ -112,6 +113,7 @@ enum Command {
     ShowScratches,
     NewScratch,
     ShowRecent,
+    ShowAnalysis,
     ShowOutline,
     ShowProblems,
     ShowDatabase,
@@ -142,7 +144,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 50] = [
+    const ALL: [Command; 51] = [
         Command::Save,
         Command::SaveAs,
         Command::CloseTab,
@@ -166,6 +168,7 @@ impl Command {
         Command::ShowScratches,
         Command::NewScratch,
         Command::ShowRecent,
+        Command::ShowAnalysis,
         Command::ShowOutline,
         Command::ShowProblems,
         Command::ShowDatabase,
@@ -220,6 +223,7 @@ impl Command {
             Command::ShowScratches => "Show Scratch Files",
             Command::NewScratch => "New Scratch File",
             Command::ShowRecent => "Show Recent Files",
+            Command::ShowAnalysis => "Show Code Analysis",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
             Command::ShowDatabase => "Show Database",
@@ -742,6 +746,11 @@ pub struct Workbench {
     recent_file_path: PathBuf,
     recent_files: Vec<PathBuf>,
     recent_status: gpui::SharedString,
+    duplicates_report: Option<ide_analysis::DuplicatesReport>,
+    duplicates_status: gpui::SharedString,
+    duplicates_busy: bool,
+    duplicates_anonymize_identifiers: bool,
+    duplicates_anonymize_literals: bool,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -1462,6 +1471,11 @@ impl Workbench {
             recent_file_path,
             recent_files,
             recent_status: "Open a file to build a recent list".into(),
+            duplicates_report: None,
+            duplicates_status: "Run Locate Duplicates to scan the project".into(),
+            duplicates_busy: false,
+            duplicates_anonymize_identifiers: true,
+            duplicates_anonymize_literals: true,
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -4366,6 +4380,7 @@ impl Workbench {
                 self.create_scratch(cx);
             }
             Command::ShowRecent => self.select_sidebar(SidebarMode::Recent, cx),
+            Command::ShowAnalysis => self.select_sidebar(SidebarMode::Analysis, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
             Command::ShowDatabase => self.select_sidebar(SidebarMode::Database, cx),
@@ -5640,6 +5655,57 @@ impl Workbench {
         cx.notify();
     }
 
+    fn run_duplicate_analysis(&mut self, cx: &mut Context<Self>) {
+        if self.duplicates_busy {
+            return;
+        }
+        self.duplicates_busy = true;
+        self.duplicates_status = "Scanning for duplicate code…".into();
+        let options = ide_analysis::DuplicateOptions {
+            min_tokens: 60,
+            anonymize_identifiers: self.duplicates_anonymize_identifiers,
+            anonymize_literals: self.duplicates_anonymize_literals,
+        };
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.analysis_duplicates(options).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.duplicates_busy = false;
+                    match result {
+                        Ok(report) => {
+                            app.duplicates_status = format!(
+                                "{} duplicate groups · {} files · {} tokens · {} ms{}",
+                                report.groups.len(),
+                                report.files,
+                                report.tokens,
+                                report.elapsed_ms,
+                                if report.truncated {
+                                    " · truncated"
+                                } else {
+                                    ""
+                                }
+                            )
+                            .into();
+                            app.duplicates_report = Some(report);
+                        }
+                        Err(error) => {
+                            app.duplicates_report = None;
+                            app.duplicates_status =
+                                format!("Duplicate scan failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn open_profile(&mut self, cx: &mut Context<Self>) {
         if self.profile_busy {
             return;
@@ -6316,6 +6382,7 @@ impl Workbench {
             SidebarMode::Logcat => "Logcat",
             SidebarMode::Scratch => "Scratch",
             SidebarMode::Recent => "Recent",
+            SidebarMode::Analysis => "Analysis",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
             SidebarMode::Database => "Database",
@@ -6911,6 +6978,31 @@ impl Workbench {
 
     pub fn status_text(&self) -> String {
         self.status.to_string()
+    }
+
+    pub fn smoke_analysis(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Analysis, cx);
+        self.run_duplicate_analysis(cx);
+    }
+
+    pub fn duplicate_group_count(&self) -> usize {
+        self.duplicates_report
+            .as_ref()
+            .map(|report| report.groups.len())
+            .unwrap_or_default()
+    }
+
+    pub fn duplicate_status_text(&self) -> String {
+        self.duplicates_status.to_string()
+    }
+
+    pub fn duplicate_first_fragment(&self) -> String {
+        self.duplicates_report
+            .as_ref()
+            .and_then(|report| report.groups.first())
+            .and_then(|group| group.fragments.first())
+            .map(|fragment| format!("{}:{}", fragment.rel_path, fragment.range.start.line + 1))
+            .unwrap_or_default()
     }
 
     pub fn smoke_has_language(&self, cx: &gpui::App) -> bool {
@@ -12037,6 +12129,190 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_analysis(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("duplicate-groups")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        match self.duplicates_report.as_ref() {
+            None => {
+                rows = rows.child(
+                    div()
+                        .p_3()
+                        .text_size(px(10.5))
+                        .text_color(theme.faint)
+                        .child(self.duplicates_status.clone()),
+                );
+            }
+            Some(report) if report.groups.is_empty() => {
+                rows = rows.child(
+                    div()
+                        .p_3()
+                        .text_size(px(10.5))
+                        .text_color(theme.faint)
+                        .child("No duplicate groups found"),
+                );
+            }
+            Some(report) => {
+                for (group_index, group) in report.groups.iter().take(100).enumerate() {
+                    rows = rows.child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .bg(theme.panel_alt)
+                            .text_size(px(9.5))
+                            .text_color(theme.accent)
+                            .child(format!(
+                                "{} tokens · {} lines · {}",
+                                group.tokens, group.lines, group.language
+                            )),
+                    );
+                    for (fragment_index, fragment) in group.fragments.iter().take(20).enumerate() {
+                        let path = fragment.path.0.clone();
+                        let line = fragment.range.start.line;
+                        let column = fragment.range.start.col;
+                        rows = rows.child(
+                            div()
+                                .id(("duplicate-fragment", group_index * 100 + fragment_index))
+                                .px_2()
+                                .py_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.panel_alt))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.open_or_goto(path.clone(), line, column, window, cx);
+                                }))
+                                .child(div().text_size(px(9.5)).text_color(theme.text).child(
+                                    format!(
+                                        "{}:{}-{}",
+                                        fragment.rel_path,
+                                        line + 1,
+                                        fragment.range.end.line + 1
+                                    ),
+                                ))
+                                .child(
+                                    div()
+                                        .font_family("Menlo")
+                                        .text_size(px(8.5))
+                                        .text_color(theme.faint)
+                                        .child(
+                                            fragment
+                                                .text
+                                                .lines()
+                                                .next()
+                                                .unwrap_or_default()
+                                                .to_owned(),
+                                        ),
+                                ),
+                        );
+                    }
+                }
+            }
+        }
+        let identifiers = self.duplicates_anonymize_identifiers;
+        let literals = self.duplicates_anonymize_literals;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("duplicates-run")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.duplicates_busy {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.run_duplicate_analysis(cx);
+                            }))
+                            .child(if self.duplicates_busy {
+                                "Scanning…"
+                            } else {
+                                "Locate Duplicates"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("duplicates-identifiers")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(8.5))
+                            .text_color(if identifiers { theme.text } else { theme.faint })
+                            .bg(if identifiers {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.duplicates_anonymize_identifiers =
+                                    !this.duplicates_anonymize_identifiers;
+                                cx.notify();
+                            }))
+                            .child("Ignore names"),
+                    )
+                    .child(
+                        div()
+                            .id("duplicates-literals")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(8.5))
+                            .text_color(if literals { theme.text } else { theme.faint })
+                            .bg(if literals {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.duplicates_anonymize_literals =
+                                    !this.duplicates_anonymize_literals;
+                                cx.notify();
+                            }))
+                            .child("Ignore literals"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.duplicates_status.clone()),
+                    ),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut results = div()
@@ -13624,6 +13900,7 @@ impl Render for Workbench {
         let logcat = self.render_logcat(cx);
         let scratch = self.render_scratch(cx);
         let recent = self.render_recent(cx);
+        let analysis = self.render_analysis(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
         let settings = self.render_settings(cx);
@@ -13643,6 +13920,7 @@ impl Render for Workbench {
             SidebarMode::Logcat => logcat,
             SidebarMode::Scratch => scratch,
             SidebarMode::Recent => recent,
+            SidebarMode::Analysis => analysis,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
             SidebarMode::Settings => settings,
@@ -13671,6 +13949,7 @@ impl Render for Workbench {
             ("LOGCAT", SidebarMode::Logcat),
             ("SCR", SidebarMode::Scratch),
             ("RCNT", SidebarMode::Recent),
+            ("ANLZ", SidebarMode::Analysis),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
             ("DB", SidebarMode::Database),

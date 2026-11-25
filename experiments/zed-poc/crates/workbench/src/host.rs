@@ -1396,6 +1396,24 @@ impl NativeHost {
         .await
     }
 
+    pub async fn analysis_duplicates(
+        &self,
+        options: ide_analysis::DuplicateOptions,
+    ) -> IdeResult<ide_analysis::DuplicatesReport> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            ide_host::ops::analysis::analysis_locate_duplicates(
+                &host,
+                MAIN_WINDOW,
+                ide_core::RequestId::next(),
+                ide_search::SearchScope::Project,
+                options,
+            )
+            .await
+        })
+        .await
+    }
+
     pub async fn logcat_devices(&self) -> IdeResult<Vec<crate::logcat::LogcatDevice>> {
         self.run(move |host| async move {
             host.require_trust(MAIN_WINDOW)?;

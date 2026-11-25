@@ -12043,6 +12043,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "ide-agent",
+ "ide-analysis",
  "ide-build",
  "ide-core",
  "ide-coverage",
