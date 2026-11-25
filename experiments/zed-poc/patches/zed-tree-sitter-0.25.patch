@@ -319,3 +319,29 @@ index a50f175..c30d72a 100644
                  edits.push((
                      MultiBufferOffset(pos)..MultiBufferOffset(pos),
                      format!("\n{new_task}\n"),
+diff --git a/crates/terminal/src/mappings/keys.rs b/crates/terminal/src/mappings/keys.rs
+index b67d0ad..8864125 100644
+--- a/crates/terminal/src/mappings/keys.rs
++++ b/crates/terminal/src/mappings/keys.rs
+@@ -44,7 +44,7 @@ impl TerminalModifiers {
+     }
+ }
+ 
+-pub(crate) fn to_esc_str(
++pub fn to_esc_str(
+     keystroke: &Keystroke,
+     mode: Modes,
+     option_as_meta: bool,
+diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
+index a2c7c3f..7d0abe9 100644
+--- a/crates/terminal/src/terminal.rs
++++ b/crates/terminal/src/terminal.rs
+@@ -73,7 +73,7 @@ use crate::alacritty::{
+     vi_motion,
+ };
+ use crate::mappings::colors::to_vte_rgb;
+-use crate::mappings::keys::to_esc_str;
++pub use crate::mappings::keys::to_esc_str;
+ 
+ /// Process-wide flag set by headless hosts (e.g. the eval CLI) that have no
+ /// controlling TTY. In such sandboxes PTY allocation and acquiring a

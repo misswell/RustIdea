@@ -26,6 +26,7 @@ ide-lsp.workspace = true
 ide-run = { path = "../../../../crates/ide-run" }
 ide-sdk = { path = "../../../../crates/ide-sdk" }
 ide-search = { path = "../../../../crates/ide-search" }
+ide-terminal = { path = "../../../../crates/ide-terminal" }
 ide-text = { path = "../../../../crates/ide-text" }
 ide-vcs = { path = "../../../../crates/ide-vcs" }
 ide-tools = { path = "../../../../crates/ide-tools" }
@@ -46,6 +47,7 @@ settings.workspace = true
 text.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
+terminal = { path = "../../../../third_party/zed/crates/terminal" }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -323,6 +323,14 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   OpenIDEA `ops::search` streaming engine, with clickable file/line results;
 - a native Git tool window shows the branch, changed files, stage/unstage
   actions and a commit-message field backed by `ide-vcs`;
+- a bottom-panel Terminal uses the Zed `terminal` crate's Alacritty/VT screen
+  model with OpenIDEA's `ops::term` PTY ownership. The OpenIDEA PTY output is
+  fed into `terminal::Terminal::write_output`; the workbench renders the
+  screen with GPUI text runs, ANSI/256-colour mapping, inverse/bold/italic
+  attributes, a cursor block/bar/underline and scrollback. Key events are
+  translated with Zed's own `to_esc_str` mapping and written back to the
+  OpenIDEA terminal session; paste honours bracketed-paste mode. It does not
+  use the old text-only terminal stub or xterm.js;
 - buffer edits are sent incrementally to
   `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
   `DocPatched` events and diagnostics are applied back to Zed buffers;
@@ -365,6 +373,18 @@ the OpenIDEA search engine. A separate run smoke produced
 `run_status=Exited with Some(0)` and the final Maven output line, proving the
 Run panel used the OpenIDEA Run service rather than a text-only stub.
 
+Terminal smoke in the same Java project (real OpenIDEA PTY, real shell):
+
+```text
+WORKBENCH_TERMINAL_SPAWN id=TerminalId#1 title=zsh pid=Some(73544)
+WORKBENCH_SMOKE ... terminal_status=zsh · pid Some(73544)
+terminal="/private/tmp/rustidea-java-workbench-smoke $ | WORKBENCH_TERMINAL_OK
+| /private/tmp/rustidea-java-workbench-smoke $ printf 'WORKBENCH_TERMINAL_OK\n'"
+```
+
+This proves the OpenIDEA PTY stream reached the Zed VT grid. It is not an
+onscreen key-by-key or IME acceptance test.
+
 The first line of the Java file on disk was the inserted marker after the
 process exited, so the multi-document workbench path exercised:
 
@@ -397,8 +417,9 @@ documents/project/sync/host: 24 passed; 0 failed
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
 - OpenIdea Agents, MCP, plugins, remote filesystem, notebook, database, HTTP,
-  debugger, terminal VT screen and the rest of the workbench UI are not yet
-  integrated into this Zed-hosted application. The POC only proves the editor,
-  document, LSP, run and save bridge.
+  debugger and the rest of the workbench UI are not yet integrated into this
+  Zed-hosted application. The Terminal now has a real VT screen and OpenIDEA
+  PTY, but its mouse selection, hyperlinks, IME and resize path are not yet
+  verified or complete.
 
 This document is a POC report, not a claim of OpenIdea parity.

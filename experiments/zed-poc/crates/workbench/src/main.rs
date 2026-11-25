@@ -11,6 +11,7 @@ mod lsp;
 mod project;
 mod semantics;
 mod sync;
+mod terminal_pane;
 mod text_input;
 mod theme;
 
@@ -187,6 +188,8 @@ fn main() {
                 cx.activate(true);
                 let smoke_split = std::env::var_os("RUSTIDEA_ZED_SMOKE_SPLIT").is_some();
                 let smoke_run = std::env::var_os("RUSTIDEA_ZED_SMOKE_RUN").is_some();
+                let smoke_terminal =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some();
                 let smoke_search = std::env::var("RUSTIDEA_ZED_SMOKE_SEARCH").ok();
                 let completion_position = std::env::var("RUSTIDEA_ZED_SMOKE_COMPLETION_POS")
                     .ok()
@@ -200,12 +203,15 @@ fn main() {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_secs(3))
                                 .await;
-                            this.update(cx, |app, cx| {
+                            this.update_in(cx, |app, window, cx| {
                                 if smoke_split {
                                     app.smoke_enable_split(cx);
                                 }
                                 if smoke_run {
                                     app.smoke_start_run(cx);
+                                }
+                                if smoke_terminal {
+                                    app.smoke_start_terminal(window, cx);
                                 }
                                 if let Some(pattern) = &smoke_search {
                                     app.smoke_search(pattern, cx);
@@ -228,7 +234,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -238,6 +244,17 @@ fn main() {
                                     app.smoke_search_files(),
                                     app.smoke_git_branch(),
                                     app.smoke_git_files(),
+                                    app.terminal_status(),
+                                    app.terminal_text(cx)
+                                        .map(|text| {
+                                            text.lines()
+                                                .filter(|line| !line.trim().is_empty())
+                                                .rev()
+                                                .take(3)
+                                                .collect::<Vec<_>>()
+                                                .join(" | ")
+                                        })
+                                        .unwrap_or_default(),
                                     app.smoke_active_text(cx).lines().next().unwrap_or_default()
                                 );
                                 cx.quit();

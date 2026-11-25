@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
-use ide_core::{DocId, IdeEvent, IdeResult, SharedSink};
+use ide_core::{DocId, IdeEvent, IdeResult, SharedSink, TerminalId};
 use ide_host::{Host, HostConfig};
 use ide_language::{LanguageRegistry, Syntax};
 use ide_vfs::FileEntry;
@@ -465,6 +465,35 @@ impl NativeHost {
 
     pub fn stop_run(&self, run: ide_core::RunId) -> IdeResult<()> {
         ide_host::ops::run::stop(&self.host, MAIN_WINDOW, run)
+    }
+
+    pub async fn spawn_terminal(
+        &self,
+        options: ide_terminal::TerminalOptions,
+        output: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> IdeResult<ide_terminal::TerminalInfo> {
+        let host = self.host.clone();
+        self.runtime
+            .spawn_blocking(move || {
+                let emit: ide_host::ops::Emit<String> = Arc::new(move |chunk| {
+                    let _ = output.send(chunk);
+                });
+                ide_host::ops::term::spawn(&host, MAIN_WINDOW, options, emit)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn write_terminal(&self, id: TerminalId, data: &str) -> IdeResult<()> {
+        ide_host::ops::term::write(&self.host, id, data)
+    }
+
+    pub fn resize_terminal(&self, id: TerminalId, cols: u16, rows: u16) -> IdeResult<()> {
+        ide_host::ops::term::resize(&self.host, id, cols, rows)
+    }
+
+    pub fn kill_terminal(&self, id: TerminalId) -> IdeResult<()> {
+        ide_host::ops::term::kill(&self.host, id)
     }
 
     pub async fn start_search(

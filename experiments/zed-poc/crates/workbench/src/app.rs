@@ -20,6 +20,7 @@ use crate::host::NativeHost;
 use crate::lsp::DocumentLsp;
 use crate::project::{ProjectTree, Toggle};
 use crate::semantics::OpenIdeaSemanticsProvider;
+use crate::terminal_pane::TerminalPane;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{Theme, ThemeMode};
 
@@ -28,6 +29,12 @@ enum SidebarMode {
     Project,
     Search,
     Git,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BottomMode {
+    Run,
+    Terminal,
 }
 
 fn refresh_window(handle: Option<gpui::WindowHandle<Workbench>>, cx: &mut gpui::AsyncApp) {
@@ -92,6 +99,11 @@ pub struct Workbench {
     git_message_input: Entity<TextInput>,
     git_status_message: gpui::SharedString,
     _git_subscription: Subscription,
+    bottom_mode: BottomMode,
+    terminal: Option<Entity<TerminalPane>>,
+    terminal_starting: bool,
+    terminal_status: gpui::SharedString,
+    terminal_output: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 }
 
 impl Workbench {
@@ -191,6 +203,15 @@ impl Workbench {
             git_message_input,
             git_status_message: "Loading Git status…".into(),
             _git_subscription: git_subscription,
+            bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
+                BottomMode::Terminal
+            } else {
+                BottomMode::Run
+            },
+            terminal: None,
+            terminal_starting: false,
+            terminal_status: "Click TERMINAL to start a shell".into(),
+            terminal_output: None,
         };
         if let Some(document) = document {
             app.insert_document(document, &registry_for_initial, cx);
@@ -576,6 +597,123 @@ impl Workbench {
             self.run_status = "Stopping…".into();
         }
         cx.notify();
+    }
+
+    fn ensure_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal.is_some() || self.terminal_starting {
+            return;
+        }
+        self.start_terminal(window, cx);
+    }
+
+    fn start_terminal(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal.is_some() || self.terminal_starting {
+            return;
+        }
+        self.terminal_starting = true;
+        self.terminal_status = "Starting shell…".into();
+        self.bottom_mode = BottomMode::Terminal;
+        let host = self.host.clone();
+        let root = self.root.clone();
+        let theme = self.theme;
+        let window_handle = self.window_handle;
+        let options = ide_terminal::TerminalOptions {
+            cwd: ide_core::IpcPath(root),
+            shell: None,
+            args: Vec::new(),
+            env: Default::default(),
+            cols: crate::terminal_pane::COLUMNS as u16,
+            rows: crate::terminal_pane::ROWS as u16,
+            shell_integration: true,
+        };
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        cx.spawn(async move |this, cx| {
+            let result = host.spawn_terminal(options, output_tx).await;
+            this.update_in(cx, |app, window, cx| {
+                match result {
+                    Ok(info) => {
+                        eprintln!(
+                            "WORKBENCH_TERMINAL_SPAWN id={} title={} pid={:?}",
+                            info.id, info.title, info.pid
+                        );
+                        let terminal_id = info.id;
+                        let terminal = cx.new(|cx| {
+                            TerminalPane::new(
+                                host.clone(),
+                                info.id,
+                                info.title.clone().into(),
+                                info.pid,
+                                theme,
+                                window,
+                                cx,
+                            )
+                        });
+                        app.terminal = Some(terminal.clone());
+                        app.terminal_status = format!("{} · pid {:?}", info.title, info.pid).into();
+                        app.terminal_starting = false;
+                        app.bottom_mode = BottomMode::Terminal;
+                        cx.spawn(async move |this, cx| {
+                            while let Some(chunk) = output_rx.recv().await {
+                                let handle = this
+                                    .update(cx, |app, cx| {
+                                        if let Some(terminal) = &app.terminal {
+                                            terminal.update(cx, |pane, cx| pane.feed(&chunk, cx));
+                                        }
+                                        cx.notify();
+                                        app.window_handle
+                                    })
+                                    .ok()
+                                    .flatten();
+                                refresh_window(handle, cx);
+                            }
+                            let handle = this
+                                .update(cx, |app, cx| {
+                                    if let Some(terminal) = &app.terminal {
+                                        terminal.update(cx, |pane, cx| pane.mark_exited(None, cx));
+                                    }
+                                    cx.notify();
+                                    app.window_handle
+                                })
+                                .ok()
+                                .flatten();
+                            refresh_window(handle, cx);
+                        })
+                        .detach();
+                        if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
+                            let command = "printf 'WORKBENCH_TERMINAL_OK\\n'\r";
+                            if let Err(error) = host.write_terminal(terminal_id, command) {
+                                eprintln!("WORKBENCH_TERMINAL_WRITE_ERROR {}", error.message);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("WORKBENCH_TERMINAL_ERROR {}", error.message);
+                        app.terminal_starting = false;
+                        app.terminal_status = format!("Terminal failed: {}", error.message).into();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+            refresh_window(window_handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn terminal_text(&self, cx: &gpui::App) -> Option<String> {
+        self.terminal
+            .as_ref()
+            .map(|terminal| terminal.read(cx).text(cx))
+    }
+
+    pub fn terminal_status(&self) -> &gpui::SharedString {
+        &self.terminal_status
+    }
+
+    pub fn smoke_start_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.bottom_mode = BottomMode::Terminal;
+        self.start_terminal(window, cx);
     }
 
     fn start_search(&mut self, pattern: String, cx: &mut Context<Self>) {
@@ -1000,6 +1138,17 @@ impl Workbench {
                     self.run_status = format!("Exited with {:?}", code).into();
                 }
             }
+            IdeEvent::TerminalExited { terminal, code } => {
+                if let Some(pane) = &self.terminal
+                    && pane.read(cx).id() == terminal
+                {
+                    pane.update(cx, |pane, cx| pane.mark_exited(code, cx));
+                    self.terminal_status = match code {
+                        Some(code) => format!("Terminal exited with {code}").into(),
+                        None => "Terminal closed".into(),
+                    };
+                }
+            }
             IdeEvent::FsChanged {
                 modified, created, ..
             } => {
@@ -1371,11 +1520,12 @@ impl Workbench {
             .into_any_element()
     }
 
-    fn render_run_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_bottom_panel(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = self.theme;
-        if self.run_configs.is_empty() {
-            return div().into_any_element();
-        }
         let running = self.running_run.is_some();
         let mut configs = Vec::new();
         for (index, config) in self.run_configs.iter().take(6).enumerate() {
@@ -1386,7 +1536,7 @@ impl Workbench {
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .text_size(px(11.))
+                    .text_size(px(10.5))
                     .text_color(if selected { theme.text } else { theme.muted })
                     .bg(if selected {
                         theme.panel_alt
@@ -1426,8 +1576,44 @@ impl Workbench {
         } else {
             output = output.children(lines.into_iter().map(|line| div().child(line)));
         }
+
+        let run_body = div().size_full().flex().flex_col().child(output);
+        let terminal_body = match &self.terminal {
+            Some(terminal) => div().size_full().child(terminal.clone()).into_any_element(),
+            None => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_size(px(11.))
+                .text_color(theme.faint)
+                .child(self.terminal_status.clone())
+                .child(
+                    div()
+                        .id("start-terminal")
+                        .px_3()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(theme.accent_muted)
+                        .text_color(theme.text)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.ensure_terminal(window, cx);
+                        }))
+                        .child("Start shell"),
+                )
+                .into_any_element(),
+        };
+        let body = match self.bottom_mode {
+            BottomMode::Run => run_body.into_any_element(),
+            BottomMode::Terminal => terminal_body,
+        };
+        let run_tab_active = self.bottom_mode == BottomMode::Run;
+        let terminal_tab_active = self.bottom_mode == BottomMode::Terminal;
         div()
-            .h(px(180.))
+            .h(px(240.))
             .flex_none()
             .flex()
             .flex_col()
@@ -1436,7 +1622,7 @@ impl Workbench {
             .border_color(theme.border)
             .child(
                 div()
-                    .h(px(32.))
+                    .h(px(30.))
                     .px_2()
                     .flex()
                     .items_center()
@@ -1445,36 +1631,80 @@ impl Workbench {
                     .border_color(theme.border)
                     .child(
                         div()
-                            .px_2()
-                            .text_size(px(11.))
-                            .text_color(theme.muted)
-                            .child("RUN"),
-                    )
-                    .children(configs)
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("start-run")
+                            .id("bottom-run")
                             .px_2()
                             .py_1()
                             .rounded_sm()
-                            .text_size(px(11.))
-                            .text_color(theme.text)
-                            .bg(theme.accent_muted)
+                            .text_size(px(10.5))
+                            .text_color(if run_tab_active {
+                                theme.text
+                            } else {
+                                theme.muted
+                            })
+                            .bg(if run_tab_active {
+                                theme.panel_alt
+                            } else {
+                                theme.panel
+                            })
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.start_selected_run(cx);
+                                this.bottom_mode = BottomMode::Run;
+                                cx.notify();
                             }))
-                            .child("Run"),
+                            .child("RUN"),
                     )
-                    .when(running, |row| {
+                    .child(
+                        div()
+                            .id("bottom-terminal")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.5))
+                            .text_color(if terminal_tab_active {
+                                theme.text
+                            } else {
+                                theme.muted
+                            })
+                            .bg(if terminal_tab_active {
+                                theme.panel_alt
+                            } else {
+                                theme.panel
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.bottom_mode = BottomMode::Terminal;
+                                this.ensure_terminal(window, cx);
+                                cx.notify();
+                            }))
+                            .child("TERMINAL"),
+                    )
+                    .children(if run_tab_active { configs } else { Vec::new() })
+                    .child(div().flex_1())
+                    .when(run_tab_active, |row| {
+                        row.child(
+                            div()
+                                .id("start-run")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.text)
+                                .bg(theme.accent_muted)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.start_selected_run(cx);
+                                }))
+                                .child("Run"),
+                        )
+                    })
+                    .when(run_tab_active && running, |row| {
                         row.child(
                             div()
                                 .id("stop-run")
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .text_size(px(11.))
+                                .text_size(px(10.5))
                                 .text_color(theme.error)
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1486,12 +1716,16 @@ impl Workbench {
                     .child(
                         div()
                             .px_2()
-                            .text_size(px(11.))
+                            .text_size(px(10.5))
                             .text_color(theme.muted)
-                            .child(self.run_status.clone()),
+                            .child(if run_tab_active {
+                                self.run_status.clone()
+                            } else {
+                                self.terminal_status.clone()
+                            }),
                     ),
             )
-            .child(output)
+            .child(div().flex_1().min_h(px(0.)).child(body))
             .into_any_element()
     }
 
@@ -1554,7 +1788,7 @@ impl Render for Workbench {
             SidebarMode::Git => git,
         };
         let tabs = self.render_tabs(cx).into_any_element();
-        let run_panel = self.render_run_panel(cx);
+        let run_panel = self.render_bottom_panel(window, cx);
         div()
             .size_full()
             .flex()
