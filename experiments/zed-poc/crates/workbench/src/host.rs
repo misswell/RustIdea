@@ -206,6 +206,19 @@ pub struct NativeHost {
     plugin_host: OnceLock<Result<Arc<ide_host::plugins::PluginHost>, String>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct StructuralReplacement {
+    pub path: PathBuf,
+    pub edits: Vec<ide_core::TextEdit>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StructuralApplySummary {
+    pub files: u32,
+    pub replacements: u32,
+    pub failed: u32,
+}
+
 impl NativeHost {
     pub fn config_dir(&self) -> PathBuf {
         self.host.config_dir.clone()
@@ -1448,6 +1461,69 @@ impl NativeHost {
                 on_event,
             )
             .await
+        })
+        .await
+    }
+
+    pub async fn apply_structural_replacements(
+        &self,
+        replacements: Vec<StructuralReplacement>,
+    ) -> IdeResult<StructuralApplySummary> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            let project = host.project(MAIN_WINDOW)?;
+            let documents = project.documents.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut summary = StructuralApplySummary::default();
+                for replacement in replacements {
+                    let mut edits = replacement.edits;
+                    if edits.is_empty() {
+                        continue;
+                    }
+                    edits.sort_by_key(|left| std::cmp::Reverse(left.range.start));
+                    let (doc, transient) = match documents.by_path(&replacement.path) {
+                        Some(doc) => (doc, false),
+                        None => {
+                            let Ok(info) = documents.open(&replacement.path) else {
+                                summary.failed += 1;
+                                continue;
+                            };
+                            (info.id, true)
+                        }
+                    };
+                    match documents.apply_edits(doc, &edits) {
+                        Ok(count) => {
+                            summary.files += 1;
+                            summary.replacements += count;
+                            if transient {
+                                if let Err(error) = documents.save(doc) {
+                                    summary.failed += 1;
+                                    tracing::debug!(
+                                        "structural replacement save {}: {}",
+                                        replacement.path.display(),
+                                        error.message
+                                    );
+                                }
+                                documents.close(doc);
+                            }
+                        }
+                        Err(error) => {
+                            summary.failed += 1;
+                            tracing::debug!(
+                                "structural replacement {}: {}",
+                                replacement.path.display(),
+                                error.message
+                            );
+                            if transient {
+                                documents.close(doc);
+                            }
+                        }
+                    }
+                }
+                Ok(summary)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
         })
         .await
     }

@@ -446,7 +446,7 @@ Panel coverage at this commit:
 | Scratch | list/create/edit scratch files in the app data directory | local workspace + `ops::doc` |
 | Recent Files | per-project MRU list persisted in app config | local store |
 | Save a Copy | writes the active unsaved buffer text to a chosen path | `save_file_copy` |
-| Analysis | Locate Duplicates + structural search + Inspect Code | `ops::analysis` duplicates/structural/inspect |
+| Analysis | Locate Duplicates + structural search + replace + Inspect Code | `ops::analysis` duplicates/structural/inspect, `Documents` edits |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
@@ -747,6 +747,17 @@ structural_matches=2 structural_status=2 matches in 2 files · 1 ms
 structural_first="src/main/java/com/example/DupA.java:34"
 ```
 
+Structural replace smoke on two Java files (pattern `return $A + $B;`,
+replacement `return 0;`):
+
+```text
+structural_matches=0 structural_status=0 matches in 0 files · 0 ms
+structural_apply=Applied 2 replacements in 2 files
+```
+
+Both files contained `return 0;` after the run and the re-search returned zero
+matches, proving the edits went through OpenIDEA `Documents` and were saved.
+
 Inspect Code smoke on a project with no language-server files (proves the scan
 event/summary path, not a diagnostic result):
 
@@ -816,9 +827,11 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent:
   Scratch panel lists and creates files, but the language chooser and template
   shortcuts are missing. Save As currently saves a copy: the OpenIDEA document
   layer only supports re-keying untitled buffers, not renaming an existing file.
-  Analysis runs Locate Duplicates, structural search and Inspect Code, but
-  applying structural replacements is missing and a Java diagnostic-producing
-  Inspect Code run is not yet smoke-verified. The Terminal now has a real VT
+  Analysis runs Locate Duplicates, structural search, structural replacement
+  and Inspect Code. Replace uses the OpenIDEA document layer and saves files
+  that were opened transiently; edits in already-open buffers stay dirty until
+  the user saves. A Java diagnostic-producing Inspect Code run is not yet
+  smoke-verified. The Terminal now has a real VT
   screen
   and OpenIDEA PTY, but its mouse selection, hyperlinks, IME composition and
   resize path are not yet verified or complete (the IME input handler is

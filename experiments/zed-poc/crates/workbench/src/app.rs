@@ -764,6 +764,7 @@ pub struct Workbench {
     structural_language_input: Entity<TextInput>,
     structural_files: Vec<ide_analysis::StructuralFile>,
     structural_status: gpui::SharedString,
+    structural_apply_status: gpui::SharedString,
     structural_busy: bool,
     _structural_subscriptions: Vec<Subscription>,
     inspect_files: Vec<ide_host::ops::analysis::InspectedFile>,
@@ -1549,6 +1550,7 @@ impl Workbench {
             structural_language_input,
             structural_files: Vec::new(),
             structural_status: "Run a structural search to find syntax patterns".into(),
+            structural_apply_status: gpui::SharedString::default(),
             structural_busy: false,
             _structural_subscriptions: structural_subscriptions,
             inspect_files: Vec::new(),
@@ -5884,6 +5886,78 @@ impl Workbench {
         cx.notify();
     }
 
+    fn apply_structural_replacements(&mut self, cx: &mut Context<Self>) {
+        if self.structural_busy {
+            return;
+        }
+        let mut grouped: BTreeMap<PathBuf, Vec<ide_core::TextEdit>> = BTreeMap::new();
+        for file in &self.structural_files {
+            for matched in &file.matches {
+                let Some(replacement) = matched.replacement.clone() else {
+                    continue;
+                };
+                grouped
+                    .entry(file.path.0.clone())
+                    .or_default()
+                    .push(ide_core::TextEdit {
+                        range: matched.range,
+                        new_text: replacement,
+                    });
+            }
+        }
+        if grouped.is_empty() {
+            self.structural_status =
+                "No replacement template is set for the current matches".into();
+            self.structural_apply_status = self.structural_status.clone();
+            cx.notify();
+            return;
+        }
+        let replacements = grouped
+            .into_iter()
+            .map(|(path, edits)| crate::host::StructuralReplacement { path, edits })
+            .collect::<Vec<_>>();
+        let host = self.host.clone();
+        self.structural_busy = true;
+        self.structural_status = "Applying structural replacements…".into();
+        self.structural_apply_status = "Applying structural replacements…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.apply_structural_replacements(replacements).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.structural_busy = false;
+                    match result {
+                        Ok(summary) => {
+                            app.structural_apply_status = format!(
+                                "Applied {} replacements in {} files{}",
+                                summary.replacements,
+                                summary.files,
+                                if summary.failed > 0 {
+                                    format!(" · {} failed", summary.failed)
+                                } else {
+                                    String::new()
+                                }
+                            )
+                            .into();
+                            app.structural_status = app.structural_apply_status.clone();
+                            app.run_structural_search(cx);
+                        }
+                        Err(error) => {
+                            app.structural_apply_status =
+                                format!("Structural replace failed: {}", error.message).into();
+                            app.structural_status = app.structural_apply_status.clone();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn run_inspect_code(&mut self, cx: &mut Context<Self>) {
         if self.inspect_busy {
             return;
@@ -7268,6 +7342,16 @@ impl Workbench {
         self.run_structural_search(cx);
     }
 
+    pub fn smoke_structural_replacement(&mut self, replacement: String, cx: &mut Context<Self>) {
+        self.structural_replacement_input.update(cx, |input, cx| {
+            input.set_content(replacement, cx);
+        });
+    }
+
+    pub fn smoke_apply_structural_replacements(&mut self, cx: &mut Context<Self>) {
+        self.apply_structural_replacements(cx);
+    }
+
     pub fn structural_match_count(&self) -> usize {
         self.structural_files
             .iter()
@@ -7277,6 +7361,10 @@ impl Workbench {
 
     pub fn structural_status_text(&self) -> String {
         self.structural_status.to_string()
+    }
+
+    pub fn structural_apply_status_text(&self) -> String {
+        self.structural_apply_status.to_string()
     }
 
     pub fn structural_first(&self) -> String {
@@ -12823,6 +12911,36 @@ impl Workbench {
                             } else {
                                 "Search"
                             }),
+                    )
+                    .when(
+                        self.structural_match_count() > 0
+                            && !self
+                                .structural_replacement_input
+                                .read(cx)
+                                .content()
+                                .trim()
+                                .is_empty(),
+                        |toolbar| {
+                            toolbar.child(
+                                div()
+                                    .id("structural-apply")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_size(px(9.))
+                                    .text_color(if self.structural_busy {
+                                        theme.faint
+                                    } else {
+                                        theme.text
+                                    })
+                                    .bg(theme.accent_muted)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.apply_structural_replacements(cx);
+                                    }))
+                                    .child("Apply Replacements"),
+                            )
+                        },
                     )
                     .child(div().flex_1())
                     .child(
