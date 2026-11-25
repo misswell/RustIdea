@@ -865,6 +865,73 @@ impl NativeHost {
         ide_host::ops::debug::debug_breakpoint_states(&self.host, MAIN_WINDOW, path)
     }
 
+    pub async fn debug_stack_trace(
+        &self,
+        session: ide_core::DebugSessionId,
+        thread_id: i64,
+    ) -> IdeResult<Vec<ide_dap::StackFrame>> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_stack_trace(&host, MAIN_WINDOW, session, thread_id).await
+        })
+        .await
+    }
+
+    pub async fn debug_scopes(
+        &self,
+        session: ide_core::DebugSessionId,
+        frame_id: i64,
+    ) -> IdeResult<Vec<ide_dap::Scope>> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_scopes(&host, MAIN_WINDOW, session, frame_id).await
+        })
+        .await
+    }
+
+    pub async fn debug_variables(
+        &self,
+        session: ide_core::DebugSessionId,
+        reference: i64,
+    ) -> IdeResult<Vec<ide_dap::Variable>> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_variables(&host, MAIN_WINDOW, session, reference).await
+        })
+        .await
+    }
+
+    pub async fn debug_resume(
+        &self,
+        session: ide_core::DebugSessionId,
+        thread_id: i64,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_resume(&host, MAIN_WINDOW, session, thread_id).await
+        })
+        .await
+    }
+
+    pub async fn debug_pause(
+        &self,
+        session: ide_core::DebugSessionId,
+        thread_id: i64,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_pause(&host, MAIN_WINDOW, session, thread_id).await
+        })
+        .await
+    }
+
+    pub async fn debug_step(
+        &self,
+        session: ide_core::DebugSessionId,
+        thread_id: i64,
+        kind: ide_dap::StepKind,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_step(&host, MAIN_WINDOW, session, thread_id, kind).await
+        })
+        .await
+    }
+
     pub async fn spawn_ssh_terminal(
         &self,
         id: String,

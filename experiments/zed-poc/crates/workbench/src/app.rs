@@ -529,6 +529,12 @@ pub struct Workbench {
     debug_console: String,
     debug_breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
     debug_breakpoint_states: Vec<ide_dap::BreakpointState>,
+    debug_active_session: Option<ide_core::DebugSessionId>,
+    debug_thread_id: Option<i64>,
+    debug_frames: Vec<ide_dap::StackFrame>,
+    debug_frame_selected: usize,
+    debug_scopes: Vec<ide_dap::Scope>,
+    debug_variables: Vec<ide_dap::Variable>,
     debug_status: gpui::SharedString,
 }
 
@@ -955,6 +961,12 @@ impl Workbench {
             debug_console: String::new(),
             debug_breakpoints: BTreeMap::new(),
             debug_breakpoint_states: Vec::new(),
+            debug_active_session: None,
+            debug_thread_id: None,
+            debug_frames: Vec::new(),
+            debug_frame_selected: 0,
+            debug_scopes: Vec::new(),
+            debug_variables: Vec::new(),
             debug_status: "Select DEBUG to scan attachable processes".into(),
         };
         if let Some(document) = document {
@@ -2911,6 +2923,174 @@ impl Workbench {
         cx.notify();
     }
 
+    fn refresh_debug_stack(
+        &mut self,
+        session: ide_core::DebugSessionId,
+        thread_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let host = self.host.clone();
+        self.debug_active_session = Some(session);
+        self.debug_thread_id = Some(thread_id);
+        self.debug_status = "Loading stack frames…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.debug_stack_trace(session, thread_id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(frames) => {
+                            app.debug_frames = frames;
+                            app.debug_frame_selected = 0;
+                            if !app.debug_frames.is_empty() {
+                                app.select_debug_frame(0, cx);
+                            }
+                        }
+                        Err(error) => {
+                            app.debug_status =
+                                format!("Stack trace failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn select_debug_frame(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(frame) = self.debug_frames.get(index).cloned() else {
+            return;
+        };
+        let Some(session) = self.debug_active_session else {
+            return;
+        };
+        self.debug_frame_selected = index;
+        let host = self.host.clone();
+        self.debug_scopes.clear();
+        self.debug_variables.clear();
+        cx.spawn(async move |this, cx| {
+            let result = host.debug_scopes(session, frame.id).await;
+            let variables = match result {
+                Ok(scopes) => {
+                    let mut variables = Vec::new();
+                    for scope in &scopes {
+                        match host
+                            .debug_variables(session, scope.variables_reference)
+                            .await
+                        {
+                            Ok(mut values) => variables.append(&mut values),
+                            Err(error) => {
+                                eprintln!("WORKBENCH_DEBUG_VARIABLES_ERROR {}", error.message);
+                            }
+                        }
+                    }
+                    Ok((scopes, variables))
+                }
+                Err(error) => Err(error),
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    match variables {
+                        Ok((scopes, variables)) => {
+                            app.debug_scopes = scopes;
+                            app.debug_variables = variables;
+                        }
+                        Err(error) => {
+                            app.debug_status = format!("Scopes failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn debug_resume(&mut self, cx: &mut Context<Self>) {
+        let (Some(session), Some(thread_id)) = (self.debug_active_session, self.debug_thread_id)
+        else {
+            return;
+        };
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.debug_resume(session, thread_id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(()) => {
+                            app.debug_status = "Resumed".into();
+                            app.debug_frames.clear();
+                            app.debug_scopes.clear();
+                            app.debug_variables.clear();
+                        }
+                        Err(error) => {
+                            app.debug_status = format!("Resume failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+    }
+
+    fn debug_pause(&mut self, cx: &mut Context<Self>) {
+        let (Some(session), Some(thread_id)) = (self.debug_active_session, self.debug_thread_id)
+        else {
+            return;
+        };
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.debug_pause(session, thread_id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    if let Err(error) = result {
+                        app.debug_status = format!("Pause failed: {}", error.message).into();
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+    }
+
+    fn debug_step(&mut self, kind: ide_dap::StepKind, cx: &mut Context<Self>) {
+        let (Some(session), Some(thread_id)) = (self.debug_active_session, self.debug_thread_id)
+        else {
+            return;
+        };
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.debug_step(session, thread_id, kind).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    if let Err(error) = result {
+                        app.debug_status = format!("Step failed: {}", error.message).into();
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+    }
+
     fn goto_position(
         &mut self,
         doc: DocId,
@@ -4514,11 +4694,14 @@ impl Workbench {
                     };
                 }
             }
-            IdeEvent::Debug { event, .. } => match event {
+            IdeEvent::Debug { session, event } => match event {
                 ide_core::event::DebugEvent::Started { name, adapter, .. } => {
                     self.debug_console
                         .push_str(&format!("== {name} ({adapter}) ==\n"));
                     self.debug_status = format!("{name} started").into();
+                    if self.debug_active_session.is_none() {
+                        self.debug_active_session = Some(session);
+                    }
                     self.debug_sessions = self.host.debug_sessions().unwrap_or_default();
                 }
                 ide_core::event::DebugEvent::Output { output, category } => {
@@ -4531,14 +4714,25 @@ impl Workbench {
                         }
                     }
                 }
-                ide_core::event::DebugEvent::Stopped { reason, .. } => {
+                ide_core::event::DebugEvent::Stopped {
+                    thread_id, reason, ..
+                } => {
                     self.debug_status = format!("Stopped: {reason}").into();
+                    self.refresh_debug_stack(session, thread_id, cx);
                 }
                 ide_core::event::DebugEvent::Continued { .. } => {
                     self.debug_status = "Running".into();
+                    self.debug_frames.clear();
+                    self.debug_scopes.clear();
+                    self.debug_variables.clear();
                 }
                 ide_core::event::DebugEvent::Terminated => {
                     self.debug_status = "Terminated".into();
+                    self.debug_active_session = None;
+                    self.debug_thread_id = None;
+                    self.debug_frames.clear();
+                    self.debug_scopes.clear();
+                    self.debug_variables.clear();
                     self.debug_sessions = self.host.debug_sessions().unwrap_or_default();
                 }
                 ide_core::event::DebugEvent::Exited { code } => {
@@ -7719,6 +7913,67 @@ impl Workbench {
                     }),
             );
         }
+        let mut frame_rows = div()
+            .id("debug-frames")
+            .flex_none()
+            .max_h(px(70.))
+            .overflow_y_scroll()
+            .px_2()
+            .flex()
+            .flex_col();
+        for (index, frame) in self.debug_frames.iter().take(80).enumerate() {
+            let selected = index == self.debug_frame_selected;
+            let location = frame
+                .path
+                .as_ref()
+                .map(|path| format!("{}:{}", path.0.display(), frame.line + 1))
+                .unwrap_or_default();
+            frame_rows = frame_rows.child(
+                div()
+                    .id(("debug-frame", index))
+                    .h(px(18.))
+                    .px_1()
+                    .text_size(px(9.5))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.select_debug_frame(index, cx);
+                    }))
+                    .child(format!("{} · {}", frame.name, location)),
+            );
+        }
+        let mut variable_rows = div()
+            .id("debug-variables")
+            .flex_none()
+            .max_h(px(90.))
+            .overflow_y_scroll()
+            .px_2()
+            .flex()
+            .flex_col();
+        for (index, variable) in self.debug_variables.iter().take(100).enumerate() {
+            variable_rows = variable_rows.child(
+                div()
+                    .id(("debug-variable", index))
+                    .min_h(px(18.))
+                    .text_size(px(9.5))
+                    .text_color(theme.muted)
+                    .child(format!(
+                        "{} = {}{}",
+                        variable.name,
+                        variable.value,
+                        variable
+                            .type_name
+                            .as_ref()
+                            .map(|ty| format!(" : {ty}"))
+                            .unwrap_or_default()
+                    )),
+            );
+        }
         let mut debug_lines: Vec<String> = self.debug_console.lines().map(str::to_owned).collect();
         if debug_lines.len() > 300 {
             debug_lines.drain(..debug_lines.len() - 300);
@@ -7749,6 +8004,8 @@ impl Workbench {
             .child(debug_rows)
             .child(session_rows)
             .child(breakpoint_rows)
+            .child(frame_rows)
+            .child(variable_rows)
             .child(debug_console)
             .into_any_element();
         let body = match self.bottom_mode {
@@ -7975,6 +8232,48 @@ impl Workbench {
                                     this.toggle_breakpoint_at_cursor(cx);
                                 }))
                                 .child("Breakpoint"),
+                        )
+                        .child(
+                            div()
+                                .id("debug-resume")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.text)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.debug_resume(cx);
+                                }))
+                                .child("Resume"),
+                        )
+                        .child(
+                            div()
+                                .id("debug-pause")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.muted)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.debug_pause(cx);
+                                }))
+                                .child("Pause"),
+                        )
+                        .child(
+                            div()
+                                .id("debug-step-over")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.text)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.debug_step(ide_dap::StepKind::Over, cx);
+                                }))
+                                .child("Step"),
                         )
                         .child(
                             div()
