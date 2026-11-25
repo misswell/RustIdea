@@ -847,6 +847,24 @@ impl NativeHost {
         .await
     }
 
+    pub async fn debug_set_breakpoints(
+        &self,
+        path: PathBuf,
+        breakpoints: Vec<ide_dap::Breakpoint>,
+    ) -> IdeResult<Vec<ide_dap::BreakpointState>> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_set_breakpoints(&host, MAIN_WINDOW, path, breakpoints).await
+        })
+        .await
+    }
+
+    pub fn debug_breakpoint_states(
+        &self,
+        path: PathBuf,
+    ) -> IdeResult<Vec<ide_dap::BreakpointState>> {
+        ide_host::ops::debug::debug_breakpoint_states(&self.host, MAIN_WINDOW, path)
+    }
+
     pub async fn spawn_ssh_terminal(
         &self,
         id: String,

@@ -393,8 +393,10 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - Debug scans `ops::debug::debug_attachable_processes` and lists debug-capable
   run configurations, starts attach sessions for Node/Python/.NET/Go/native
   processes through `ops::debug::debug_start`, lists/stop sessions and streams
-  `DebugEvent::Output` into a console; Java/Unity attach configs, breakpoints
-  and variables/stack/frames are still pending. No attachable process was
+  `DebugEvent::Output` into a console; a Breakpoint action toggles the line at
+  the active editor cursor through `debug_set_breakpoints` and shows returned
+  verification states. Java/Unity attach configs, conditions/logpoints and
+  variables/stack/frames are still pending. No attachable process was
   visible to the scanner in the smoke environment;
 - Notebook opens the active `.ipynb` through `ops::notebook::open`, renders
   code/markdown cells and stored outputs, and runs all code cells through
@@ -433,7 +435,7 @@ Panel coverage at this commit:
 | Tools | list/install | `ops::tools` |
 | Plugins | installed list + marketplace/preview/install + optional-capability consent | `PluginHost` |
 | Settings | filter + boolean toggles + JSON value editor | `ops::project::settings` / `set_settings` |
-| Debug | attachable browse + attach/session list/console (runtime unverified) | `ops::debug` |
+| Debug | attachable browse + attach/session console + line breakpoints (session runtime unverified) | `ops::debug` |
 | Terminal | working VT screen | Zed `terminal` + `ops::term` |
 | Run | working | `ops::run` |
 | Build | working | `ops::build` |
@@ -528,6 +530,12 @@ Keymap smoke:
 WORKBENCH_KEYMAP bindings=603
 ```
 
+Breakpoint smoke:
+
+```text
+debug_status=Breakpoint toggled at line 1 breakpoints=1
+```
+
 Go-to-symbol smoke:
 
 ```text
@@ -614,7 +622,7 @@ documents/project/sync/host: 24 passed; 0 failed
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
 - Plugin live UI contributions, full debugger session UI (variables/stack/
-  breakpoints) and Java/Unity attach, notebook rich-output editing, live
+  conditioned breakpoints) and Java/Unity attach, notebook rich-output editing, live
   remote-write verification (UI path exists), structured question/form widgets
   and live subagent/form verification
   are not yet integrated. MCP add/update/remove is wired for stdio servers; HTTP/SSE editing

@@ -527,6 +527,8 @@ pub struct Workbench {
     debug_sessions: Vec<ide_dap::SessionInfo>,
     debug_session_selected: usize,
     debug_console: String,
+    debug_breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
+    debug_breakpoint_states: Vec<ide_dap::BreakpointState>,
     debug_status: gpui::SharedString,
 }
 
@@ -951,6 +953,8 @@ impl Workbench {
             debug_sessions: Vec::new(),
             debug_session_selected: 0,
             debug_console: String::new(),
+            debug_breakpoints: BTreeMap::new(),
+            debug_breakpoint_states: Vec::new(),
             debug_status: "Select DEBUG to scan attachable processes".into(),
         };
         if let Some(document) = document {
@@ -2839,6 +2843,74 @@ impl Workbench {
         cx.notify();
     }
 
+    fn toggle_breakpoint_at_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.active else {
+            self.debug_status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let Some(path) = self
+            .documents
+            .get(&doc)
+            .map(|document| document.path.clone())
+        else {
+            self.debug_status = "The active file is not open".into();
+            cx.notify();
+            return;
+        };
+        let Some(editor) = self.editors.get(&(doc, false)).cloned() else {
+            self.debug_status = "The active file has no editor".into();
+            cx.notify();
+            return;
+        };
+        let line = editor.update(cx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            editor.selections.newest_adjusted(&snapshot).head().row
+        });
+        let lines = self.debug_breakpoints.entry(path.clone()).or_default();
+        if !lines.insert(line) {
+            lines.remove(&line);
+        }
+        let breakpoints: Vec<ide_dap::Breakpoint> = lines
+            .iter()
+            .map(|line| ide_dap::Breakpoint {
+                line: *line,
+                condition: None,
+                hit_condition: None,
+                log_message: None,
+                enabled: true,
+            })
+            .collect();
+        let host = self.host.clone();
+        let path_for_call = path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .debug_set_breakpoints(path_for_call.clone(), breakpoints)
+                .await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(states) => {
+                            app.debug_breakpoint_states = states;
+                            app.debug_status =
+                                format!("Breakpoint toggled at line {}", line + 1).into();
+                        }
+                        Err(error) => {
+                            app.debug_status =
+                                format!("Breakpoint failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn goto_position(
         &mut self,
         doc: DocId,
@@ -4238,6 +4310,15 @@ impl Workbench {
 
     pub fn debug_status_text(&self) -> &gpui::SharedString {
         &self.debug_status
+    }
+
+    pub fn smoke_breakpoint(&mut self, cx: &mut Context<Self>) {
+        self.bottom_mode = BottomMode::Debug;
+        self.toggle_breakpoint_at_cursor(cx);
+    }
+
+    pub fn breakpoint_count(&self) -> usize {
+        self.debug_breakpoints.values().map(BTreeSet::len).sum()
     }
 
     pub fn debug_attachable_count(&self) -> usize {
@@ -7610,6 +7691,34 @@ impl Workbench {
                     .child(format!("{} · {}", session.name, session.adapter)),
             );
         }
+        let mut breakpoint_rows = div()
+            .id("debug-breakpoints")
+            .flex_none()
+            .max_h(px(60.))
+            .overflow_y_scroll()
+            .px_2()
+            .flex()
+            .flex_col();
+        for (index, state) in self.debug_breakpoint_states.iter().take(80).enumerate() {
+            breakpoint_rows = breakpoint_rows.child(
+                div()
+                    .id(("debug-breakpoint", index))
+                    .h(px(18.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(9.5))
+                    .text_color(if state.verified {
+                        theme.accent
+                    } else {
+                        theme.faint
+                    })
+                    .child(format!("● line {}", state.line + 1))
+                    .when_some(state.message.clone(), |row, message| {
+                        row.child(div().text_color(theme.error).child(message))
+                    }),
+            );
+        }
         let mut debug_lines: Vec<String> = self.debug_console.lines().map(str::to_owned).collect();
         if debug_lines.len() > 300 {
             debug_lines.drain(..debug_lines.len() - 300);
@@ -7639,6 +7748,7 @@ impl Workbench {
             .flex_col()
             .child(debug_rows)
             .child(session_rows)
+            .child(breakpoint_rows)
             .child(debug_console)
             .into_any_element();
         let body = match self.bottom_mode {
@@ -7851,6 +7961,20 @@ impl Workbench {
                                     this.refresh_debug(cx);
                                 }))
                                 .child("Refresh"),
+                        )
+                        .child(
+                            div()
+                                .id("debug-breakpoint-toggle")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.text)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.toggle_breakpoint_at_cursor(cx);
+                                }))
+                                .child("Breakpoint"),
                         )
                         .child(
                             div()
