@@ -45,6 +45,7 @@ enum SidebarMode {
 enum BottomMode {
     Run,
     Terminal,
+    Build,
 }
 
 fn refresh_window(handle: Option<gpui::WindowHandle<Workbench>>, cx: &mut gpui::AsyncApp) {
@@ -147,6 +148,10 @@ pub struct Workbench {
     tools: Vec<ide_tools::ToolInfo>,
     tools_selected: usize,
     tools_status: gpui::SharedString,
+    build_model: Option<ide_build::BuildModel>,
+    build_status: gpui::SharedString,
+    build_output: String,
+    build_running: bool,
 }
 
 impl Workbench {
@@ -278,6 +283,10 @@ impl Workbench {
             tools: Vec::new(),
             tools_selected: 0,
             tools_status: "Select TOOLS to load tool status".into(),
+            build_model: None,
+            build_status: "Builds have not been loaded".into(),
+            build_output: String::new(),
+            build_running: false,
         };
         if let Some(document) = document {
             app.insert_document(document, &registry_for_initial, cx);
@@ -813,6 +822,126 @@ impl Workbench {
                         }
                     }
                     app.refresh_tools(cx);
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_build(&mut self, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        self.build_status = "Loading build model…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.build_model().await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(model) => {
+                            let summary = match (&model.maven, model.gradle.len()) {
+                                (Some(_), 0) => "Maven build model".to_string(),
+                                (None, 0) => "No Maven or Gradle build".to_string(),
+                                (None, gradle) => format!("{gradle} Gradle builds"),
+                                (Some(_), gradle) => format!("Maven + {gradle} Gradle builds"),
+                            };
+                            app.build_status = summary.into();
+                            app.build_model = Some(model);
+                        }
+                        Err(error) => {
+                            app.build_model = None;
+                            app.build_status =
+                                format!("Build model failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn run_build(&mut self, kind: ide_build::compile::BuildKind, cx: &mut Context<Self>) {
+        if self.build_running {
+            return;
+        }
+        self.build_running = true;
+        self.build_status = match kind {
+            ide_build::compile::BuildKind::Build => "Building…",
+            ide_build::compile::BuildKind::Rebuild => "Rebuilding…",
+            ide_build::compile::BuildKind::Artifacts => "Building artifacts…",
+        }
+        .into();
+        self.build_output.clear();
+        let host = self.host.clone();
+        let (output_tx, mut output_rx) =
+            tokio::sync::mpsc::unbounded_channel::<ide_build::compile::BuildEvent>();
+        cx.spawn(async move |this, cx| {
+            let feed_this = this.clone();
+            let feed = cx.spawn(async move |cx| {
+                while let Some(event) = output_rx.recv().await {
+                    let handle = feed_this
+                        .update(cx, |app, cx| {
+                            app.build_running = true;
+                            match event {
+                                ide_build::compile::BuildEvent::Started { title, .. } => {
+                                    app.build_output.push_str(&format!("== {title} ==\n"));
+                                }
+                                ide_build::compile::BuildEvent::Step { command, .. } => {
+                                    app.build_output.push_str(&format!("$ {command}\n"));
+                                }
+                                ide_build::compile::BuildEvent::Output { text, .. } => {
+                                    app.build_output.push_str(&text);
+                                }
+                                ide_build::compile::BuildEvent::Message { message } => {
+                                    app.build_output.push_str(&format!(
+                                        "{:?}: {}\n",
+                                        message.severity, message.text
+                                    ));
+                                }
+                                ide_build::compile::BuildEvent::Progress { message, .. } => {
+                                    app.build_status = message.into();
+                                }
+                            }
+                            if app.build_output.len() > 2_000_000 {
+                                let split = app.build_output.len().saturating_sub(1_800_000);
+                                app.build_output.drain(..split);
+                            }
+                            cx.notify();
+                            app.window_handle
+                        })
+                        .ok()
+                        .flatten();
+                    refresh_window(handle, cx);
+                }
+            });
+            let result = host.build_run(kind, output_tx).await;
+            feed.await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.build_running = false;
+                    match result {
+                        Ok(result) => {
+                            app.build_status = format!(
+                                "{} · {} errors · {} warnings · {:.1} s",
+                                result.title,
+                                result.errors,
+                                result.warnings,
+                                result.duration_ms / 1000.0
+                            )
+                            .into();
+                        }
+                        Err(error) => {
+                            app.build_status = format!("Build failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
                     app.window_handle
                 })
                 .ok()
@@ -1666,6 +1795,19 @@ impl Workbench {
 
     pub fn tools_count(&self) -> usize {
         self.tools.len()
+    }
+
+    pub fn smoke_build(&mut self, cx: &mut Context<Self>) {
+        self.bottom_mode = BottomMode::Build;
+        self.run_build(ide_build::compile::BuildKind::Build, cx);
+    }
+
+    pub fn build_status(&self) -> &gpui::SharedString {
+        &self.build_status
+    }
+
+    pub fn build_output(&self) -> &str {
+        &self.build_output
     }
 
     pub fn smoke_run_status(&self) -> String {
@@ -3057,12 +3199,44 @@ impl Workbench {
                 )
                 .into_any_element(),
         };
+        let mut build_lines: Vec<String> = self.build_output.lines().map(str::to_owned).collect();
+        if build_lines.len() > 400 {
+            build_lines.drain(..build_lines.len() - 400);
+        }
+        let build_body = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("build-output")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_scroll()
+                    .p_2()
+                    .font_family("Menlo")
+                    .text_size(px(10.5))
+                    .text_color(theme.text)
+                    .flex()
+                    .flex_col()
+                    .when(build_lines.is_empty(), |view| {
+                        view.child(
+                            div()
+                                .text_color(theme.faint)
+                                .child("Build output appears here."),
+                        )
+                    })
+                    .children(build_lines.into_iter().map(|line| div().child(line))),
+            )
+            .into_any_element();
         let body = match self.bottom_mode {
             BottomMode::Run => run_body.into_any_element(),
             BottomMode::Terminal => terminal_body,
+            BottomMode::Build => build_body,
         };
         let run_tab_active = self.bottom_mode == BottomMode::Run;
         let terminal_tab_active = self.bottom_mode == BottomMode::Terminal;
+        let build_tab_active = self.bottom_mode == BottomMode::Build;
         div()
             .h(px(240.))
             .flex_none()
@@ -3129,6 +3303,33 @@ impl Workbench {
                             }))
                             .child("TERMINAL"),
                     )
+                    .child(
+                        div()
+                            .id("bottom-build")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.5))
+                            .text_color(if build_tab_active {
+                                theme.text
+                            } else {
+                                theme.muted
+                            })
+                            .bg(if build_tab_active {
+                                theme.panel_alt
+                            } else {
+                                theme.panel
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.bottom_mode = BottomMode::Build;
+                                if this.build_model.is_none() {
+                                    this.refresh_build(cx);
+                                }
+                                cx.notify();
+                            }))
+                            .child("BUILD"),
+                    )
                     .children(if run_tab_active { configs } else { Vec::new() })
                     .child(div().flex_1())
                     .when(run_tab_active, |row| {
@@ -3164,6 +3365,37 @@ impl Workbench {
                                 .child("Stop"),
                         )
                     })
+                    .when(build_tab_active, |row| {
+                        row.child(
+                            div()
+                                .id("build-project")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.text)
+                                .bg(theme.accent_muted)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.run_build(ide_build::compile::BuildKind::Build, cx);
+                                }))
+                                .child("Build"),
+                        )
+                        .child(
+                            div()
+                                .id("rebuild-project")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.text)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.run_build(ide_build::compile::BuildKind::Rebuild, cx);
+                                }))
+                                .child("Rebuild"),
+                        )
+                    })
                     .child(
                         div()
                             .px_2()
@@ -3171,8 +3403,10 @@ impl Workbench {
                             .text_color(theme.muted)
                             .child(if run_tab_active {
                                 self.run_status.clone()
-                            } else {
+                            } else if terminal_tab_active {
                                 self.terminal_status.clone()
+                            } else {
+                                self.build_status.clone()
                             }),
                     ),
             )

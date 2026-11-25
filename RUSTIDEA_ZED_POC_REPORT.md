@@ -347,6 +347,10 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   language-server/debug-adapter status through `ops::tools::tools_list` and can
   install a selected tool (86 tools on this machine);
 - Settings shows the effective OpenIDEA settings as read-only JSON;
+- the bottom panel also has a Build tool window backed by
+  `ops::build::build_model` / `ops::build::build_run`: it streams build
+  `Started`, `Step`, `Output`, `Message` and `Progress` events and shows the
+  final error/warning counts and duration;
 - buffer edits are sent incrementally to
   `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
   `DocPatched` events and diagnostics are applied back to Zed buffers;
@@ -418,6 +422,13 @@ Agents/Tools smoke:
 
 ```text
 agents=16 tools=86
+```
+
+Build smoke on the Maven project:
+
+```text
+build_status=rustidea-java-workbench-smoke · 0 errors · 0 warnings · 0.7 s
+build="Process finished with exit code 0"
 ```
 
 The first line of the Java file on disk was the inserted marker after the

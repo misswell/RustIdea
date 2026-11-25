@@ -12017,6 +12017,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "ide-agent",
+ "ide-build",
  "ide-core",
  "ide-dap",
  "ide-db",

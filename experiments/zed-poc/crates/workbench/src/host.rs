@@ -604,6 +604,38 @@ impl NativeHost {
         .await
     }
 
+    pub async fn build_model(&self) -> IdeResult<ide_build::BuildModel> {
+        self.run(
+            move |host| async move { ide_host::ops::build::build_model(&host, MAIN_WINDOW).await },
+        )
+        .await
+    }
+
+    pub async fn build_run(
+        &self,
+        kind: ide_build::compile::BuildKind,
+        output: tokio::sync::mpsc::UnboundedSender<ide_build::compile::BuildEvent>,
+    ) -> IdeResult<ide_build::compile::BuildResult> {
+        self.run(move |host| async move {
+            let channel =
+                ide_host::ops::Channel::new(move |event: ide_build::compile::BuildEvent| {
+                    let _ = output.send(event);
+                });
+            ide_host::ops::build::build_run(
+                &host,
+                MAIN_WINDOW,
+                kind,
+                None,
+                None,
+                ide_core::RequestId::next(),
+                Vec::new(),
+                channel,
+            )
+            .await
+        })
+        .await
+    }
+
     pub async fn spawn_ssh_terminal(
         &self,
         id: String,
