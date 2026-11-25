@@ -358,6 +358,27 @@ impl NativeHost {
         ide_host::ops::project::settings(&self.host, MAIN_WINDOW)
     }
 
+    pub async fn set_setting(
+        &self,
+        key: String,
+        value: serde_json::Value,
+    ) -> IdeResult<ide_core::settings::Settings> {
+        let host = self.host.clone();
+        self.runtime
+            .spawn_blocking(move || {
+                ide_host::ops::project::set_settings(
+                    &host,
+                    MAIN_WINDOW,
+                    ide_workspace::settings::SettingsScope::Global,
+                    &key,
+                    &value.to_string(),
+                )
+                .map(|applied| applied.settings)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
     pub fn close_project(&self) {
         self.host.close_project_detached(MAIN_WINDOW);
     }
@@ -458,11 +479,6 @@ impl NativeHost {
             ide_host::ops::doc::doc_outline(&host, MAIN_WINDOW, doc).await
         })
         .await
-    }
-
-    pub fn settings_json(&self) -> String {
-        serde_json::to_string_pretty(&self.settings())
-            .unwrap_or_else(|error| format!("settings serialization failed: {error}"))
     }
 
     pub async fn run_http(

@@ -220,6 +220,35 @@ fn notebook_output_text(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
+fn flatten_json(
+    prefix: &str,
+    value: &serde_json::Value,
+    output: &mut Vec<(String, serde_json::Value)>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_json(&path, value, output);
+            }
+        }
+        _ => output.push((prefix.to_owned(), value.clone())),
+    }
+}
+
+fn display_json_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) if value.is_empty() => "(empty)".into(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Null => "null".into(),
+        value => value.to_string(),
+    }
+}
+
 fn utf16_prefix(text: &str, units: u32) -> String {
     let mut consumed = 0u32;
     let mut end = text.len();
@@ -390,7 +419,11 @@ pub struct Workbench {
     outline_status: gpui::SharedString,
     outline_doc: Option<DocId>,
     problems: Vec<ProblemItem>,
-    settings_text: gpui::SharedString,
+    settings_data: ide_core::settings::Settings,
+    settings_filter_input: Entity<TextInput>,
+    settings_filter: String,
+    settings_status: gpui::SharedString,
+    _settings_filter_subscription: Subscription,
     pending_goto: Option<(PathBuf, u32, u32)>,
     http_blocks: Vec<ide_http::HttpRequestBlock>,
     http_selected: usize,
@@ -680,6 +713,24 @@ impl Workbench {
                 cx.notify();
             }
         });
+        let settings = host.settings();
+        let settings_filter_input = cx.new(|cx| {
+            TextInput::new(
+                "Filter settings…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let settings_filter_subscription =
+            cx.subscribe(&settings_filter_input, |app, _, event, cx| {
+                if let TextInputEvent::Change(filter) = event {
+                    app.settings_filter = filter.clone();
+                    cx.notify();
+                }
+            });
         let mut app = Self {
             host,
             language_registry,
@@ -728,7 +779,11 @@ impl Workbench {
             outline_status: "Open a file to see its structure".into(),
             outline_doc: None,
             problems: Vec::new(),
-            settings_text: "Select SETTINGS to load effective settings".into(),
+            settings_data: settings,
+            settings_filter_input,
+            settings_filter: String::new(),
+            settings_status: "Effective OpenIDEA settings".into(),
+            _settings_filter_subscription: settings_filter_subscription,
             pending_goto: None,
             http_blocks: Vec::new(),
             http_selected: 0,
@@ -915,7 +970,8 @@ impl Workbench {
         match mode {
             SidebarMode::Outline => self.refresh_outline(cx),
             SidebarMode::Settings => {
-                self.settings_text = self.host.settings_json().into();
+                self.settings_data = self.host.settings();
+                self.settings_status = "Effective OpenIDEA settings".into();
             }
             SidebarMode::Git => self.refresh_git(cx),
             SidebarMode::Http => self.refresh_http(cx),
@@ -928,6 +984,34 @@ impl Workbench {
             SidebarMode::Plugins => self.refresh_plugins(cx),
             _ => {}
         }
+        cx.notify();
+    }
+
+    fn set_setting(&mut self, key: String, value: serde_json::Value, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        self.settings_status = format!("Applying {key}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.set_setting(key.clone(), value).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(settings) => {
+                            app.settings_data = settings;
+                            app.settings_status = format!("Updated {key}").into();
+                        }
+                        Err(error) => {
+                            app.settings_status =
+                                format!("Setting {key} failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
         cx.notify();
     }
 
@@ -3454,6 +3538,28 @@ impl Workbench {
             .unwrap_or_default()
     }
 
+    pub fn smoke_settings_toggle(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Settings, cx);
+        let current = self.settings_data.editor.show_whitespace;
+        self.set_setting(
+            "editor.showWhitespace".into(),
+            serde_json::Value::Bool(!current),
+            cx,
+        );
+    }
+
+    pub fn settings_whitespace(&self) -> bool {
+        self.settings_data.editor.show_whitespace
+    }
+
+    pub fn settings_row_count(&self) -> usize {
+        let mut leaves = Vec::new();
+        if let Ok(value) = serde_json::to_value(&self.settings_data) {
+            flatten_json("", &value, &mut leaves);
+        }
+        leaves.len()
+    }
+
     pub fn plugins_count(&self) -> usize {
         self.plugins.len()
     }
@@ -4226,34 +4332,113 @@ impl Workbench {
             .into_any_element()
     }
 
-    fn render_settings(&self) -> gpui::AnyElement {
+    fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
-        let lines: Vec<String> = self.settings_text.lines().map(str::to_owned).collect();
+        let filter = self.settings_filter.to_lowercase();
+        let mut leaves = Vec::new();
+        if let Ok(value) = serde_json::to_value(&self.settings_data) {
+            flatten_json("", &value, &mut leaves);
+        }
+        let mut rows = Vec::new();
+        for (index, (key, value)) in leaves.into_iter().enumerate() {
+            if !filter.is_empty() && !key.to_lowercase().contains(&filter) {
+                continue;
+            }
+            if rows.len() >= 1_500 {
+                break;
+            }
+            let key_for_toggle = key.clone();
+            let enabled = value.as_bool();
+            rows.push(
+                div()
+                    .id(("setting-row", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(px(10.5))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_color(theme.muted)
+                            .child(key),
+                    )
+                    .child(match enabled {
+                        Some(enabled) => div()
+                            .id(("setting-toggle", index))
+                            .w(px(26.))
+                            .h(px(14.))
+                            .rounded_full()
+                            .bg(if enabled {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .border_1()
+                            .border_color(if enabled { theme.accent } else { theme.border })
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_setting(
+                                    key_for_toggle.clone(),
+                                    serde_json::Value::Bool(!enabled),
+                                    cx,
+                                );
+                            }))
+                            .child(
+                                div()
+                                    .m(px(1.))
+                                    .w(px(11.))
+                                    .h(px(11.))
+                                    .rounded_full()
+                                    .bg(if enabled { theme.accent } else { theme.faint }),
+                            )
+                            .into_any_element(),
+                        None => div()
+                            .max_w(px(180.))
+                            .truncate()
+                            .text_color(theme.faint)
+                            .child(display_json_value(&value))
+                            .into_any_element(),
+                    })
+                    .into_any_element(),
+            );
+        }
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_size(px(10.5))
-                    .text_color(theme.faint)
-                    .child("Effective OpenIDEA settings (read-only)"),
+                div().p_2().child(
+                    div()
+                        .h(px(30.))
+                        .px_2()
+                        .rounded_md()
+                        .bg(theme.window)
+                        .border_1()
+                        .border_color(theme.border)
+                        .child(self.settings_filter_input.clone()),
+                ),
             )
             .child(
                 div()
-                    .id("settings-json")
+                    .px_2()
+                    .py_1()
+                    .text_size(px(9.5))
+                    .text_color(theme.faint)
+                    .child(self.settings_status.clone()),
+            )
+            .child(
+                div()
+                    .id("settings-list")
                     .flex_1()
                     .min_h(px(0.))
-                    .overflow_scroll()
-                    .p_2()
-                    .font_family("Menlo")
-                    .text_size(px(10.5))
-                    .text_color(theme.text)
-                    .flex()
-                    .flex_col()
-                    .children(lines.into_iter().map(|line| div().child(line))),
+                    .overflow_y_scroll()
+                    .children(rows),
             )
             .into_any_element()
     }
@@ -6323,7 +6508,7 @@ impl Render for Workbench {
         let git = self.render_git_panel(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
-        let settings = self.render_settings();
+        let settings = self.render_settings(cx);
         let sidebar_body = match self.sidebar_mode {
             SidebarMode::Project => project,
             SidebarMode::Search => search,
