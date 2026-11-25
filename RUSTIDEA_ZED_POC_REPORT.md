@@ -150,8 +150,18 @@ POC_LSP_DEFINITIONS count=1
 POC_LSP_DEFINITION /private/tmp/zed-poc-lsp-ts/test.ts 1:6
 ```
 
-Cross-file definitions are currently dropped because the POC only owns one
-Zed buffer.
+Cross-file definition test (TypeScript import):
+
+```text
+POC_LSP_HOVER "(alias) const shared: 42 ..."
+POC_LSP_DEFINITIONS count=1
+POC_LSP_DEFINITION /private/tmp/zed-poc-lsp-xdef/defs.ts 0:13
+```
+
+For a target outside the active editor, the provider opens the file through
+OpenIdea `ops::doc::open`, creates a read-only local Zed buffer for navigation
+and anchors the `LocationLink` there. It does not yet keep that target buffer
+synchronized with later backend edits; the final DocumentStore must own it.
 
 Rename test on a TypeScript copy:
 
@@ -211,9 +221,9 @@ outside the project root are not watched by this POC.
 
 - License confirmation and the repository license change to
   GPL-3.0-or-later. No GPL release is produced from this branch.
-- Cross-file definition/highlights provider wiring and multi-source diagnostics.
-  Hover, same-file definitions, rename and completion are wired; diagnostics
-  already update the Zed buffer for one source.
+- Highlights provider wiring and multi-source diagnostics. Hover, same-file
+  and cross-file definitions, rename and
+  completion are wired; diagnostics already update the Zed buffer for one source.
 - Completion documentation, `additionalTextEdits`, commit characters and
   completion resolve are not mapped yet.
 - Multi-source diagnostic merging (the POC uses one synthetic server id).

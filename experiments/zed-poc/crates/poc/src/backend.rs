@@ -288,6 +288,14 @@ impl OpenIdeaBridge {
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
 
+    pub async fn open_target(&self, path: PathBuf) -> IdeResult<DocumentInfo> {
+        let host = self.host.clone();
+        self.runtime
+            .spawn(async move { ide_host::ops::doc::open(&host, WINDOW, path).await })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
     pub fn rename_blocking(
         &self,
         line: u32,

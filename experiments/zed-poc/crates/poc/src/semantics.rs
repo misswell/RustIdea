@@ -150,32 +150,44 @@ impl SemanticsProvider for OpenIdeaSemanticsProvider {
             GotoDefinitionKind::Type => ide_lsp::types::GotoKind::TypeDefinition,
             GotoDefinitionKind::Implementation => ide_lsp::types::GotoKind::Implementation,
         };
-        Some(cx.spawn(async move |_cx| {
+        Some(cx.spawn(async move |cx| {
             let locations = backend
                 .definition(line, column, kind)
                 .await
                 .map_err(|error| anyhow::anyhow!(error.message))?;
-            let links = locations
-                .into_iter()
-                .filter(|location| location.path.0 == path)
-                .map(|location| {
-                    let start = snapshot.anchor_before(text::PointUtf16::new(
-                        location.range.start.line,
-                        location.range.start.col,
-                    ));
-                    let end = snapshot.anchor_before(text::PointUtf16::new(
-                        location.range.end.line,
-                        location.range.end.col,
-                    ));
-                    LocationLink {
-                        origin: None,
-                        target: language::Location {
-                            buffer: buffer.clone(),
-                            range: start..end,
-                        },
-                    }
-                })
-                .collect::<Vec<_>>();
+            let mut links = Vec::new();
+            for location in locations {
+                let same_file = location.path.0 == path;
+                let (target_buffer, target_snapshot) = if same_file {
+                    (buffer.clone(), snapshot.clone())
+                } else {
+                    let info = backend
+                        .open_target(location.path.0.clone())
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error.message))?;
+                    let target = cx.new(|cx| Buffer::local(info.text, cx));
+                    target.update(cx, |buffer, cx| {
+                        buffer.set_capability(language::Capability::ReadOnly, cx);
+                    });
+                    let snapshot = cx.read_entity(&target, |buffer, _| buffer.snapshot());
+                    (target, snapshot)
+                };
+                let start = target_snapshot.anchor_before(text::PointUtf16::new(
+                    location.range.start.line,
+                    location.range.start.col,
+                ));
+                let end = target_snapshot.anchor_before(text::PointUtf16::new(
+                    location.range.end.line,
+                    location.range.end.col,
+                ));
+                links.push(LocationLink {
+                    origin: None,
+                    target: language::Location {
+                        buffer: target_buffer,
+                        range: start..end,
+                    },
+                });
+            }
             Ok(Some(links))
         }))
     }
