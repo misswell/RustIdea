@@ -24,6 +24,22 @@ index 837d083..7aeeb62 100644
              let range = capture.node.byte_range();
              if capture.index == outline_config.name_capture_ix {
                  name_range = Some(range);
+diff --git a/crates/editor/src/completions.rs b/crates/editor/src/completions.rs
+index bfed8e4..53d0b30 100644
+--- a/crates/editor/src/completions.rs
++++ b/crates/editor/src/completions.rs
+@@ -46,6 +46,11 @@ impl Editor {
+         self.open_or_update_completions_menu(None, None, false, window, cx);
+     }
+ 
++    /// Integration entry point for hosts that own their own completion source.
++    pub fn open_completions_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        self.open_or_update_completions_menu(None, None, false, window, cx);
++    }
++
+     pub fn confirm_completion(
+         &mut self,
+         action: &ConfirmCompletion,
 diff --git a/crates/editor/src/jsx_tag_auto_close.rs b/crates/editor/src/jsx_tag_auto_close.rs
 index b6f79cc..8866fe6 100644
 --- a/crates/editor/src/jsx_tag_auto_close.rs

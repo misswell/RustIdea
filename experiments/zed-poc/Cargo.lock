@@ -11079,8 +11079,11 @@ dependencies = [
  "ide-core",
  "ide-host",
  "ide-language",
+ "ide-lsp",
  "ide-workspace",
  "language",
+ "multi_buffer",
+ "project",
  "release_channel",
  "semver",
  "settings",
@@ -11088,6 +11091,8 @@ dependencies = [
  "theme",
  "theme_settings",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "util",
 ]
 

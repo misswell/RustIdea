@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
-use ide_core::{ChangeSet, DocId, IdeResult, NullSink, SharedSink};
+use ide_core::{ChangeSet, DocId, IdeEvent, IdeResult, SharedSink};
 use ide_host::{Host, HostConfig};
 use ide_language::{LanguageRegistry, Syntax};
 use ide_workspace::DocumentInfo;
@@ -24,10 +24,11 @@ pub struct OpenIdeaBridge {
     pub path: PathBuf,
     pub text: String,
     pub version: u32,
+    pub language: String,
 }
 
 impl OpenIdeaBridge {
-    pub fn start(_root: &Path, file: &Path) -> Result<Self> {
+    pub fn start(root: &Path, file: &Path) -> Result<Self> {
         let config_dir = ide_host::data_dirs::config_dir(IDENTIFIER)
             .map_err(anyhow::Error::msg)
             .context("resolve config directory")?;
@@ -62,15 +63,30 @@ impl OpenIdeaBridge {
             local_data_dir,
             languages,
             syntax,
-            sink_for: Box::new(|_| Arc::new(NullSink) as SharedSink),
+            sink_for: Box::new(|_| {
+                let sink = Arc::new(|event: IdeEvent| {
+                    if let IdeEvent::LanguageServer {
+                        name,
+                        status,
+                        message,
+                        ..
+                    } = event
+                    {
+                        eprintln!("OPENIDEA_LSP {name} {status:?} {message:?}");
+                    }
+                }) as SharedSink;
+                sink
+            }),
             owner: same_window,
             runtime: runtime.handle().clone(),
             project_environment: false,
         }));
 
         let info: DocumentInfo = runtime.block_on(async {
-            let project = host.open_light(WINDOW, file)?;
-            let _ = project;
+            ide_host::ops::project::open(&host, WINDOW, root).await?;
+            if std::env::var_os("RUSTIDEA_POC_TRUST").is_some() {
+                host.set_project_trust(root, true, false).await?;
+            }
             ide_host::ops::doc::open(&host, WINDOW, file.to_path_buf()).await
         })?;
 
@@ -81,6 +97,7 @@ impl OpenIdeaBridge {
             path: info.path.0,
             text: info.text,
             version: info.version,
+            language: info.language.to_string(),
         })
     }
 
@@ -100,6 +117,80 @@ impl OpenIdeaBridge {
             .spawn(async move { ide_host::ops::doc::save(&host, WINDOW, doc).await })
             .await
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub async fn completion(
+        &self,
+        line: u32,
+        column: u32,
+        trigger: Option<String>,
+    ) -> IdeResult<ide_lsp::types::CompletionList> {
+        let host = self.host.clone();
+        let doc = self.doc;
+        self.runtime
+            .spawn(async move {
+                ide_host::ops::lsp::lsp_completion(
+                    &host,
+                    WINDOW,
+                    ide_core::RequestId::next(),
+                    doc,
+                    ide_core::Pos::new(line, column),
+                    trigger,
+                )
+                .await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn completion_blocking(
+        &self,
+        line: u32,
+        column: u32,
+        trigger: Option<String>,
+    ) -> IdeResult<ide_lsp::types::CompletionList> {
+        self.runtime
+            .block_on(self.completion(line, column, trigger))
+    }
+
+    pub fn servers(&self) -> IdeResult<Vec<ide_lsp::types::ServerInfo>> {
+        let project = self.host.project(WINDOW)?;
+        Ok(project.lsp.servers())
+    }
+
+    pub fn hover_blocking(
+        &self,
+        line: u32,
+        column: u32,
+    ) -> IdeResult<Option<ide_lsp::types::Hover>> {
+        let host = self.host.clone();
+        let doc = self.doc;
+        self.runtime.block_on(async move {
+            ide_host::ops::lsp::lsp_hover(
+                &host,
+                WINDOW,
+                ide_core::RequestId::next(),
+                doc,
+                ide_core::Pos::new(line, column),
+            )
+            .await
+        })
+    }
+
+    pub fn reopen_blocking(&mut self) -> IdeResult<DocumentInfo> {
+        let host = self.host.clone();
+        let path = self.path.clone();
+        let doc = self.doc;
+        let info = self.runtime.block_on(async move {
+            ide_host::ops::doc::close(&host, WINDOW, doc)?;
+            ide_host::ops::doc::open(&host, WINDOW, path).await
+        })?;
+        self.doc = info.id;
+        self.path = info.path.0.clone();
+        self.text = info.text.clone();
+        self.version = info.version;
+        self.language = info.language.to_string();
+        Ok(info)
     }
 
     pub fn close(&self) {

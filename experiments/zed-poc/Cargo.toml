@@ -17,8 +17,11 @@ gpui_platform = { path = "../../third_party/zed/crates/gpui_platform" }
 ide-core = { path = "../../crates/ide-core" }
 ide-host = { path = "../../crates/ide-host" }
 ide-language = { path = "../../crates/ide-language" }
+ide-lsp = { path = "../../crates/ide-lsp" }
 ide-workspace = { path = "../../crates/ide-workspace" }
 language = { path = "../../third_party/zed/crates/language" }
+multi_buffer = { path = "../../third_party/zed/crates/multi_buffer" }
+project = { path = "../../third_party/zed/crates/project" }
 release_channel = { path = "../../third_party/zed/crates/release_channel" }
 semver = "1"
 settings = { path = "../../third_party/zed/crates/settings" }
@@ -26,6 +29,8 @@ text = { path = "../../third_party/zed/crates/text" }
 theme = { path = "../../third_party/zed/crates/theme" }
 theme_settings = { path = "../../third_party/zed/crates/theme_settings" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
 util = { path = "../../third_party/zed/crates/util", features = ["debug-embed"] }
 
 [patch.crates-io]

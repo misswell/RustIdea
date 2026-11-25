@@ -1,9 +1,12 @@
 mod backend;
+mod completion;
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use backend::OpenIdeaBridge;
+use completion::OpenIdeaCompletionProvider;
 use editor::Editor;
 use gpui::{
     App, AppContext as _, Bounds, Context, Focusable as _, KeyBinding, Subscription, Window,
@@ -38,6 +41,10 @@ impl PocApp {
         let buffer = cx.new(|cx| Buffer::local(text, cx));
         let version = buffer.read(cx).snapshot().version().clone();
         let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
+        let provider = OpenIdeaCompletionProvider::new(backend.clone());
+        editor.update(cx, |editor, _| {
+            editor.set_completion_provider(Some(Rc::new(provider)));
+        });
         let subscription = cx.subscribe(&buffer, |app, _, event: &BufferEvent, cx| {
             if matches!(event, BufferEvent::Edited { .. }) {
                 app.sync_edits(cx);
@@ -188,6 +195,12 @@ impl Render for PocApp {
 }
 
 fn main() {
+    if std::env::var_os("RUSTIDEA_POC_LSP_TEST").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
     let root = std::env::args()
         .nth(1)
         .map(PathBuf::from)
@@ -196,8 +209,83 @@ fn main() {
         .nth(2)
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("README.md"));
-    let backend = OpenIdeaBridge::start(&root, &file)
+    let mut backend = OpenIdeaBridge::start(&root, &file)
         .unwrap_or_else(|error| panic!("open {} through OpenIDEA: {error:#}", file.display()));
+    if std::env::var_os("RUSTIDEA_POC_LSP_TEST").is_some() {
+        let text = backend.text.clone();
+        eprintln!(
+            "POC_LSP_DOC language={} version={}",
+            backend.language, backend.version
+        );
+        let (line, column) = std::env::var("RUSTIDEA_POC_LSP_POS")
+            .ok()
+            .and_then(|position| {
+                let (line, column) = position.split_once(':')?;
+                Some((line.parse().ok()?, column.parse().ok()?))
+            })
+            .unwrap_or_else(|| {
+                let last_line = text.lines().last().unwrap_or_default();
+                (
+                    text.lines().count().saturating_sub(1) as u32,
+                    last_line.encode_utf16().count() as u32,
+                )
+            });
+        eprintln!("POC_LSP request line={line} column={column}");
+        let mut stable_ready = 0;
+        for attempt in 0..90 {
+            if let Ok(servers) = backend.servers() {
+                if attempt % 5 == 0 {
+                    for server in &servers {
+                        eprintln!("POC_LSP_SERVER {:?}", server);
+                    }
+                }
+                let ready = !servers.is_empty()
+                    && servers.iter().all(|server| {
+                        server.status == ide_core::event::ServerStatus::Ready
+                    });
+                if ready {
+                    stable_ready += 1;
+                    if stable_ready >= 3 {
+                        break;
+                    }
+                } else {
+                    stable_ready = 0;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        match backend.reopen_blocking() {
+            Ok(info) => eprintln!(
+                "POC_LSP_REOPEN version={} language={}",
+                info.version, info.language
+            ),
+            Err(error) => eprintln!("POC_LSP_REOPEN_ERROR {}", error.message),
+        }
+        match backend.hover_blocking(1, 16) {
+            Ok(Some(hover)) => eprintln!("POC_LSP_HOVER {:?}", hover.contents.value),
+            Ok(None) => eprintln!("POC_LSP_HOVER none"),
+            Err(error) => eprintln!("POC_LSP_HOVER_ERROR {}", error.message),
+        }
+        for _ in 0..30 {
+            match backend.completion_blocking(line, column, Some(".".into())) {
+                Ok(list) if !list.items.is_empty() => {
+                    eprintln!("POC_LSP_OK count={}", list.items.len());
+                    for item in list.items.iter().take(8) {
+                        eprintln!("POC_LSP_ITEM {}", item.label);
+                    }
+                    return;
+                }
+                Ok(_) => std::thread::sleep(std::time::Duration::from_secs(1)),
+                Err(error) => {
+                    eprintln!("POC_LSP_FAILED {}", error.message);
+                    return;
+                }
+            }
+        }
+        eprintln!("POC_LSP_FAILED no completions after retries");
+        return;
+    }
     let backend = Arc::new(backend);
 
     application()
@@ -226,6 +314,40 @@ fn main() {
                     },
                 )
                 .expect("open Zed editor window");
+            if std::env::var_os("RUSTIDEA_POC_COMPLETION_DEMO").is_some() {
+                window
+                    .update(cx, |_app, window, cx| {
+                        cx.spawn_in(window, async move |this, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(15))
+                                .await;
+                            this.update_in(cx, |app, window, cx| {
+                                let len = app.buffer.read(cx).snapshot().len();
+                                app.editor.update(cx, |editor, cx| {
+                                    editor.change_selections(
+                                        editor::SelectionEffects::no_scroll(),
+                                        window,
+                                        cx,
+                                        |selections| {
+                                            selections.select_ranges([
+                                                multi_buffer::MultiBufferOffset(len)
+                                                    ..multi_buffer::MultiBufferOffset(len),
+                                            ])
+                                        },
+                                    );
+                                    editor.open_completions_menu(window, cx);
+                                });
+                            })
+                            .ok();
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(10))
+                                .await;
+                            this.update(cx, |_app, cx| cx.quit()).ok();
+                        })
+                        .detach();
+                    })
+                    .expect("run POC completion demo");
+            }
             if let Ok(marker) = std::env::var("RUSTIDEA_POC_DEMO_EDIT") {
                 window
                     .update(cx, |app, window, cx| {
