@@ -776,6 +776,36 @@ impl NativeHost {
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
 
+    pub async fn notebook_open(&self, path: String) -> IdeResult<ide_notebook::NotebookSnapshot> {
+        self.run(move |host| async move {
+            ide_host::ops::notebook::open(&host, MAIN_WINDOW, path).await
+        })
+        .await
+    }
+
+    pub async fn notebook_execute(
+        &self,
+        id: String,
+        cells: Vec<String>,
+    ) -> IdeResult<ide_notebook::NotebookSnapshot> {
+        self.run(move |host| async move {
+            let channel = ide_host::ops::Channel::new(
+                |_event: ide_host::ops::notebook::NotebookOutputEvent| {},
+            );
+            ide_host::ops::notebook::execute(
+                &host,
+                MAIN_WINDOW,
+                id,
+                cells,
+                None,
+                ide_core::RequestId::next(),
+                channel,
+            )
+            .await
+        })
+        .await
+    }
+
     pub async fn start_search(
         &self,
         query: ide_search::SearchQuery,

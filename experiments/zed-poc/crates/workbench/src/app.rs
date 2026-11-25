@@ -35,6 +35,7 @@ enum SidebarMode {
     Database,
     Http,
     Remote,
+    Notebook,
     Agents,
     Plugins,
     Tools,
@@ -68,6 +69,30 @@ fn change_letter(kind: Option<ide_vcs::ChangeKind>) -> &'static str {
         Some(ide_vcs::ChangeKind::Conflicted) => "C",
         None => "·",
     }
+}
+
+fn notebook_output_text(value: &serde_json::Value) -> String {
+    if let Some(text) = value.get("text").and_then(serde_json::Value::as_str) {
+        return text.to_owned();
+    }
+    if let Some(text) = value
+        .pointer("/data/text/plain")
+        .and_then(serde_json::Value::as_str)
+    {
+        return text.to_owned();
+    }
+    if let Some(text) = value.get("ename").and_then(serde_json::Value::as_str) {
+        let evalue = value
+            .get("evalue")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        return if evalue.is_empty() {
+            text.to_owned()
+        } else {
+            format!("{text}: {evalue}")
+        };
+    }
+    serde_json::to_string(value).unwrap_or_default()
 }
 
 pub struct InitialState {
@@ -148,6 +173,9 @@ pub struct Workbench {
     remote_entries: Vec<ide_ssh::RemoteEntry>,
     remote_preview: String,
     remote_busy: bool,
+    notebook: Option<ide_notebook::NotebookSnapshot>,
+    notebook_status: gpui::SharedString,
+    notebook_running: bool,
     agents: Vec<ide_agent::AgentProvider>,
     agents_status: gpui::SharedString,
     agent_prompt_input: Entity<TextInput>,
@@ -314,6 +342,9 @@ impl Workbench {
             remote_entries: Vec::new(),
             remote_preview: String::new(),
             remote_busy: false,
+            notebook: None,
+            notebook_status: "Open a .ipynb file to view cells".into(),
+            notebook_running: false,
             agents: Vec::new(),
             agents_status: "Select AGENTS to load providers".into(),
             agent_prompt_input,
@@ -452,6 +483,9 @@ impl Workbench {
         if self.sidebar_mode == SidebarMode::Http {
             self.refresh_http(cx);
         }
+        if self.sidebar_mode == SidebarMode::Notebook {
+            self.refresh_notebook(cx);
+        }
         cx.notify();
     }
 
@@ -466,6 +500,7 @@ impl Workbench {
             SidebarMode::Http => self.refresh_http(cx),
             SidebarMode::Database => self.refresh_db(cx),
             SidebarMode::Remote => self.refresh_remote(cx),
+            SidebarMode::Notebook => self.refresh_notebook(cx),
             SidebarMode::Agents => self.refresh_agents(cx),
             SidebarMode::Tools => self.refresh_tools(cx),
             SidebarMode::Plugins => self.refresh_plugins(cx),
@@ -832,6 +867,117 @@ impl Workbench {
                         Err(error) => {
                             app.remote_status =
                                 format!("Remote read failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_notebook(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.active else {
+            self.notebook = None;
+            self.notebook_status = "Open a .ipynb file to view cells".into();
+            cx.notify();
+            return;
+        };
+        let Some(document) = self.documents.get(&doc) else {
+            self.notebook = None;
+            self.notebook_status = "Open a .ipynb file to view cells".into();
+            cx.notify();
+            return;
+        };
+        if document.path.extension().and_then(|ext| ext.to_str()) != Some("ipynb") {
+            self.notebook = None;
+            self.notebook_status = "The active file is not a Jupyter notebook".into();
+            cx.notify();
+            return;
+        }
+        let path = document.path.display().to_string();
+        if self
+            .notebook
+            .as_ref()
+            .is_some_and(|notebook| notebook.path.0 == document.path)
+        {
+            return;
+        }
+        let host = self.host.clone();
+        self.notebook_status = "Opening notebook…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.notebook_open(path).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(notebook) => {
+                            app.notebook_status = format!(
+                                "{} cells · version {}",
+                                notebook.cells.len(),
+                                notebook.version
+                            )
+                            .into();
+                            app.notebook = Some(notebook);
+                        }
+                        Err(error) => {
+                            app.notebook = None;
+                            app.notebook_status =
+                                format!("Notebook failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn run_notebook(&mut self, cx: &mut Context<Self>) {
+        let Some(notebook) = self.notebook.clone() else {
+            self.notebook_status = "Open a notebook first".into();
+            cx.notify();
+            return;
+        };
+        if self.notebook_running {
+            return;
+        }
+        let cells: Vec<String> = notebook
+            .cells
+            .iter()
+            .filter(|cell| cell.cell_type == "code")
+            .map(|cell| cell.id.clone())
+            .collect();
+        if cells.is_empty() {
+            self.notebook_status = "No code cells".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        let id = notebook.id.clone();
+        self.notebook_running = true;
+        self.notebook_status = "Executing notebook…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.notebook_execute(id, cells).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.notebook_running = false;
+                    match result {
+                        Ok(notebook) => {
+                            app.notebook_status =
+                                format!("Executed · version {}", notebook.version).into();
+                            app.notebook = Some(notebook);
+                        }
+                        Err(error) => {
+                            app.notebook_status =
+                                format!("Notebook execution failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -2157,6 +2303,17 @@ impl Workbench {
         self.debug_attachables.len()
     }
 
+    pub fn smoke_notebook(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Notebook, cx);
+    }
+
+    pub fn notebook_cell_count(&self) -> usize {
+        self.notebook
+            .as_ref()
+            .map(|notebook| notebook.cells.len())
+            .unwrap_or(0)
+    }
+
     pub fn smoke_run_status(&self) -> String {
         self.run_status.to_string()
     }
@@ -3128,6 +3285,108 @@ impl Workbench {
             .child(rows)
             .child(remote_files)
             .child(remote_preview)
+            .into_any_element()
+    }
+
+    fn render_notebook(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut cells = div()
+            .id("notebook-cells")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if let Some(notebook) = &self.notebook {
+            for (index, cell) in notebook.cells.iter().take(500).enumerate() {
+                let mut body = div()
+                    .id(("notebook-cell", index))
+                    .mx_2()
+                    .my_1()
+                    .p_2()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.panel_alt)
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child(format!(
+                                "{}{}",
+                                cell.cell_type,
+                                cell.execution_count
+                                    .map(|count| format!(" [{count}]"))
+                                    .unwrap_or_default()
+                            )),
+                    )
+                    .child(
+                        div()
+                            .font_family("Menlo")
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .child(cell.source.clone()),
+                    );
+                for output in &cell.outputs {
+                    let text = notebook_output_text(output);
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    body = body.child(
+                        div()
+                            .pt_1()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .font_family("Menlo")
+                            .text_size(px(9.5))
+                            .text_color(theme.muted)
+                            .child(text),
+                    );
+                }
+                cells = cells.child(body);
+            }
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("notebook-run")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.run_notebook(cx);
+                            }))
+                            .child("Run all"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.notebook_status.clone()),
+                    ),
+            )
+            .child(cells)
             .into_any_element()
     }
 
@@ -4250,6 +4509,7 @@ impl Render for Workbench {
             SidebarMode::Database => self.render_db(cx),
             SidebarMode::Http => self.render_http(cx),
             SidebarMode::Remote => self.render_remote(cx),
+            SidebarMode::Notebook => self.render_notebook(cx),
             SidebarMode::Agents => self.render_agents(cx),
             SidebarMode::Plugins => self.render_plugins(cx),
             SidebarMode::Tools => self.render_tools(cx),
@@ -4263,6 +4523,7 @@ impl Render for Workbench {
             ("DB", SidebarMode::Database),
             ("HTTP", SidebarMode::Http),
             ("SSH", SidebarMode::Remote),
+            ("NB", SidebarMode::Notebook),
             ("AGT", SidebarMode::Agents),
             ("PLG", SidebarMode::Plugins),
             ("TLS", SidebarMode::Tools),

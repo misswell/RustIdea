@@ -361,6 +361,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - Debug scans `ops::debug::debug_attachable_processes` and lists debug-capable
   run configurations. The panel is a process/browse surface; starting a session
   and the variables/stack/frames UI are still pending;
+- Notebook opens the active `.ipynb` through `ops::notebook::open`, renders
+  code/markdown cells and stored outputs, and runs all code cells through
+  `ops::notebook::execute` (read-only viewer; cell editing is pending);
 - buffer edits are sent incrementally to
   `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
   `DocPatched` events and diagnostics are applied back to Zed buffers;
@@ -434,6 +437,12 @@ Agents/Tools smoke:
 agents=16 tools=86
 ```
 
+Notebook smoke (two-cell `.ipynb`):
+
+```text
+notebook_cells=2
+```
+
 Build smoke on the Maven project:
 
 ```text
@@ -473,8 +482,9 @@ documents/project/sync/host: 24 passed; 0 failed
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
 - Plugin UI contributions/marketplace install flow, full debugger session UI,
-- notebook, remote file editing (browsing/preview exists), the full agent
-  conversation view and MCP add/edit/remove are not yet integrated. Database/HTTP have working
+  notebook cell editing, remote file editing (browsing/preview exists), the
+  full agent conversation view and MCP add/edit/remove are not yet integrated.
+  Database/HTTP have working
   execution paths but no source/request editors of their own. The Terminal now
   has a real VT screen and OpenIDEA PTY, but its mouse selection, hyperlinks,
   IME and resize path are not yet verified or complete.

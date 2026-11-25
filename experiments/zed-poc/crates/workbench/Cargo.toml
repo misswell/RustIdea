@@ -26,6 +26,7 @@ ide-dap = { path = "../../../../crates/ide-dap" }
 ide-host.workspace = true
 ide-http = { path = "../../../../crates/ide-http" }
 ide-language.workspace = true
+ide-notebook = { path = "../../../../crates/ide-notebook" }
 ide-lsp.workspace = true
 ide-run = { path = "../../../../crates/ide-run" }
 ide-sdk = { path = "../../../../crates/ide-sdk" }

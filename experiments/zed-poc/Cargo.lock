@@ -12025,6 +12025,7 @@ dependencies = [
  "ide-http",
  "ide-language",
  "ide-lsp",
+ "ide-notebook",
  "ide-run",
  "ide-sdk",
  "ide-search",
