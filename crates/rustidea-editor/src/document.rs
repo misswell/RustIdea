@@ -239,6 +239,13 @@ impl Document {
         self.text.version()
     }
 
+    /// Aligns the local mirror's version with the backend after a confirmed
+    /// sync. This does not touch text or undo/redo history; it is only valid
+    /// when there are no pending local transactions.
+    pub fn set_version(&mut self, version: u32) {
+        self.text.set_version(version);
+    }
+
     pub fn line_count(&self) -> u32 {
         self.text.line_count()
     }
@@ -412,9 +419,15 @@ impl Document {
             })
             .collect();
         let change_set = to_change_set(&transaction.changes);
+        let external_changes =
+            (transaction.source == EditSource::External).then(|| transaction.changes.clone());
         self.text
             .apply(transaction.base_version, &change_set)
             .map_err(|error| DocumentError::Io(std::io::Error::other(error.to_string())))?;
+
+        if let Some(external) = external_changes {
+            self.rebase_history(&external);
+        }
 
         if transaction.source == EditSource::Local {
             let forward = transaction.changes.clone();
@@ -428,6 +441,19 @@ impl Document {
             self.redo.clear();
         }
         Ok(inverse)
+    }
+
+    fn rebase_history(&mut self, external: &[Change]) {
+        self.undo = self
+            .undo
+            .drain(..)
+            .filter_map(|entry| rebase_entry(entry, external))
+            .collect();
+        self.redo = self
+            .redo
+            .drain(..)
+            .filter_map(|entry| rebase_entry(entry, external))
+            .collect();
     }
 
     pub fn replace_all(
@@ -527,6 +553,55 @@ fn to_change_set(changes: &[Change]) -> ChangeSet {
             })
             .collect(),
     }
+}
+
+fn rebase_entry(entry: HistoryEntry, external: &[Change]) -> Option<HistoryEntry> {
+    let inverse = entry
+        .inverse
+        .iter()
+        .map(|change| rebase_change(change, external))
+        .collect::<Option<Vec<_>>>()?;
+    let forward = entry
+        .forward
+        .iter()
+        .map(|change| rebase_change(change, external))
+        .collect::<Option<Vec<_>>>()?;
+    Some(HistoryEntry { inverse, forward })
+}
+
+fn rebase_change(change: &Change, external: &[Change]) -> Option<Change> {
+    let mut from = change.from;
+    let mut to = change.to;
+    let insertion = from == to;
+    for edit in external {
+        let inserted = ide_text::normalize_line_endings(&edit.insert)
+            .encode_utf16()
+            .count() as u32;
+        if insertion && edit.from != edit.to && (edit.from == from || edit.to == from) {
+            return None;
+        }
+        if edit.from == edit.to {
+            if edit.from <= from {
+                from = from.saturating_add(inserted);
+                to = to.saturating_add(inserted);
+            } else if edit.from < to {
+                return None;
+            }
+        } else if edit.to <= from {
+            let removed = edit.to - edit.from;
+            from = from.saturating_sub(removed).saturating_add(inserted);
+            to = to.saturating_sub(removed).saturating_add(inserted);
+        } else if edit.from >= to {
+            // The external edit is after this history operation.
+        } else {
+            return None;
+        }
+    }
+    Some(Change {
+        from,
+        to,
+        insert: change.insert.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -640,6 +715,29 @@ mod tests {
             undo_count += 1;
         }
         assert_eq!(undo_count, DEFAULT_HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn external_edit_rebases_local_undo_history() {
+        let mut document = doc("one");
+        document
+            .apply(Transaction::new(
+                0,
+                vec![Change::insert(3, " local")],
+                EditSource::Local,
+            ))
+            .unwrap();
+        let version = document.version();
+        document
+            .apply(Transaction::new(
+                version,
+                vec![Change::insert(0, "external ")],
+                EditSource::External,
+            ))
+            .unwrap();
+        assert_eq!(document.text(), "external one local");
+        assert!(document.undo().unwrap());
+        assert_eq!(document.text(), "external one");
     }
 
     #[test]

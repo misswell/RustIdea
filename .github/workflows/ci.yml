@@ -56,6 +56,24 @@ jobs:
       - name: Install Rust components
         run: rustup component add clippy rustfmt
 
+      - name: Install plugin WASM target
+        run: rustup target add wasm32-wasip2
+
+      - name: Build plugin test fixtures
+        shell: bash
+        run: |
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/plugin-fixtures"
+          plugins/build.sh --check \
+            crates/ide-plugin/tests/fixtures/files-events \
+            crates/ide-plugin/tests/fixtures/path-events
+          for manifest in crates/ide-plugin/tests/fixtures/*/plugin.toml; do
+            dir="$(dirname "$manifest")"
+            if [ -f "$dir/Cargo.toml" ] && [ ! -f "$dir/dist/plugin.wasm" ]; then
+              echo "missing $dir/dist/plugin.wasm"
+              exit 1
+            fi
+          done
+
       - name: Check formatting
         run: cargo fmt --all --check
 

@@ -1,11 +1,11 @@
 # macOS release checklist
 
-Status: `0.1.2` release build signed and notarized. Static native architecture,
-targeted tests, formatting, Clippy and license inventory passed locally; the
-universal app is Developer ID signed, notarized (`Accepted`), stapled and
-`spctl` accepted. Interactive Phase 2 acceptance and comparative UI performance
-remain open because the macOS console is screen-locked. The release is a native
-GPUI MVP, not OpenIDEA parity.
+Status: `0.2.0` stability release preparation. The previous 0.1.2 universal app
+is Developer ID signed, notarized (`Accepted`), stapled and `spctl` accepted;
+the current stability changes still require the final three-platform CI run,
+rebuild/notarization and a new immutable tag. Interactive Phase 2 acceptance
+and comparative UI performance remain open because the macOS console is
+screen-locked.
 
 1. Keep `RUSTIDEA_MIGRATION_AUDIT.md`, `RUSTIDEA_FEATURE_PARITY.md` and
    `RUSTIDEA_ARCHITECTURE.md` accurate. Do not describe placeholders as
@@ -17,8 +17,8 @@ GPUI MVP, not OpenIDEA parity.
 3. Verify `cargo fmt --all --check`, targeted tests and Clippy on the exact
    release commit. Run the macOS, Ubuntu 24.04 and Windows 2025 CI matrix and
    follow it until every job is green.
-4. Confirm the new patch tag does not exist remotely. `v0.1.1` must not move or
-   be overwritten; the intended tag is `v0.1.2`.
+4. Confirm the new patch tag does not exist remotely. `v0.1.1` and `v0.1.2`
+   must not move or be overwritten; the intended tag is `v0.2.0`.
 5. Validate the notary profile in the current session:
 
    ```sh

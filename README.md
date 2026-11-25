@@ -14,10 +14,14 @@ This repository is following the migration plan in the root `RUSTIDEA_*.md` file
 - Phase 0: migration audit, feature inventory, architecture and license
   inventory are documented; comparative performance measurements remain open.
 - Phase 1: standalone GPUI application shell, native menus, themes, workbench
-  panels, session persistence, logging and reused Rust services.
+  panels, session persistence, logging and reused Rust services. OpenIDEA
+  operations run on the host Tokio runtime; UI events use a bounded coalescing
+  queue.
 - Phase 2: native editor with UTF-16 document buffers, undo/redo, selection,
   clipboard, line numbers, virtualized scrolling, syntax highlighting,
-  diagnostics, save/autosave and IME marked-text handling.
+  diagnostics, save/autosave and IME marked-text handling. Document sync
+  coalesces local edits, rebases disjoint backend patches, preserves local
+  text on conflict, and verifies disk content with BLAKE3 before saves.
 
 This is not yet complete OpenIDEA parity. Native project search, VCS, terminal,
 run/build, database and HTTP panels are implemented at MVP depth. LSP
@@ -50,8 +54,9 @@ cargo test --workspace
 The targeted release-gate test set is:
 
 ```sh
-cargo test -p rustidea -p rustidea-editor -p ide-text
-cargo clippy -p rustidea --all-targets -- -D warnings
+cargo test -p rustidea -p rustidea-editor -p ide-text -p ide-workspace -p ide-host
+cargo clippy -p rustidea -p rustidea-editor -p ide-workspace -p ide-host \
+  --all-targets -- -D warnings
 ```
 
 Licensing details are in `THIRD_PARTY_LICENSES.md`,

@@ -4,6 +4,7 @@ use gpui::{
 };
 
 use super::*;
+use crate::terminal_display::terminal_display_lines;
 
 impl RustIdea {
     fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -458,8 +459,12 @@ impl RustIdea {
                         let depth = node.depth;
                         let ignored = node.ignored;
                         let excluded = node.excluded;
+                        let more = node.more;
+                        let symlink = node.symlink;
                         let name = node.name.clone();
-                        let color = if ignored {
+                        let color = if more {
+                            theme.accent
+                        } else if ignored {
                             theme.faint
                         } else if excluded || is_directory {
                             theme.muted
@@ -489,6 +494,9 @@ impl RustIdea {
                             .on_mouse_down(
                                 MouseButton::Right,
                                 move |event: &gpui::MouseDownEvent, _window, cx| {
+                                    if more {
+                                        return;
+                                    }
                                     let path = menu_path.clone();
                                     let is_directory = is_directory;
                                     menu_app.update(cx, |app, cx| {
@@ -502,7 +510,11 @@ impl RustIdea {
                                 },
                             )
                             .child(div().w(px(13.)).flex_none().text_color(theme.faint).child(
-                                if is_directory {
+                                if more {
+                                    "＋"
+                                } else if symlink {
+                                    "↪"
+                                } else if is_directory {
                                     if expanded { "▾" } else { "▸" }
                                 } else {
                                     match path
@@ -1775,7 +1787,7 @@ impl RustIdea {
             let mut content = div().flex_1().min_h(px(0.)).overflow_hidden();
             if let Some(active) = group.active {
                 if let Some(tab) = group.tabs.get(active) {
-                    if let Some(message) = tab.buffer.read(cx).external_change_message() {
+                    if let Some(message) = tab.buffer.read(cx).conflict_message() {
                         let buffer = tab.buffer.clone();
                         let reload_buffer = buffer.clone();
                         let keep_buffer = buffer.clone();
@@ -1815,7 +1827,7 @@ impl RustIdea {
                                                             reload_buffer.update(
                                                                 cx,
                                                                 |buffer, cx| {
-                                                                    buffer.reload_after_conflict(cx)
+                                                                    buffer.resolve_conflict_reload(cx)
                                                                 },
                                                             );
                                                             this.status =
@@ -1837,7 +1849,7 @@ impl RustIdea {
                                                     .on_click(cx.listener(
                                                         move |this, _: &ClickEvent, _window, cx| {
                                                             keep_buffer.update(cx, |buffer, cx| {
-                                                                buffer.keep_local_after_conflict(cx)
+                                                                buffer.resolve_conflict_keep_local(cx)
                                                             });
                                                             this.status =
                                                                 "Keeping the editor version".into();
@@ -2590,9 +2602,10 @@ impl RustIdea {
                 buffer.error().map(str::to_owned),
                 buffer.path().map(|path| path.display().to_string()),
                 buffer.is_large(),
+                buffer.sync_status(),
             )
         });
-        let (line, column, language, dirty, error, path, large) = active
+        let (line, column, language, dirty, error, path, large, sync) = active
             .map(|active| {
                 (
                     active.0.0,
@@ -2602,9 +2615,19 @@ impl RustIdea {
                     active.4,
                     active.5,
                     active.6,
+                    active.7,
                 )
             })
-            .unwrap_or((1, 1, "Plain text".into(), false, None, None, false));
+            .unwrap_or((
+                1,
+                1,
+                "Plain text".into(),
+                false,
+                None,
+                None,
+                false,
+                crate::document_buffer::SyncStatus::Synced,
+            ));
         let _ = language;
         let branch = self
             .git
@@ -2666,7 +2689,23 @@ impl RustIdea {
                     })
                     .when(large, |element| {
                         element.child(div().text_color(theme.warning).child("large file mode"))
-                    }),
+                    })
+                    .when(
+                        sync != crate::document_buffer::SyncStatus::Synced,
+                        |element| {
+                            element.child(
+                                div()
+                                    .text_color(
+                                        if sync == crate::document_buffer::SyncStatus::Conflict {
+                                            theme.error
+                                        } else {
+                                            theme.muted
+                                        },
+                                    )
+                                    .child(format!("sync: {sync:?}")),
+                            )
+                        },
+                    ),
             )
             .child(div().flex_1())
             .when(!error_text.is_empty(), |element| {
@@ -3265,114 +3304,5 @@ fn display_json_value(value: &serde_json::Value) -> String {
         }
         serde_json::Value::Null => "null".into(),
         value => value.to_string(),
-    }
-}
-
-/// Minimal terminal screen model for shell output. Escape sequences are
-/// consumed instead of printed; carriage returns, backspaces and the common
-/// erase-line/screen commands are applied. Full VT colour is intentionally
-/// not faked with literal escape text.
-fn terminal_display_lines(output: &str) -> Vec<String> {
-    let mut lines = vec![String::new()];
-    let mut chars = output.chars().peekable();
-    while let Some(character) = chars.next() {
-        match character {
-            '\x1b' => match chars.next() {
-                Some('[') => {
-                    let mut last = '\0';
-                    for code in chars.by_ref() {
-                        if ('\x40'..='\x7e').contains(&code) {
-                            last = code;
-                            break;
-                        }
-                    }
-                    match last {
-                        'K' => {
-                            if let Some(line) = lines.last_mut() {
-                                line.clear();
-                            }
-                        }
-                        'J' => {
-                            lines.clear();
-                            lines.push(String::new());
-                        }
-                        _ => {}
-                    }
-                }
-                Some(']') => {
-                    let mut previous = '\0';
-                    for code in chars.by_ref() {
-                        if code == '\x07' || (previous == '\x1b' && code == '\\') {
-                            break;
-                        }
-                        previous = code;
-                    }
-                }
-                Some(_) | None => {}
-            },
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                    lines.push(String::new());
-                } else if let Some(line) = lines.last_mut() {
-                    line.clear();
-                }
-            }
-            '\n' => lines.push(String::new()),
-            '\u{8}' => {
-                if let Some(line) = lines.last_mut() {
-                    line.pop();
-                }
-            }
-            '\t' => {
-                if let Some(line) = lines.last_mut() {
-                    line.push_str("    ");
-                }
-            }
-            '\x07' | '\x00'..='\x08' | '\x0b'..='\x1f' => {}
-            character => {
-                if let Some(line) = lines.last_mut() {
-                    line.push(character);
-                }
-            }
-        }
-    }
-    if lines.len() > 5000 {
-        lines.drain(..lines.len() - 5000);
-    }
-    lines
-}
-
-#[cfg(test)]
-mod tests {
-    use super::terminal_display_lines;
-
-    #[test]
-    fn terminal_consumes_ansi_and_applies_carriage_returns() {
-        assert_eq!(
-            terminal_display_lines("\x1b]0;title\x07\x1b[31mred\x1b[0m\rnext\n"),
-            ["next", ""]
-        );
-        assert_eq!(
-            terminal_display_lines("progress 10%\rprogress 20%"),
-            ["progress 20%"]
-        );
-    }
-
-    #[test]
-    fn terminal_applies_backspace_erase_line_and_tabs() {
-        assert_eq!(terminal_display_lines("abc\u{8}d"), ["abd"]);
-        assert_eq!(terminal_display_lines("old\x1b[2Knew"), ["new"]);
-        assert_eq!(terminal_display_lines("a\tb"), ["a    b"]);
-    }
-
-    #[test]
-    fn terminal_output_keeps_the_last_five_thousand_lines() {
-        let output = (0..5_010)
-            .map(|line| format!("{line}\n"))
-            .collect::<String>();
-        let lines = terminal_display_lines(&output);
-        assert_eq!(lines.len(), 5_000);
-        assert_eq!(lines.first().map(String::as_str), Some("11"));
     }
 }

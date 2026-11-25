@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use ide_vfs::{EntryKind, FileEntry};
 
+const PAGE_SIZE: usize = 2_000;
+
 /// One flattened, visible project-tree row. The model below materializes this
 /// list only from cached directory listings, so expanding a previously loaded
 /// directory never touches the filesystem.
@@ -16,6 +18,8 @@ pub struct ProjectNode {
     pub expanded: bool,
     pub ignored: bool,
     pub excluded: bool,
+    pub more: bool,
+    pub symlink: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +27,7 @@ pub enum Toggle {
     OpenFile(PathBuf),
     LoadDirectory(PathBuf),
     Rebuilt,
+    Symlink,
     Missing,
 }
 
@@ -32,6 +37,9 @@ pub struct ProjectTree {
     entries: HashMap<PathBuf, Vec<FileEntry>>,
     expanded: HashSet<PathBuf>,
     loading: HashSet<PathBuf>,
+    load_generations: HashMap<PathBuf, u64>,
+    next_generation: u64,
+    limits: HashMap<PathBuf, usize>,
     nodes: Arc<Vec<ProjectNode>>,
     error: Option<String>,
 }
@@ -45,6 +53,9 @@ impl ProjectTree {
             entries: HashMap::new(),
             expanded,
             loading: HashSet::new(),
+            load_generations: HashMap::new(),
+            next_generation: 0,
+            limits: HashMap::new(),
             nodes: Arc::new(Vec::new()),
             error: None,
         }
@@ -62,8 +73,23 @@ impl ProjectTree {
         !self.loading.is_empty()
     }
 
-    pub fn mark_loading(&mut self, dir: PathBuf) {
-        self.loading.insert(dir);
+    fn begin_load(&mut self, dir: &Path) -> Option<u64> {
+        if self.loading.contains(dir) {
+            return None;
+        }
+        self.next_generation = self.next_generation.wrapping_add(1);
+        let generation = self.next_generation;
+        self.loading.insert(dir.to_path_buf());
+        self.load_generations.insert(dir.to_path_buf(), generation);
+        Some(generation)
+    }
+
+    pub fn request_load(&mut self, dir: &Path) -> Option<u64> {
+        self.begin_load(dir)
+    }
+
+    pub fn is_current_load(&self, dir: &Path, generation: u64) -> bool {
+        self.load_generations.get(dir) == Some(&generation)
     }
 
     pub fn loaded_dirs(&self) -> Vec<PathBuf> {
@@ -75,13 +101,28 @@ impl ProjectTree {
     /// materialized until it is expanded again.
     pub fn apply_directory(&mut self, dir: PathBuf, listing: Vec<FileEntry>) {
         self.loading.remove(&dir);
+        self.load_generations.remove(&dir);
         self.entries.insert(dir, listing);
         self.error = None;
         self.rebuild();
     }
 
+    pub fn apply_directory_if_current(
+        &mut self,
+        dir: PathBuf,
+        generation: u64,
+        listing: Vec<FileEntry>,
+    ) -> bool {
+        if self.load_generations.get(&dir) != Some(&generation) {
+            return false;
+        }
+        self.apply_directory(dir, listing);
+        true
+    }
+
     pub fn apply_error(&mut self, dir: PathBuf, message: String) {
         self.loading.remove(&dir);
+        self.load_generations.remove(&dir);
         if self.expanded.contains(&dir) {
             self.error = Some(format!("{}: {message}", dir.display()));
         }
@@ -94,7 +135,16 @@ impl ProjectTree {
             return Toggle::Missing;
         };
         if !node.is_directory {
+            if node.more {
+                let limit = self.limits.entry(node.path).or_insert(PAGE_SIZE);
+                *limit = limit.saturating_add(PAGE_SIZE);
+                self.rebuild();
+                return Toggle::Rebuilt;
+            }
             return Toggle::OpenFile(node.path);
+        }
+        if node.symlink {
+            return Toggle::Symlink;
         }
         if self.expanded.remove(&node.path) {
             self.rebuild();
@@ -102,10 +152,9 @@ impl ProjectTree {
         }
         self.expanded.insert(node.path.clone());
         self.rebuild();
-        if self.entries.contains_key(&node.path) {
+        if self.entries.contains_key(&node.path) || self.loading.contains(&node.path) {
             Toggle::Rebuilt
         } else {
-            self.loading.insert(node.path.clone());
             Toggle::LoadDirectory(node.path)
         }
     }
@@ -165,6 +214,8 @@ impl ProjectTree {
             .collect();
         for loaded in &removed {
             self.entries.remove(loaded);
+            self.loading.remove(loaded);
+            self.load_generations.remove(loaded);
         }
         if !removed.is_empty() {
             self.rebuild();
@@ -177,6 +228,8 @@ impl ProjectTree {
     pub fn invalidate_loaded(&mut self) -> Vec<PathBuf> {
         let loaded = self.loaded_dirs();
         self.entries.clear();
+        self.loading.clear();
+        self.load_generations.clear();
         self.rebuild();
         loaded
     }
@@ -231,10 +284,17 @@ impl ProjectTree {
         let Some(entries) = self.entries.get(directory) else {
             return;
         };
-        for entry in entries {
+        let limit = self
+            .limits
+            .get(directory)
+            .copied()
+            .unwrap_or(PAGE_SIZE)
+            .min(entries.len());
+        for entry in entries.iter().take(limit) {
             let path = entry.path.0.clone();
             let is_directory = matches!(entry.kind, EntryKind::Dir)
                 || matches!(entry.target_kind, Some(EntryKind::Dir));
+            let symlink = matches!(entry.kind, EntryKind::Symlink);
             nodes.push(ProjectNode {
                 path: path.clone(),
                 name: entry.name.clone(),
@@ -243,10 +303,25 @@ impl ProjectTree {
                 expanded: is_directory && self.expanded.contains(&path),
                 ignored: entry.ignored,
                 excluded: entry.excluded,
+                more: false,
+                symlink,
             });
-            if is_directory && self.expanded.contains(&path) {
+            if is_directory && !symlink && self.expanded.contains(&path) {
                 self.visit(&path, depth + 1, nodes);
             }
+        }
+        if entries.len() > limit {
+            nodes.push(ProjectNode {
+                path: directory.to_path_buf(),
+                name: format!("Show {} more…", entries.len().saturating_sub(limit)),
+                depth,
+                is_directory: false,
+                expanded: false,
+                ignored: false,
+                excluded: false,
+                more: true,
+                symlink: false,
+            });
         }
     }
 }
@@ -317,6 +392,7 @@ mod tests {
         );
         let src = tree.nodes()[0].clone();
         assert_eq!(tree.toggle(0), Toggle::LoadDirectory(src.path));
+        assert!(tree.request_load(Path::new("/project/src")).is_some());
         assert!(tree.is_loading());
     }
 
@@ -377,5 +453,72 @@ mod tests {
         let reload = tree.note_external_changes(&[], &[PathBuf::from("/project/src")]);
         assert_eq!(reload, vec![PathBuf::from("/project")]);
         assert!(tree.nodes().iter().all(|node| node.name != "src"));
+    }
+
+    #[test]
+    fn duplicate_requests_for_one_directory_are_coalesced() {
+        let mut tree = ProjectTree::new(PathBuf::from("/project"));
+        let first = tree.request_load(Path::new("/project"));
+        assert!(first.is_some());
+        assert!(
+            tree.request_load(Path::new("/project")).is_none(),
+            "a loading directory must not issue a second request"
+        );
+    }
+
+    #[test]
+    fn stale_generation_cannot_overwrite_new_listing() {
+        let mut tree = ProjectTree::new(PathBuf::from("/project"));
+        let old = tree.request_load(Path::new("/project")).unwrap();
+        assert!(!tree.apply_directory_if_current(
+            PathBuf::from("/project"),
+            old + 1,
+            vec![entry("/project/old", "old", EntryKind::File)]
+        ));
+        assert!(tree.apply_directory_if_current(
+            PathBuf::from("/project"),
+            old,
+            vec![entry("/project/new", "new", EntryKind::File)]
+        ));
+        assert!(tree.nodes().iter().any(|node| node.name == "new"));
+    }
+
+    #[test]
+    fn huge_directory_is_paginated_without_hiding_files() {
+        let root = PathBuf::from("/project");
+        let mut tree = ProjectTree::new(root.clone());
+        let listing: Vec<_> = (0..5_000)
+            .map(|index| {
+                entry(
+                    &format!("/project/file-{index:04}.txt"),
+                    &format!("file-{index:04}.txt"),
+                    EntryKind::File,
+                )
+            })
+            .collect();
+        tree.apply_directory(root.clone(), listing);
+        assert_eq!(tree.nodes().len(), 2_001);
+        assert!(tree.nodes().last().is_some_and(|node| node.more));
+        let more = tree.nodes().len() - 1;
+        tree.toggle(more);
+        assert_eq!(tree.nodes().len(), 4_001);
+        tree.toggle(tree.nodes().len() - 1);
+        assert_eq!(tree.nodes().len(), 5_000);
+        assert_eq!(
+            tree.nodes().last().map(|node| node.name.as_str()),
+            Some("file-4999.txt")
+        );
+    }
+
+    #[test]
+    fn symlink_directories_are_not_recursed() {
+        let root = PathBuf::from("/project");
+        let mut tree = ProjectTree::new(root.clone());
+        let mut link = entry("/project/outside", "outside", EntryKind::Symlink);
+        link.target_kind = Some(EntryKind::Dir);
+        tree.apply_directory(root, vec![link]);
+        assert_eq!(tree.toggle(0), Toggle::Symlink);
+        assert_eq!(tree.nodes().len(), 1);
+        assert!(!tree.nodes()[0].expanded);
     }
 }

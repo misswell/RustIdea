@@ -581,16 +581,33 @@ impl RustIdea {
     }
 
     fn start_event_pump(&self, host: Arc<NativeHost>, cx: &mut Context<Self>) {
-        let Some(mut receiver) = host.take_events() else {
+        let Some(mut events) = host.take_events() else {
             return;
         };
+        let overflow = events.overflow.clone();
         cx.spawn(async move |this, cx| {
-            while let Some(event) = receiver.recv().await {
-                if this
-                    .update(cx, |app, cx| app.handle_ide_event(event, cx))
-                    .is_err()
-                {
-                    break;
+            loop {
+                tokio::select! {
+                    event = events.receiver.recv() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        if this
+                            .update(cx, |app, cx| app.handle_ide_event(event, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    _ = overflow.notified() => {
+                        let report = overflow.take_report();
+                        if this
+                            .update(cx, |app, cx| app.handle_event_overflow(report, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                 }
             }
         })
@@ -601,14 +618,26 @@ impl RustIdea {
         let Some(path) = self.session.last_project.clone() else {
             return;
         };
-        if path.is_dir() {
-            self.open_project(path, cx);
-        } else if path.is_file() {
-            self.ensure_project_for_file(path, None, cx);
-        } else {
-            self.status = format!("Last project is unavailable: {}", path.display());
-            cx.notify();
-        }
+        let runtime = self.host.runtime().clone();
+        let classify_path = path.clone();
+        cx.spawn(async move |this, cx| {
+            let (is_dir, is_file) = runtime
+                .spawn_blocking(move || (classify_path.is_dir(), classify_path.is_file()))
+                .await
+                .unwrap_or((false, false));
+            this.update(cx, |app, cx| {
+                if is_dir {
+                    app.open_project(path, cx);
+                } else if is_file {
+                    app.ensure_project_for_file(path, None, cx);
+                } else {
+                    app.status = format!("Last project is unavailable: {}", path.display());
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn open_startup_path(
@@ -617,14 +646,26 @@ impl RustIdea {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if path.is_dir() {
-            self.open_project(path, cx);
-        } else if path.is_file() {
-            self.ensure_project_for_file(path, Some(window), cx);
-        } else {
-            self.status = format!("Startup path is unavailable: {}", path.display());
-            cx.notify();
-        }
+        let runtime = self.host.runtime().clone();
+        let classify_path = path.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let (is_dir, is_file) = runtime
+                .spawn_blocking(move || (classify_path.is_dir(), classify_path.is_file()))
+                .await
+                .unwrap_or((false, false));
+            this.update_in(cx, |app, window, cx| {
+                if is_dir {
+                    app.open_project(path, cx);
+                } else if is_file {
+                    app.ensure_project_for_file(path, Some(window), cx);
+                } else {
+                    app.status = format!("Startup path is unavailable: {}", path.display());
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn active_group(&self) -> Option<&EditorGroup> {
@@ -697,6 +738,12 @@ impl RustIdea {
                     BufferEvent::ExternalResolved => {
                         app.status =
                             "Keeping the editor version; the next save will overwrite disk".into();
+                    }
+                    BufferEvent::SyncChanged => {}
+                    BufferEvent::SyncConflict => {
+                        if let Some(message) = buffer.read(cx).sync_conflict_message() {
+                            app.status = message.to_owned();
+                        }
                     }
                 }
                 cx.notify();
@@ -1053,12 +1100,7 @@ impl RustIdea {
         if self.opening_project {
             return;
         }
-        if !path.is_dir() {
-            self.status = format!("{} is not a directory", path.display());
-            cx.notify();
-            return;
-        }
-        let path = crate::document_store::normalize_path(&path);
+        let path = crate::document_store::lexical_path(&path);
         self.opening_project = true;
         self.status = format!("Opening project {}…", path.display());
         self.host.close_project();
@@ -1077,15 +1119,14 @@ impl RustIdea {
                 app.opening_project = false;
                 match result {
                     Ok(info) => {
-                        app.session.remember_project(&request_path);
-                        if let Err(error) = app.session_store.save(&app.session) {
-                            tracing::warn!(%error, "failed to persist RustIdea session");
-                        }
+                        let root = info.root.0.clone();
+                        app.session.remember_project(&root);
+                        app.persist_session(cx);
                         app.settings = info.settings.clone();
                         app.last_tree_epoch = app.last_tree_epoch.wrapping_add(1);
-                        app.project = Some(project_state(request_path.clone(), info));
-                        app.status = format!("Project {}", request_path.display());
-                        app.load_project_directory(request_path.clone(), cx);
+                        app.project = Some(project_state(root.clone(), info));
+                        app.status = format!("Project {}", root.display());
+                        app.load_project_directory(root, cx);
                         app.refresh_git(cx);
                     }
                     Err(error) => {
@@ -1118,9 +1159,7 @@ impl RustIdea {
                 let result = host.open_light(Some(&open_path)).await;
                 this.update(cx, |app, cx| {
                     if let Ok(info) = result {
-                        let root = crate::document_store::normalize_path(
-                            open_path.parent().unwrap_or(Path::new(".")),
-                        );
+                        let root = info.root.0.clone();
                         app.settings = info.settings.clone();
                         app.project = Some(project_state(root, info));
                     }
@@ -1134,9 +1173,7 @@ impl RustIdea {
                 let result = host.open_light(Some(&open_path)).await;
                 this.update(cx, |app, cx| {
                     if let Ok(info) = result {
-                        let root = crate::document_store::normalize_path(
-                            open_path.parent().unwrap_or(Path::new(".")),
-                        );
+                        let root = info.root.0.clone();
                         app.settings = info.settings.clone();
                         app.project = Some(project_state(root, info));
                     }
@@ -1155,7 +1192,7 @@ impl RustIdea {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        let key = DocumentKey::for_path(&path);
+        let key = DocumentKey::for_ui_path(&path);
         if let Some(buffer) = self.documents.get(&key).cloned()
             && let Some((group, tab)) = self.find_tab_any(&buffer, cx)
         {
@@ -1236,7 +1273,7 @@ impl RustIdea {
         self.pending_opens.remove(&key);
         match result {
             Ok(info) => {
-                let info_key = DocumentKey::for_path(&info.path.0);
+                let info_key = DocumentKey::for_ui_path(&info.path.0);
                 let (buffer, needs_view) =
                     if let Some(existing) = self.documents.get(&info_key).cloned() {
                         let _ = self.host.close_document(info.id);
@@ -1259,6 +1296,7 @@ impl RustIdea {
                     cx.notify();
                     return;
                 };
+                buffer.update(cx, |buffer, cx| buffer.start_disk_baseline_hash(cx));
                 if self.find_tab_any(&buffer, cx).is_some() {
                     if let Some((group, tab)) = self.find_tab_any(&buffer, cx) {
                         self.active_group = group;
@@ -1290,10 +1328,8 @@ impl RustIdea {
                     tab.editor
                         .update(cx, |editor, cx| editor.go_to_line(line, cx));
                 }
-                let info_path = crate::document_store::normalize_path(&info.path.0);
-                if let Some(project) = self.project.as_mut()
-                    && project.root.is_dir()
-                {
+                let info_path = crate::document_store::lexical_path(&info.path.0);
+                if let Some(project) = self.project.as_mut() {
                     let missing = project.tree.reveal_path(&info_path);
                     if !missing.is_empty() {
                         self.load_project_directories(missing, cx);
@@ -1399,9 +1435,7 @@ impl RustIdea {
                 )
             });
         }
-        if let Err(error) = self.session_store.save(&self.session) {
-            tracing::warn!(%error, "failed to persist theme");
-        }
+        self.persist_session(cx);
         self.status = format!("{} theme", self.theme.mode.name());
         cx.notify();
     }
@@ -1415,9 +1449,7 @@ impl RustIdea {
                 });
             }
         }
-        if let Err(error) = self.session_store.save(&self.session) {
-            tracing::warn!(%error, "failed to persist autosave setting");
-        }
+        self.persist_session(cx);
         self.status = if self.session.autosave {
             "Autosave enabled".into()
         } else {
@@ -1480,6 +1512,16 @@ impl RustIdea {
         cx.notify();
     }
 
+    fn persist_session(&self, _cx: &mut Context<Self>) {
+        let store = self.session_store.clone();
+        let session = self.session.clone();
+        self.host.runtime().spawn_blocking(move || {
+            if let Err(error) = store.save(&session) {
+                tracing::warn!(%error, "failed to persist RustIdea session");
+            }
+        });
+    }
+
     fn toggle_project_node(
         &mut self,
         index: usize,
@@ -1497,6 +1539,10 @@ impl RustIdea {
                 self.load_project_directory(directory, cx);
             }
             Toggle::Rebuilt => cx.notify(),
+            Toggle::Symlink => {
+                self.status = "Symlink directories are shown but not expanded automatically".into();
+                cx.notify();
+            }
             Toggle::Missing => {}
         }
     }
@@ -1514,23 +1560,20 @@ impl RustIdea {
         };
         let epoch = self.last_tree_epoch;
         let root = project.root.clone();
-        let directories: Vec<PathBuf> = directories
-            .into_iter()
-            .filter(|directory| {
-                if directory.starts_with(&root) {
-                    project.tree.mark_loading(directory.clone());
-                    true
-                } else {
-                    false
-                }
-            })
-            .collect();
-        if directories.is_empty() {
+        let mut requests = Vec::new();
+        for directory in directories {
+            if directory.starts_with(&root)
+                && let Some(generation) = project.tree.request_load(&directory)
+            {
+                requests.push((directory, generation));
+            }
+        }
+        if requests.is_empty() {
             return;
         }
         let host = self.host.clone();
         cx.spawn(async move |this, cx| {
-            for directory in directories {
+            for (directory, generation) in requests {
                 let result = host.read_dir(&directory).await;
                 let keep_going = this
                     .update(cx, |app, cx| {
@@ -1542,10 +1585,16 @@ impl RustIdea {
                         };
                         match result {
                             Ok(listing) => {
-                                project.tree.apply_directory(directory, listing);
+                                project.tree.apply_directory_if_current(
+                                    directory.clone(),
+                                    generation,
+                                    listing,
+                                );
                             }
                             Err(error) => {
-                                project.tree.apply_error(directory, error.message);
+                                if project.tree.is_current_load(&directory, generation) {
+                                    project.tree.apply_error(directory, error.message);
+                                }
                             }
                         }
                         cx.notify();
@@ -1625,13 +1674,22 @@ impl RustIdea {
             this.update_in(cx, |app, window, cx| match result {
                 Ok(Some(path)) => {
                     if directory {
-                        match ide_vfs::create_dir(&path) {
-                            Ok(()) => {
-                                app.status = format!("Created folder {}", path.display());
-                                app.refresh_project_path(&path, cx);
-                            }
-                            Err(error) => app.status = format!("Create failed: {}", error.message),
-                        }
+                        let host = app.host.clone();
+                        let create_path = path.clone();
+                        cx.spawn_in(window, async move |this, cx| {
+                            let result = host.create_dir_async(create_path).await;
+                            this.update_in(cx, |app, _window, cx| match result {
+                                Ok(()) => {
+                                    app.status = format!("Created folder {}", path.display());
+                                    app.refresh_project_path(&path, cx);
+                                }
+                                Err(error) => {
+                                    app.status = format!("Create failed: {}", error.message)
+                                }
+                            })
+                            .ok();
+                        })
+                        .detach();
                     } else {
                         let host = app.host.clone();
                         let create_path = path.clone();
@@ -1737,13 +1795,22 @@ impl RustIdea {
             this.update_in(cx, |app, window, cx| match result {
                 Ok(Some(path)) => {
                     if directory {
-                        match ide_vfs::create_dir(&path) {
-                            Ok(()) => {
-                                app.status = format!("Created folder {}", path.display());
-                                app.refresh_project_path(&path, cx);
-                            }
-                            Err(error) => app.status = format!("Create failed: {}", error.message),
-                        }
+                        let host = host.clone();
+                        let create_path = path.clone();
+                        cx.spawn_in(window, async move |this, cx| {
+                            let result = host.create_dir_async(create_path).await;
+                            this.update_in(cx, |app, _window, cx| match result {
+                                Ok(()) => {
+                                    app.status = format!("Created folder {}", path.display());
+                                    app.refresh_project_path(&path, cx);
+                                }
+                                Err(error) => {
+                                    app.status = format!("Create failed: {}", error.message)
+                                }
+                            })
+                            .ok();
+                        })
+                        .detach();
                     } else {
                         let runtime = host.runtime().clone();
                         let host_handle = host.host().clone();
@@ -1841,19 +1908,23 @@ impl RustIdea {
     }
 
     fn reveal_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open")
-                .arg("-R")
-                .arg(&path)
-                .spawn();
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            if let Some(parent) = path.parent() {
-                let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+        let runtime = self.host.runtime().clone();
+        let reveal_path = path.clone();
+        runtime.spawn_blocking(move || {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("open")
+                    .arg("-R")
+                    .arg(&reveal_path)
+                    .spawn();
             }
-        }
+            #[cfg(not(target_os = "macos"))]
+            {
+                if let Some(parent) = reveal_path.parent() {
+                    let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+                }
+            }
+        });
         self.status = format!("Revealed {}", path.display());
         cx.notify();
     }
@@ -3048,7 +3119,7 @@ impl RustIdea {
         let changed: HashSet<PathBuf> = paths
             .iter()
             .chain(removed)
-            .map(|path| crate::document_store::normalize_path(path))
+            .map(|path| crate::document_store::lexical_path(path))
             .collect();
         let buffers: Vec<Entity<DocumentBuffer>> = self
             .documents
@@ -3060,11 +3131,11 @@ impl RustIdea {
             let Some(path) = buffer.read(cx).path().map(Path::to_path_buf) else {
                 continue;
             };
-            if !changed.contains(&crate::document_store::normalize_path(&path)) {
+            if !changed.contains(&crate::document_store::lexical_path(&path)) {
                 continue;
             }
-            let detected = buffer.update(cx, |buffer, cx| buffer.check_external_change(cx));
-            conflict |= detected && buffer.read(cx).has_external_change();
+            buffer.update(cx, |buffer, cx| buffer.check_external_change_with_hash(cx));
+            conflict |= buffer.read(cx).has_external_change();
         }
         if conflict {
             cx.notify();
@@ -3077,6 +3148,40 @@ impl RustIdea {
         if !reload.is_empty() {
             self.load_project_directories(reload, cx);
         }
+    }
+
+    fn handle_event_overflow(
+        &mut self,
+        report: crate::native_host::OverflowReport,
+        cx: &mut Context<Self>,
+    ) {
+        if report.document_patches {
+            let buffers: Vec<Entity<DocumentBuffer>> = self
+                .documents
+                .iter()
+                .map(|(_, buffer)| buffer.clone())
+                .collect();
+            for buffer in buffers {
+                buffer.update(cx, |buffer, cx| buffer.force_resync(cx));
+            }
+        }
+        if let Some(file_changes) = report.file_changes {
+            self.handle_ide_event(file_changes, cx);
+        }
+        for event in report.coalesced {
+            self.handle_ide_event(event, cx);
+        }
+        if report.general && self.project.is_some() {
+            self.reload_project_tree(cx);
+            self.refresh_git(cx);
+        }
+        if report.dropped > 0 {
+            self.status = format!(
+                "Backend event backlog overflowed; recovered {} coalesced event(s)",
+                report.dropped
+            );
+        }
+        cx.notify();
     }
 
     fn handle_ide_event(&mut self, event: IdeEvent, cx: &mut Context<Self>) {
@@ -3232,7 +3337,7 @@ impl RustIdea {
         let Some(path) = buffer.read(cx).path().map(Path::to_path_buf) else {
             return;
         };
-        let new_key = DocumentKey::for_path(&path);
+        let new_key = DocumentKey::for_ui_path(&path);
         let Some(old_key) = self.documents.key_for_doc(doc).cloned() else {
             return;
         };

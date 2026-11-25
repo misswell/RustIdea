@@ -10,7 +10,7 @@ Status legend:
 - **Missing**: no native UI or adapter is present.
 
 This table is an honest Phase 0–2 inventory. It is not a claim of complete
-OpenIDEA parity. Phase 0–2 do not require every Phase 3–7 feature, and the 0.1.2
+OpenIDEA parity. Phase 0–2 do not require every Phase 3–7 feature, and the 0.2.0
 release must not be described as a complete IDE replacement.
 
 ## Shell and workbench
@@ -31,20 +31,20 @@ release must not be described as a complete IDE replacement.
 |---|---|---|
 | editor | **MVP native** | Real GPUI text editor over `ide-text`/Ropey; UTF-16 positions, virtualized visible lines, gutter line numbers, selections, caret, horizontal/vertical scrolling, clipboard, undo/redo, diagnostics underlines, Tree-sitter highlighting, save, save-as and autosave. |
 | macOS IME | **Partial** | `ElementInputHandler` marked text range and UTF-16 replacement are implemented; real Chinese IME composition has not been interactively verified. |
-| editor core rendering | **Partial** | Monospace text, line height, current-line/caret/selection/spans, CJK/astral text handling, horizontal scrolling and a bounded shaped-line layout cache exist. Soft wrap, RTL verification, font zoom, whitespace rendering, indent guides, relative numbers and minimap are missing. |
+| editor core rendering | **Partial** | Monospace text, line height, current-line/caret/selection/spans, CJK/astral text handling, horizontal scrolling and a bounded shaped-line layout cache exist. Syntax highlighting now parses in the background and commits only for the latest version. Soft wrap, RTL verification, font zoom, whitespace rendering, indent guides, relative numbers and minimap are missing. |
 | editor advanced editing | **Missing** | Multi-cursor, rectangular/column selection, bracket completion/matching, automatic and smart indent, code folding, sticky scroll, code lens, inline hints, overwrite mode and drag-to-move text. |
 | editor search | **Partial** | Project-wide search/replace is native; in-editor find-next, replace, regex match highlighting and all-match decorations are missing. |
 | editor LSP, code insight | **Partial** | Diagnostics, go-to-definition and format-document are wired. Completion, hover, rename, code actions, inlay hints, signatures, code actions and full navigation history are missing. |
 | navigation, structure | **Partial** | Native line navigation and a line-oriented structure panel exist. The symbol index/palette is basic; breadcrumbs, inheritance navigation and refactoring are missing. |
 | refactor, code actions | **Service only** | Reused crates compile; no native refactor command surface. |
-| multi-view synchronization | **MVP native** | `DocumentStore` canonicalizes paths, keeps one `DocumentBuffer` per file and reference-counts tabs/splits; Save As rekeys the same buffer. Interactive split editing remains unverified. |
-| external changes and conflict handling | **MVP native** | Host `DocPatched`, `DocDirty` and language events are applied. Disk stamps detect external writes/deletions; dirty buffers show a native Reload/Keep banner and saving is blocked until resolved. Interactive watcher timing remains unverified. |
+| multi-view synchronization | **MVP native** | `DocumentStore` uses lexical UI identity plus backend canonical identity, keeps one `DocumentBuffer` per file and reference-counts tabs/splits; Save As rekeys the same buffer. Pending edits coalesce into one backend diff, and disjoint backend edits are rebased. Interactive split editing remains unverified. |
+| external changes and conflict handling | **MVP native** | DiskVersion uses streamed BLAKE3 plus metadata; save-boundary verification blocks overwrite. Local/backend overlap uses a three-way merge or explicit Keep/Reload conflict; save waits for sync. Interactive watcher timing remains unverified. |
 
 ## Project and navigation
 
 | Upstream feature area | RustIdea status | Evidence and remaining work |
 |---|---|---|
-| project tree | **MVP native** | Reused `ide-vfs` listing with `.gitignore`/`.ignore`, async root and on-demand reads, per-directory cache, incremental watcher invalidation and GPUI `uniform_list` virtualization. Open files/folders, context menu, create file/folder, rename, trash, reveal and copy path work. Drag/drop, file icons and large-project interactive timing are unverified. |
+| project tree | **MVP native** | Reused `ide-vfs` listing with `.gitignore`/`.ignore`, async root and on-demand reads, per-directory generation deduplication, 2,000-row paging, incremental watcher invalidation and GPUI `uniform_list` virtualization. Open files/folders, context menu, create file/folder, rename, trash, reveal and copy path work. Drag/drop, file icons and large-project interactive timing are unverified. |
 | search | **MVP native** | Project search, case/regex/whole-word toggles, debounce/cancellation, file/line results, replace-in-files and jump-to-line. Search history, saved filters and complete encoding behavior are missing. |
 | scratch, TODO | **Missing** | No scratch files or TODO tool window. |
 | dependencies, libraries, dotnet, rails, cucumber, thymeleaf | **Service only** | Some language/project services are vendored; their tool windows and project-specific interactions are absent. |
@@ -62,7 +62,7 @@ release must not be described as a complete IDE replacement.
 
 | Upstream feature area | RustIdea status | Evidence and remaining work |
 |---|---|---|
-| terminal | **Partial** | Native shell tabs, command input, PTY output stream, ANSI consumption, carriage returns, backspace, tabs and output cap. It is not a full VT screen emulator: alternate screen, cursor addressing, colors and mouse/paste/resize are missing. |
+| terminal | **Partial** | Native shell tabs, command input, PTY output stream, bounded ANSI-consumed text display, carriage returns, backspace, tabs and output cap. It is not a full VT screen emulator: alternate screen, cursor addressing, colors and mouse/paste/resize are missing. |
 | run, run-anything | **Partial** | Native run configs, start/stop, streamed output. Debug-launch integration, environment editor, terminal task merging and run-anything catalogue are missing. |
 | build, build-tools | **Partial** | Build model summary and build output surface exist. Native build-tool configuration and full Gradle/Maven/sbt actions are missing. |
 | debugger | **Partial** | Attachable-process refresh and debug-config listing exist. There is no native DAP session UI, breakpoint editing, stack/variable/watch views or actual launch/attach control. |

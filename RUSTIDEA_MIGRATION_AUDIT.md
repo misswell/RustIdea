@@ -15,7 +15,7 @@ adapters from `ide-host` with Tauri-specific commands. Replacing the UI means
 replacing both the IPC transport and frontend business logic; calling the
 backend crates alone does not reproduce a feature.
 
-## Reuse boundary in RustIdea 0.1.2
+## Reuse boundary in the current RustIdea native build
 
 The workspace now contains 46 package manifests and 909 Rust files (about
 500,764 lines), including the 42 reused `ide-*` backend crates, their language,

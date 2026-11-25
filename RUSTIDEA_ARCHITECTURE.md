@@ -16,10 +16,10 @@ layer. There is no `LocalBackend`, Tauri IPC, React, CodeMirror, Monaco,
 xterm.js or WebView in the shipped application.
 
 Blocking or host-bound work is spawned on the runtime and results return to
-GPUI through tasks. `IdeEvent` messages are drained by the app and trigger
-diagnostics, document patches, dirty/language updates, trust changes, VCS/tree
-refreshes, server status and notifications. There is no Tauri IPC, React,
-CodeMirror, Monaco, xterm.js or WebView in the shipped application.
+GPUI through tasks. `IdeEvent` messages use a bounded queue (2,048 entries):
+coalescible events keep the latest logical state, filesystem batches merge path
+sets, document-patch loss sets a resync flag, and lifecycle/other loss sets a
+general refresh flag. The UI pump drains both the queue and overflow reports.
 
 ## UI composition
 
@@ -41,9 +41,10 @@ ranges.
 
 ## Documents
 
-`DocumentStore` is the canonical UI registry. File documents are keyed by a
-canonicalized path (existing symlinks resolve to one key); untitled buffers are
-keyed by the backend `DocId` until Save As assigns a path. The store counts
+`DocumentStore` is the canonical UI registry. On the UI thread, paths use pure
+lexical normalization; the backend `DocumentInfo.path` is the authoritative
+canonical identity once an open completes. Untitled buffers are keyed by the
+backend `DocId` until Save As assigns a path. The store counts
 tab/split views, returns the same `Entity<DocumentBuffer>` to every view, rekeys
 the same buffer on Save As, and releases the backend document exactly once
 when the last view closes. Concurrent opens of the same path are coalesced with
@@ -51,8 +52,19 @@ the `pending_opens` set.
 
 `DocumentBuffer` is the one editable UI mirror for that document. Views hold
 selection, scroll and focus independently, while all views observe the same
-buffer. The buffer owns local edit/undo history and version checks, pushes
-changes to the host registry, and applies host patches.
+buffer. Local edits are coalesced after a 50 ms debounce into one diff from the
+last confirmed base text. At most one request is in flight. Successful replies
+advance the confirmed version; edits made during the request stay pending.
+Backend patches for our own acknowledged version are ignored by
+`ignore_patches_through`. A version gap or rejected base version triggers a
+backend snapshot resync, never a blind full reload that discards unsynced
+input.
+
+When a backend patch overlaps pending local text, a pure three-way merge is
+attempted. Disjoint changes are rebased and applied as external edits (without
+adding undo entries); overlapping edits enter an explicit conflict that
+preserves local text until the user chooses **Keep local** or **Reload
+backend**. Save waits for synchronization and is refused in a conflict state.
 
 The host `ide-workspace` document registry remains authoritative for save,
 external disk tracking, LSP and workspace edits. It retains a synchronized
@@ -62,12 +74,14 @@ is no per-tab or per-split copy in RustIdea.
 
 ### External changes and conflicts
 
-Each buffer records the file's `(exists, mtime, length)` stamp. On a watcher
-event or an explicit check, a changed clean file is reloaded through the backend
-on the Tokio runtime. A changed dirty file raises an in-editor warning banner
-with **Reload from disk** and **Keep my version**. Saves are refused while an
-external reload or unresolved conflict is pending, so a save cannot silently
-overwrite a concurrent external edit. A deleted file is also reported explicitly.
+Each buffer records a `DiskVersion` containing `(exists, size, mtime, BLAKE3
+content hash)`. Hashing is streamed in 64 KiB chunks on the backend runtime,
+never on the GPUI thread. Metadata is a fast path; the hash catches same-length
+rewrites and timestamp-preserving changes. Save verification hashes the current
+file before writing. A changed clean file is resynced from the backend; a dirty
+or deleted file raises an explicit conflict banner with **Reload** and **Keep
+my version**. Saves are refused while a conflict is unresolved, so an external
+edit is never silently overwritten.
 
 ## Project tree
 
@@ -82,8 +96,12 @@ walker.
   zero filesystem calls.
 - File watcher events invalidate only the affected loaded parent directories;
   removed directories are not re-read.
-- Directory reads run on the backend runtime. Results are applied only when the
-  project generation still matches.
+- Each directory has one in-flight generation; duplicate requests are dropped,
+  and a stale result cannot replace a newer listing.
+- Directory reads run on the backend runtime. Results are applied only when both
+  the project generation and directory generation still match.
+- Directories after the first 2,000 entries show an explicit **Show N more…**
+  row; paging preserves access without building a 100,000-row element array.
 - The row list is rendered with GPUI `uniform_list`, so only visible rows are
   materialized even when a loaded project has tens of thousands of entries.
 
@@ -100,14 +118,17 @@ the shared buffer, so there is no editor observer maintaining duplicate labels.
 LSP and host boundary are UTF-16; byte offsets are converted at the editor
 input boundary. Original line endings are restored by `ide-text` on save.
 
-The editor virtualizes the visible line range. A bounded `LayoutCache` keeps
-shaped text and gutter numbers for the current window, invalidated by document
-version, IME marked range, theme or diagnostics epoch; scrolling reuses cached
-shapes instead of calling `shape_line` again. Undo/redo mirror only the exact
-inverse/forward edit set, not two full document copies. History is capped at
-1,000 transactions and autosave timers are coalesced. Documents over 4,000 lines
-or 512 KiB of UTF-16 text skip synchronous syntax parsing so large-file editing
-stays responsive; the backend's `large` flag also disables heavy features.
+The editor virtualizes the visible line range. Syntax highlighting is requested
+on the backend runtime, committed only for the latest document version and
+discarded when a newer edit arrives. A bounded `LayoutCache` keeps shaped text
+and gutter numbers for the current window, invalidated by document version, IME
+marked range, theme or diagnostics epoch; scrolling reuses cached shapes instead
+of calling `shape_line` again. Undo/redo mirror only the exact inverse/forward
+edit set, not two full document copies; external edits rebase history ranges.
+History is capped at 1,000 transactions and autosave timers are coalesced.
+Documents over 4,000 lines or 512 KiB of UTF-16 text skip syntax parsing so
+large-file editing stays responsive; the backend's `large` flag also disables
+heavy features.
 
 `crates/rustidea-editor/benches/document.rs` is the repeatable engine baseline:
 single-line edit, undo/redo and 60-line viewport extraction on synthetic 100k-

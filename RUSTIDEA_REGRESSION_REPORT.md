@@ -2,7 +2,7 @@
 
 ## Scope
 
-Version: `0.1.2` (working tree before release commit).  
+Version: `0.2.0` (working tree before final release commit).  
 Host: macOS 27.2.1, Apple M5, arm64.  
 Rust: 1.98.1, edition 2024.  
 Architecture: GPUI native application with reused Apache-2.0 `ide-*` backend
@@ -98,3 +98,31 @@ compare the same fixtures with OpenIDEA. Record at least five samples per
 performance scenario in `RUSTIDEA_PERFORMANCE_REPORT.md`. Do not declare Phase 2
 interactive acceptance, full OpenIDEA parity or performance targets passed
 until that evidence exists.
+
+## 0.2.0 stability pass (working tree after 4e4ba7a)
+
+### Automated evidence
+
+| Check | Result |
+|---|---|
+| `cargo test -p rustidea` | Pass: 31 binary tests + 67 integration tests |
+| document sync regression | Pass: 10,000 sequential inputs, disjoint rebase, explicit conflict |
+| multiview regression | Pass: shared handle, tab/split view counts, Save As rekey, last-view release |
+| event overflow regression | Pass: bounded queue coalescing and document/fs recovery flags |
+| project tree regression | Pass: 100,000-file paging, generation dedup, stale result rejection |
+| large-file regression | Pass: 1M-line edit/undo, 2M-character single line |
+| filesystem regression | Pass: `.gitignore`/`.ignore`, symlink reporting |
+| terminal regression | Pass: ANSI stripping, CR/backspace/tab, 5,000-line cap |
+| editor input regression | Pass: 10,000 UTF-16 inserts and CRLF normalization |
+| editor undo regression | Pass: external edit rebases history, multibyte undo/redo |
+
+### Important caveats
+
+- GUI interaction remains blocked by the locked macOS console; tests above are
+  engine/state-level evidence, not IME/window/clipboard acceptance.
+- The three-platform CI run for the final commit is the authoritative CI gate.
+  Earlier runs on `47d95a0` and `4e4ba7a` exposed missing CI native libraries,
+  missing plugin fixtures and missing `src/bindings.ts`; fixes are in the
+  working tree. Do not claim green until the final run succeeds.
+- Queue capacity, scroll FPS, input latency and long-running memory are not
+  measured with a GUI session.

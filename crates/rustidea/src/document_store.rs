@@ -14,8 +14,15 @@ pub enum DocumentKey {
 }
 
 impl DocumentKey {
+    #[cfg(test)]
     pub fn for_path(path: &Path) -> Self {
         Self::Path(normalize_path(path))
+    }
+
+    /// UI-thread-safe identity: lexical only. Backend `DocumentInfo` paths are
+    /// already absolute/canonical and should be used once the document opens.
+    pub fn for_ui_path(path: &Path) -> Self {
+        Self::Path(lexical_path(path))
     }
 
     pub fn for_untitled(doc: DocId) -> Self {
@@ -25,10 +32,16 @@ impl DocumentKey {
 
 /// Canonicalizes an existing file, or normalizes a path lexically when the
 /// file does not exist yet (for example a Save As target).
+#[cfg(test)]
 pub fn normalize_path(path: &Path) -> PathBuf {
     if let Ok(canonical) = std::fs::canonicalize(path) {
         return canonical;
     }
+    lexical_normalize(path)
+}
+
+/// Pure lexical normalization. Never touches the filesystem.
+pub fn lexical_path(path: &Path) -> PathBuf {
     lexical_normalize(path)
 }
 

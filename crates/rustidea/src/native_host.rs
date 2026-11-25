@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -8,20 +10,183 @@ use ide_language::{LanguageRegistry, Syntax};
 use ide_vfs::FileEntry;
 use ide_workspace::DocumentInfo;
 use parking_lot::Mutex;
-use std::future::Future;
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::Notify;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 pub const MAIN_WINDOW: &str = "main";
 const IDENTIFIER: &str = "com.guofeng.rustidea";
+const EVENT_CAPACITY: usize = 2048;
+
+#[derive(Clone, Debug, Default)]
+pub struct OverflowReport {
+    pub document_patches: bool,
+    pub file_changes: Option<IdeEvent>,
+    pub general: bool,
+    pub coalesced: Vec<IdeEvent>,
+    pub dropped: u64,
+}
+
+#[derive(Default)]
+struct OverflowState {
+    document_patches: bool,
+    general: bool,
+    created: BTreeSet<PathBuf>,
+    modified: BTreeSet<PathBuf>,
+    removed: BTreeSet<PathBuf>,
+    ignore_rules: BTreeSet<PathBuf>,
+    coalesced: BTreeMap<String, IdeEvent>,
+    dropped: u64,
+}
+
+pub struct EventOverflow {
+    state: Mutex<OverflowState>,
+    notify: Notify,
+}
+
+impl EventOverflow {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(OverflowState::default()),
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn record(&self, event: IdeEvent) {
+        {
+            let mut state = self.state.lock();
+            state.dropped += 1;
+            match event {
+                IdeEvent::DocPatched { .. } => state.document_patches = true,
+                IdeEvent::FsChanged {
+                    created,
+                    modified,
+                    removed,
+                    ignore_rules,
+                } => {
+                    state.created.extend(created.into_iter().map(|path| path.0));
+                    state
+                        .modified
+                        .extend(modified.into_iter().map(|path| path.0));
+                    state.removed.extend(removed.into_iter().map(|path| path.0));
+                    state
+                        .ignore_rules
+                        .extend(ignore_rules.into_iter().map(|path| path.0));
+                }
+                IdeEvent::Diagnostics {
+                    ref path,
+                    ref source,
+                    ..
+                } => {
+                    state.coalesced.insert(
+                        format!("diagnostics:{}:{}", path.0.display(), source),
+                        event,
+                    );
+                }
+                IdeEvent::Task { ref id, .. } => {
+                    state.coalesced.insert(format!("task:{}", id.0), event);
+                }
+                IdeEvent::IndexState { .. } => {
+                    state.coalesced.insert("index".into(), event);
+                }
+                IdeEvent::LanguageServer { ref name, .. } => {
+                    state.coalesced.insert(format!("server:{name}"), event);
+                }
+                IdeEvent::LanguageServerWarning { ref name, .. } => {
+                    state
+                        .coalesced
+                        .insert(format!("server-warning:{name}"), event);
+                }
+                IdeEvent::LanguageServerRemoved { ref server } => {
+                    state
+                        .coalesced
+                        .insert(format!("server-removed:{}", server.0), event);
+                }
+                IdeEvent::VcsChanged { .. } => {
+                    state.coalesced.insert("vcs".into(), event);
+                }
+                IdeEvent::Notify { ref level, .. } => {
+                    state.coalesced.insert(format!("notify:{level:?}"), event);
+                }
+                IdeEvent::SettingsChanged { .. } => {
+                    state.coalesced.insert("settings".into(), event);
+                }
+                IdeEvent::ProjectRootsChanged { .. } => {
+                    state.general = true;
+                    state.coalesced.insert("project-roots".into(), event);
+                }
+                _ => state.general = true,
+            }
+        }
+        self.notify.notify_one();
+    }
+
+    pub fn take_report(&self) -> OverflowReport {
+        let mut state = self.state.lock();
+        let dropped = state.dropped;
+        let file_changes = if state.created.is_empty()
+            && state.modified.is_empty()
+            && state.removed.is_empty()
+            && state.ignore_rules.is_empty()
+        {
+            None
+        } else {
+            Some(IdeEvent::FsChanged {
+                created: std::mem::take(&mut state.created)
+                    .into_iter()
+                    .map(ide_core::IpcPath)
+                    .collect(),
+                modified: std::mem::take(&mut state.modified)
+                    .into_iter()
+                    .map(ide_core::IpcPath)
+                    .collect(),
+                removed: std::mem::take(&mut state.removed)
+                    .into_iter()
+                    .map(ide_core::IpcPath)
+                    .collect(),
+                ignore_rules: std::mem::take(&mut state.ignore_rules)
+                    .into_iter()
+                    .map(ide_core::IpcPath)
+                    .collect(),
+            })
+        };
+        let report = OverflowReport {
+            document_patches: state.document_patches,
+            file_changes,
+            general: state.general,
+            coalesced: std::mem::take(&mut state.coalesced).into_values().collect(),
+            dropped,
+        };
+        state.document_patches = false;
+        state.general = false;
+        state.dropped = 0;
+        report
+    }
+
+    pub async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
+pub struct UiEvents {
+    pub receiver: Receiver<IdeEvent>,
+    pub overflow: Arc<EventOverflow>,
+}
 
 struct UiEventSink {
-    sender: UnboundedSender<IdeEvent>,
+    sender: Sender<IdeEvent>,
+    overflow: Arc<EventOverflow>,
 }
 
 impl ide_core::EventSink for UiEventSink {
     fn emit(&self, event: IdeEvent) {
-        let _ = self.sender.send(event);
+        match self.sender.try_send(event) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
+                self.overflow.record(event);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        }
     }
 }
 
@@ -35,7 +200,8 @@ fn same_window(window: &str) -> &str {
 pub struct NativeHost {
     runtime: Arc<Runtime>,
     host: Arc<Host>,
-    events: Mutex<Option<UnboundedReceiver<IdeEvent>>>,
+    events: Mutex<Option<Receiver<IdeEvent>>>,
+    overflow: Arc<EventOverflow>,
 }
 
 impl NativeHost {
@@ -79,8 +245,10 @@ impl NativeHost {
                 .enable_all()
                 .build()?,
         );
-        let (sender, receiver) = unbounded_channel();
+        let (sender, receiver) = channel(EVENT_CAPACITY);
         let sink_sender = sender.clone();
+        let overflow = Arc::new(EventOverflow::new());
+        let sink_overflow = overflow.clone();
         let host = Arc::new(Host::new(HostConfig {
             config_dir,
             data_dir,
@@ -90,6 +258,7 @@ impl NativeHost {
             sink_for: Box::new(move |_| {
                 Arc::new(UiEventSink {
                     sender: sink_sender.clone(),
+                    overflow: sink_overflow.clone(),
                 }) as SharedSink
             }),
             owner: same_window,
@@ -101,6 +270,7 @@ impl NativeHost {
             runtime,
             host,
             events: Mutex::new(Some(receiver)),
+            overflow,
         }))
     }
 
@@ -112,8 +282,11 @@ impl NativeHost {
         &self.runtime
     }
 
-    pub fn take_events(&self) -> Option<UnboundedReceiver<IdeEvent>> {
-        self.events.lock().take()
+    pub fn take_events(&self) -> Option<UiEvents> {
+        self.events.lock().take().map(|receiver| UiEvents {
+            receiver,
+            overflow: self.overflow.clone(),
+        })
     }
 
     /// Runs an OpenIDEA operation on the host's Tokio runtime. Several backend
@@ -192,6 +365,13 @@ impl NativeHost {
         .await
     }
 
+    pub async fn create_dir_async(&self, path: PathBuf) -> IdeResult<()> {
+        self.runtime
+            .spawn_blocking(move || ide_vfs::create_dir(&path))
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
     pub async fn open_document(&self, path: &Path) -> IdeResult<DocumentInfo> {
         let path = path.to_path_buf();
         self.run(
@@ -216,13 +396,24 @@ impl NativeHost {
         project.documents.snapshot(doc)
     }
 
-    pub fn apply_document_edit(
+    pub async fn document_info_async(&self, doc: DocId) -> IdeResult<DocumentInfo> {
+        self.run(move |host| async move {
+            let project = host.project(MAIN_WINDOW)?;
+            project.documents.snapshot(doc)
+        })
+        .await
+    }
+
+    pub async fn apply_document_edit_async(
         &self,
         doc: DocId,
         base_version: u32,
         changes: ide_core::ChangeSet,
     ) -> IdeResult<u32> {
-        ide_host::ops::doc::edit(&self.host, MAIN_WINDOW, doc, base_version, changes)
+        self.run(move |host| async move {
+            ide_host::ops::doc::edit(&host, MAIN_WINDOW, doc, base_version, changes)
+        })
+        .await
     }
 
     pub async fn reload_document_discarding_changes(&self, doc: DocId) -> IdeResult<()> {
@@ -244,12 +435,17 @@ impl NativeHost {
         .await
     }
 
-    pub fn highlights(
+    pub async fn highlights_async(
         &self,
-        language: &ide_core::LanguageId,
-        text: &str,
+        language: ide_core::LanguageId,
+        text: String,
     ) -> Option<ide_language::SyntaxHighlights> {
-        self.host.syntax().highlights(language, text)
+        let host = self.host.clone();
+        self.runtime
+            .spawn_blocking(move || host.syntax().highlights(&language, &text))
+            .await
+            .ok()
+            .flatten()
     }
 }
 
@@ -257,5 +453,91 @@ impl Drop for NativeHost {
     fn drop(&mut self) {
         self.host.close_project_detached(MAIN_WINDOW);
         self.host.stop_processes_on_exit();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ide_core::EventSink as _;
+    use ide_core::IpcPath;
+
+    fn paths(paths: &[&str]) -> Vec<IpcPath> {
+        paths
+            .iter()
+            .map(|path| IpcPath(PathBuf::from(path)))
+            .collect()
+    }
+
+    #[test]
+    fn full_queue_coalesces_progress_but_keeps_recovery_flags() {
+        let (sender, mut receiver) = channel(1);
+        let overflow = Arc::new(EventOverflow::new());
+        let sink = UiEventSink {
+            sender,
+            overflow: overflow.clone(),
+        };
+        sink.emit(IdeEvent::IndexState {
+            indexing: true,
+            files: 1,
+            symbols: 0,
+        });
+        sink.emit(IdeEvent::IndexState {
+            indexing: true,
+            files: 2,
+            symbols: 3,
+        });
+        sink.emit(IdeEvent::DocPatched {
+            doc: DocId(1),
+            base_version: 1,
+            version: 2,
+            changes: Vec::new(),
+            workspace_edit: false,
+        });
+        assert!(receiver.try_recv().is_ok());
+        let report = overflow.take_report();
+        assert_eq!(report.dropped, 2);
+        assert!(report.document_patches);
+        assert_eq!(report.coalesced.len(), 1);
+        assert!(matches!(
+            &report.coalesced[0],
+            IdeEvent::IndexState {
+                files: 2,
+                symbols: 3,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn filesystem_overflow_merges_every_path() {
+        let overflow = EventOverflow::new();
+        overflow.record(IdeEvent::FsChanged {
+            created: paths(&["/p/a"]),
+            modified: paths(&["/p/b"]),
+            removed: Vec::new(),
+            ignore_rules: Vec::new(),
+        });
+        overflow.record(IdeEvent::FsChanged {
+            created: paths(&["/p/c"]),
+            modified: paths(&["/p/b"]),
+            removed: paths(&["/p/d"]),
+            ignore_rules: paths(&["/p"]),
+        });
+        let report = overflow.take_report();
+        let Some(IdeEvent::FsChanged {
+            created,
+            modified,
+            removed,
+            ignore_rules,
+        }) = report.file_changes
+        else {
+            panic!("missing merged fs event");
+        };
+        assert_eq!(created.len(), 2);
+        assert_eq!(modified.len(), 1, "duplicates coalesce");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(ignore_rules.len(), 1);
+        assert_eq!(report.dropped, 2);
     }
 }

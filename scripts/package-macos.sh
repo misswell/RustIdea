@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-app_version="${APP_VERSION:-0.1.2}"
+app_version="${APP_VERSION:-0.2.0}"
 app_binary="${RUSTIDEA_APP_BINARY:-$repo_root/target/release/rustidea}"
 app_bundle="$repo_root/dist/RustIdea.app"
 contents="$app_bundle/Contents"

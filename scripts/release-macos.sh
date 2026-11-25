@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 notary_profile="${NOTARY_PROFILE:-agentspace-notary}"
-app_version="${APP_VERSION:-0.1.2}"
+app_version="${APP_VERSION:-0.2.0}"
 dist_dir="$repo_root/dist"
 app_bundle="$dist_dir/RustIdea.app"
 universal_binary="$dist_dir/rustidea-universal"

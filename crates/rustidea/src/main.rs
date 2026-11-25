@@ -1,10 +1,12 @@
 mod app;
 mod document_buffer;
 mod document_store;
+mod document_sync;
 mod editor;
 mod native_host;
 mod project_tree;
 mod session;
+mod terminal_display;
 mod text_input;
 mod theme;
 

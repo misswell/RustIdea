@@ -138,6 +138,7 @@ pub struct Editor {
     font_size: Pixels,
     line_height: Pixels,
     syntax_version: Option<u32>,
+    highlight_pending: Option<u32>,
     syntax_spans: Vec<(u32, u32, Hsla)>,
     diagnostic_spans: Vec<(u32, u32, Hsla)>,
     layout_epoch: u64,
@@ -174,6 +175,7 @@ impl Editor {
             font_size: px(14.0),
             line_height: px(21.0),
             syntax_version: None,
+            highlight_pending: None,
             syntax_spans: Vec::new(),
             diagnostic_spans: Vec::new(),
             layout_epoch: 0,
@@ -221,27 +223,48 @@ impl Editor {
         self.focus_handle.clone()
     }
 
-    fn refresh_highlights(&mut self, cx: &mut Context<Self>) {
+    fn request_highlights(&mut self, cx: &mut Context<Self>) {
         let version = self.buffer.read(cx).version();
-        if self.syntax_version == Some(version) {
+        if self.syntax_version == Some(version) || self.highlight_pending.is_some() {
             return;
         }
-        self.syntax_version = Some(version);
-        self.syntax_spans.clear();
-        let Some(highlights) = self.buffer.read(cx).syntax_highlights() else {
+        let Some((host, language, text)) = self.buffer.read(cx).highlight_context() else {
+            self.syntax_version = Some(version);
+            self.syntax_spans.clear();
+            self.layout_epoch = self.layout_epoch.wrapping_add(1);
             return;
         };
-        self.layout_epoch = self.layout_epoch.wrapping_add(1);
-        let theme = self.theme;
-        for chunk in highlights.data.as_chunks::<3>().0 {
-            let kind = highlights
-                .kinds
-                .get(chunk[2] as usize)
-                .copied()
-                .unwrap_or(ide_language::SyntaxHighlightKind::Variable);
-            self.syntax_spans
-                .push((chunk[0], chunk[1], theme.syntax(kind)));
-        }
+        self.highlight_pending = Some(version);
+        cx.spawn(async move |this, cx| {
+            let highlights = host.highlights_async(language, text).await;
+            this.update(cx, |editor, cx| {
+                editor.highlight_pending = None;
+                let current = editor.buffer.read(cx).version();
+                if current != version {
+                    editor.request_highlights(cx);
+                    return;
+                }
+                editor.syntax_version = Some(version);
+                editor.syntax_spans.clear();
+                if let Some(highlights) = highlights {
+                    let theme = editor.theme;
+                    for chunk in highlights.data.as_chunks::<3>().0 {
+                        let kind = highlights
+                            .kinds
+                            .get(chunk[2] as usize)
+                            .copied()
+                            .unwrap_or(ide_language::SyntaxHighlightKind::Variable);
+                        editor
+                            .syntax_spans
+                            .push((chunk[0], chunk[1], theme.syntax(kind)));
+                    }
+                }
+                editor.layout_epoch = editor.layout_epoch.wrapping_add(1);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
@@ -1231,7 +1254,7 @@ impl Element for EditorElement {
 
 impl Render for Editor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.refresh_highlights(cx);
+        self.request_highlights(cx);
         div()
             .size_full()
             .key_context("Editor")

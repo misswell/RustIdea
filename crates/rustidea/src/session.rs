@@ -39,6 +39,7 @@ impl Session {
     }
 }
 
+#[derive(Clone)]
 pub struct SessionStore {
     path: Option<PathBuf>,
 }
