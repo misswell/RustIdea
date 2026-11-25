@@ -31,6 +31,7 @@ ide-http = { path = "../../../../crates/ide-http" }
 ide-index = { path = "../../../../crates/ide-index" }
 ide-language.workspace = true
 ide-notebook = { path = "../../../../crates/ide-notebook" }
+ide-profiler = { path = "../../../../crates/ide-profiler" }
 ide-lsp.workspace = true
 ide-run = { path = "../../../../crates/ide-run" }
 ide-sdk = { path = "../../../../crates/ide-sdk" }

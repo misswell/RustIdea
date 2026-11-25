@@ -1298,6 +1298,19 @@ impl NativeHost {
         })
         .await
     }
+
+    pub async fn profile_collect(
+        &self,
+        spec: ide_profiler::ProfileSpec,
+    ) -> IdeResult<ide_profiler::Profile> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || ide_profiler::collect(&spec))
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
 }
 
 impl Drop for NativeHost {

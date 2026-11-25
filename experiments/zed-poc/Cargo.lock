@@ -6566,6 +6566,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ide-profiler"
+version = "0.2.0"
+dependencies = [
+ "ide-core",
+ "ide-jvm-attach",
+ "ide-run",
+ "serde",
+ "serde_json",
+ "specta",
+ "tracing",
+]
+
+[[package]]
 name = "ide-remote"
 version = "0.2.0"
 dependencies = [
@@ -12044,6 +12057,7 @@ dependencies = [
  "ide-language",
  "ide-lsp",
  "ide-notebook",
+ "ide-profiler",
  "ide-run",
  "ide-sdk",
  "ide-search",

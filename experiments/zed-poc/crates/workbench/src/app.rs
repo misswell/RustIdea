@@ -40,6 +40,7 @@ enum SidebarMode {
     Services,
     GitHub,
     Heap,
+    Profiler,
     Outline,
     Problems,
     Database,
@@ -88,6 +89,7 @@ enum Command {
     ShowServices,
     ShowGitHub,
     ShowHeap,
+    ShowProfiler,
     ShowOutline,
     ShowProblems,
     ShowDatabase,
@@ -118,7 +120,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 44] = [
+    const ALL: [Command; 45] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -136,6 +138,7 @@ impl Command {
         Command::ShowServices,
         Command::ShowGitHub,
         Command::ShowHeap,
+        Command::ShowProfiler,
         Command::ShowOutline,
         Command::ShowProblems,
         Command::ShowDatabase,
@@ -184,6 +187,7 @@ impl Command {
             Command::ShowServices => "Show Services",
             Command::ShowGitHub => "Show GitHub Pull Requests",
             Command::ShowHeap => "Show Heap Snapshot",
+            Command::ShowProfiler => "Show CPU Profile",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
             Command::ShowDatabase => "Show Database",
@@ -619,6 +623,11 @@ pub struct Workbench {
     heap_status: gpui::SharedString,
     heap_busy: bool,
     _heap_input_subscription: Subscription,
+    profile: Option<ide_profiler::Profile>,
+    profile_dir_input: Entity<TextInput>,
+    profile_status: gpui::SharedString,
+    profile_busy: bool,
+    _profile_input_subscription: Subscription,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -1109,6 +1118,21 @@ impl Workbench {
                 app.open_heap_snapshot(cx);
             }
         });
+        let profile_dir_input = cx.new(|cx| {
+            TextInput::new(
+                "Folder of Node .cpuprofile files…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let profile_input_subscription = cx.subscribe(&profile_dir_input, |app, _, event, cx| {
+            if let TextInputEvent::Submit(_) = event {
+                app.open_profile(cx);
+            }
+        });
         let setting_edit_input = cx.new(|cx| {
             TextInput::new(
                 "Setting value",
@@ -1216,6 +1240,11 @@ impl Workbench {
             heap_status: "Import an .hprof heap snapshot".into(),
             heap_busy: false,
             _heap_input_subscription: heap_input_subscription,
+            profile: None,
+            profile_dir_input,
+            profile_status: "Import a folder of .cpuprofile files".into(),
+            profile_busy: false,
+            _profile_input_subscription: profile_input_subscription,
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -4094,6 +4123,7 @@ impl Workbench {
             Command::ShowServices => self.select_sidebar(SidebarMode::Services, cx),
             Command::ShowGitHub => self.select_sidebar(SidebarMode::GitHub, cx),
             Command::ShowHeap => self.select_sidebar(SidebarMode::Heap, cx),
+            Command::ShowProfiler => self.select_sidebar(SidebarMode::Profiler, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
             Command::ShowDatabase => self.select_sidebar(SidebarMode::Database, cx),
@@ -5121,6 +5151,64 @@ impl Workbench {
         cx.notify();
     }
 
+    fn open_profile(&mut self, cx: &mut Context<Self>) {
+        if self.profile_busy {
+            return;
+        }
+        let raw = self.profile_dir_input.read(cx).content().trim().to_owned();
+        if raw.is_empty() {
+            self.profile_status = "Enter a folder containing .cpuprofile files".into();
+            cx.notify();
+            return;
+        }
+        let dir = PathBuf::from(raw);
+        let dir = if dir.is_absolute() {
+            dir
+        } else {
+            self.root.join(dir)
+        };
+        self.profile_status = format!("Reading profiles in {}…", dir.display()).into();
+        let spec = ide_profiler::ProfileSpec::CpuProfiles {
+            dir: dir.clone().into(),
+            root: self.root.clone().into(),
+        };
+        let host = self.host.clone();
+        self.profile_busy = true;
+        cx.spawn(async move |this, cx| {
+            let result = host.profile_collect(spec).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.profile_busy = false;
+                    match result {
+                        Ok(profile) => {
+                            app.profile_status = format!(
+                                "{} · {} frames · {} methods · {:.1} {}",
+                                profile.profiler,
+                                profile.frames.len(),
+                                profile.methods.len(),
+                                profile.total,
+                                profile.unit
+                            )
+                            .into();
+                            app.profile = Some(profile);
+                        }
+                        Err(error) => {
+                            app.profile = None;
+                            app.profile_status =
+                                format!("Profile failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn stage_all(&mut self, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = self
             .git_status
@@ -5544,6 +5632,7 @@ impl Workbench {
             SidebarMode::Services => "Services",
             SidebarMode::GitHub => "GitHub",
             SidebarMode::Heap => "Heap",
+            SidebarMode::Profiler => "Profiler",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
             SidebarMode::Database => "Database",
@@ -5971,6 +6060,38 @@ impl Workbench {
         self.heap_classes
             .first()
             .map(|class| format!("{} · {}", class.name, class.count))
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_profile(&mut self, dir: String, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Profiler, cx);
+        self.profile_dir_input.update(cx, |input, cx| {
+            input.set_content(dir, cx);
+        });
+        self.open_profile(cx);
+    }
+
+    pub fn profile_method_count(&self) -> usize {
+        self.profile
+            .as_ref()
+            .map(|profile| profile.methods.len())
+            .unwrap_or_default()
+    }
+
+    pub fn profile_status_text(&self) -> String {
+        self.profile_status.to_string()
+    }
+
+    pub fn profile_first_method(&self) -> String {
+        self.profile
+            .as_ref()
+            .and_then(|profile| {
+                profile
+                    .methods
+                    .first()
+                    .and_then(|method| profile.frames.get(method.frame as usize))
+            })
+            .map(|frame| frame.name.clone())
             .unwrap_or_default()
     }
 
@@ -9840,6 +9961,203 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_profiler(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("profile-methods")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        let Some(profile) = self.profile.as_ref() else {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(if self.profile_busy {
+                        "Reading CPU profiles…"
+                    } else {
+                        "No CPU profile loaded"
+                    }),
+            );
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(30.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .id("profile-open")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(9.5))
+                                .text_color(theme.text)
+                                .bg(theme.accent_muted)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.open_profile(cx);
+                                }))
+                                .child("Load"),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(theme.faint)
+                                .truncate()
+                                .child(self.profile_status.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .h(px(30.))
+                        .px_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(self.profile_dir_input.clone()),
+                )
+                .child(rows)
+                .into_any_element();
+        };
+        for (index, method) in profile.methods.iter().take(500).enumerate() {
+            let Some(frame) = profile.frames.get(method.frame as usize) else {
+                continue;
+            };
+            let file = frame.file.clone();
+            let line = frame.line.unwrap_or_default();
+            rows = rows.child(
+                div()
+                    .id(("profile-method", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .when(file.is_some(), |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(theme.panel_alt))
+                    })
+                    .when_some(file, |row, file| {
+                        row.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_or_goto(file.0.clone(), line, 0, window, cx);
+                        }))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(theme.text)
+                                    .child(frame.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(8.5))
+                                    .text_color(theme.faint)
+                                    .child(
+                                        frame
+                                            .file
+                                            .as_ref()
+                                            .map(|file| {
+                                                format!("{}:{}", file.0.display(), line + 1)
+                                            })
+                                            .unwrap_or_else(|| "(unknown source)".into()),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(66.))
+                            .text_size(px(9.))
+                            .text_color(theme.accent)
+                            .child(format!("{:.1} {}", method.total, profile.unit)),
+                    )
+                    .child(
+                        div()
+                            .w(px(58.))
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child(format!("{:.1}", method.self_weight)),
+                    ),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("profile-open")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.profile_busy {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.open_profile(cx);
+                            }))
+                            .child(if self.profile_busy {
+                                "Loading…"
+                            } else {
+                                "Load"
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.profile_status.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.profile_dir_input.clone()),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut results = div()
@@ -11423,6 +11741,7 @@ impl Render for Workbench {
         let services = self.render_services(cx);
         let github = self.render_github(cx);
         let heap = self.render_heap(cx);
+        let profiler = self.render_profiler(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
         let settings = self.render_settings(cx);
@@ -11438,6 +11757,7 @@ impl Render for Workbench {
             SidebarMode::Services => services,
             SidebarMode::GitHub => github,
             SidebarMode::Heap => heap,
+            SidebarMode::Profiler => profiler,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
             SidebarMode::Settings => settings,
@@ -11462,6 +11782,7 @@ impl Render for Workbench {
             ("SRV", SidebarMode::Services),
             ("GH", SidebarMode::GitHub),
             ("HEAP", SidebarMode::Heap),
+            ("PROF", SidebarMode::Profiler),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
             ("DB", SidebarMode::Database),

@@ -344,8 +344,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   marked-range path now forwards committed IME text and reports cursor bounds;
 - the sidebar is now a compact multi-panel workbench: Project, Search, TODO,
   Dependencies, Coverage, Bookmarks, Git, Git Log, Services, GitHub, Heap,
-  Outline, Problems, Database, HTTP, Remote, Notebook, MCP, Agents, Plugins,
-  Tools and Settings;
+  Profiler, Outline, Problems, Database, HTTP, Remote, Notebook, MCP, Agents,
+  Plugins, Tools and Settings;
 - Outline calls OpenIDEA's LSP/tree-sitter `doc_outline` and navigates
   selection; Problems aggregates real backend diagnostics and navigates to
   file/line;
@@ -378,7 +378,7 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - Cmd-P opens a native quick-open overlay backed by
   `ops::nav::find_files`; typing re-queries the project index and clicking or
   submitting opens the selected file;
-- Cmd-Shift-P opens a native command palette with 44 commands covering file
+- Cmd-Shift-P opens a native command palette with 45 commands covering file
   save/close, splits, every sidebar and bottom panel, run/build/rebuild and
   backend refreshes; filtering is local and execution uses the same methods as
   the buttons;
@@ -428,7 +428,7 @@ Panel coverage at this commit:
 | Project tree | working | `ops::fs::read_dir` |
 | Quick Open (Cmd-P) | working | `ops::nav::find_files` |
 | Zed default macOS keymap | loaded (603 bindings) | `settings::KeymapFile` |
-| Command Palette (Cmd-Shift-P) | working (44 commands) | local dispatch |
+| Command Palette (Cmd-Shift-P) | working (45 commands) | local dispatch |
 | Go to Symbol (Cmd-Shift-O) | working | `ops::nav::find_symbols` |
 | Find Usages (Alt-F7) | working | `ops::lsp::lsp_references` |
 | Find in Files | regex/case/whole-word + navigation | `ops::search` |
@@ -441,6 +441,7 @@ Panel coverage at this commit:
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers | `ide-docker` |
 | GitHub | repository/login status, PR list by state, labels/review/diff stats, open in browser | `ide-github` |
 | Heap | import `.hprof`, analyze, object/class summary, class table by retained size | `ops::heap::debug_heap_open/classes` |
+| Profiler | import Node `.cpuprofile` folders, method self/total weights, source navigation | `ide-profiler` |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
@@ -678,6 +679,13 @@ heap_status=rustidea-heap-sample.hprof · 8 objects · 7 classes
 heap_first="java.lang.Class · 7"
 ```
 
+Node CPU profile smoke with one `.cpuprofile`:
+
+```text
+profile_methods=2 profile_status=node --cpu-prof · 3 frames · 2 methods · 3.5 ms
+profile_first="work"
+```
+
 Build smoke on the Maven project:
 
 ```text
@@ -732,7 +740,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks: 42 passed; 0 failed
   requests, but details, diffs, review submission, checks and timeline views
   are missing. Heap imports and lists classes, but capture from a live JVM,
   dominator pages, instance details, path-to-GC-root and snapshot comparison
-  are missing. The Terminal now has a real VT screen
+  are missing. Profiler imports Node CPU profiles and lists methods, but
+  recording new profiles, Python/JVM/perf formats and the call-tree view are
+  missing. The Terminal now has a real VT screen
   and OpenIDEA PTY, but its mouse selection, hyperlinks, IME composition and
   resize path are not yet verified or complete (the IME input handler is
   wired, but locked-screen visual/IME verification is still unavailable).
