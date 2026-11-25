@@ -794,6 +794,13 @@ impl NativeHost {
         .await
     }
 
+    pub async fn coverage_import(&self, path: PathBuf) -> IdeResult<ide_coverage::CoverageSuite> {
+        self.run(move |host| async move {
+            ide_host::ops::coverage::coverage_import(&host, MAIN_WINDOW, path.into()).await
+        })
+        .await
+    }
+
     pub async fn build_run(
         &self,
         kind: ide_build::compile::BuildKind,

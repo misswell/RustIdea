@@ -5,6 +5,7 @@ mod bridge;
 mod build_tools;
 mod code_actions;
 mod completion;
+mod coverage;
 mod documents;
 mod host;
 mod java;
@@ -306,6 +307,7 @@ fn main() {
                 let smoke_todo = std::env::var_os("RUSTIDEA_ZED_SMOKE_TODO").is_some();
                 let smoke_dependencies =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_DEPENDENCIES").is_some();
+                let smoke_coverage = std::env::var("RUSTIDEA_ZED_SMOKE_COVERAGE").ok();
                 let completion_position = std::env::var("RUSTIDEA_ZED_SMOKE_COMPLETION_POS")
                     .ok()
                     .and_then(|position| {
@@ -407,6 +409,9 @@ fn main() {
                                 if smoke_dependencies {
                                     app.smoke_dependencies(cx);
                                 }
+                                if let Some(path) = &smoke_coverage {
+                                    app.smoke_coverage(path.clone(), cx);
+                                }
                                 if let Some((line, column)) = completion_position {
                                     app.smoke_request_completion(line, column, cx);
                                 }
@@ -438,7 +443,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -454,6 +459,9 @@ fn main() {
                                     app.dependency_status(),
                                     app.dependency_first_module(),
                                     app.dependency_first_library(),
+                                    app.coverage_file_count(),
+                                    app.coverage_status(),
+                                    app.coverage_first(),
                                     app.smoke_git_branch(),
                                     app.smoke_git_files(),
                                     app.terminal_status(),

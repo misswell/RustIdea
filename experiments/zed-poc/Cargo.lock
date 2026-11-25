@@ -12019,6 +12019,7 @@ dependencies = [
  "ide-agent",
  "ide-build",
  "ide-core",
+ "ide-coverage",
  "ide-dap",
  "ide-db",
  "ide-host",

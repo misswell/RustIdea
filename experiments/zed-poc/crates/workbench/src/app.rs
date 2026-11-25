@@ -33,6 +33,7 @@ enum SidebarMode {
     Search,
     Todo,
     Dependencies,
+    Coverage,
     Git,
     Outline,
     Problems,
@@ -67,6 +68,7 @@ enum Command {
     ShowSearch,
     ShowTodo,
     ShowDependencies,
+    ShowCoverage,
     ShowGit,
     ShowOutline,
     ShowProblems,
@@ -98,7 +100,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 38] = [
+    const ALL: [Command; 39] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -109,6 +111,7 @@ impl Command {
         Command::ShowSearch,
         Command::ShowTodo,
         Command::ShowDependencies,
+        Command::ShowCoverage,
         Command::ShowGit,
         Command::ShowOutline,
         Command::ShowProblems,
@@ -151,6 +154,7 @@ impl Command {
             Command::ShowSearch => "Show Find in Files",
             Command::ShowTodo => "Show TODO",
             Command::ShowDependencies => "Show Dependencies",
+            Command::ShowCoverage => "Show Coverage",
             Command::ShowGit => "Show Version Control",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
@@ -489,6 +493,12 @@ pub struct Workbench {
     dependency_filter: String,
     dependency_show_modules: bool,
     _dependency_filter_subscription: Subscription,
+    coverage_suite: Option<ide_coverage::CoverageSuite>,
+    coverage_rows: Vec<crate::coverage::CoverageRow>,
+    coverage_status: gpui::SharedString,
+    coverage_path_input: Entity<TextInput>,
+    coverage_sort_lines: bool,
+    _coverage_input_subscription: Subscription,
     git_status: Vec<ide_vcs::FileStatus>,
     git_branch: Option<ide_vcs::BranchInfo>,
     git_message_input: Entity<TextInput>,
@@ -914,6 +924,22 @@ impl Workbench {
                     cx.notify();
                 }
             });
+        let coverage_path_input = cx.new(|cx| {
+            TextInput::new(
+                "Coverage report path (lcov, JaCoCo XML, Go cover profile)…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let coverage_input_subscription =
+            cx.subscribe(&coverage_path_input, |app, _, event, cx| {
+                if let TextInputEvent::Submit(_) = event {
+                    app.import_coverage(cx);
+                }
+            });
         let setting_edit_input = cx.new(|cx| {
             TextInput::new(
                 "Setting value",
@@ -975,6 +1001,12 @@ impl Workbench {
             dependency_filter: String::new(),
             dependency_show_modules: true,
             _dependency_filter_subscription: dependency_filter_subscription,
+            coverage_suite: None,
+            coverage_rows: Vec::new(),
+            coverage_status: "Import a coverage report to inspect it".into(),
+            coverage_path_input,
+            coverage_sort_lines: true,
+            _coverage_input_subscription: coverage_input_subscription,
             git_status: Vec::new(),
             git_branch: None,
             git_message_input,
@@ -2797,6 +2829,64 @@ impl Workbench {
         cx.notify();
     }
 
+    fn import_coverage(&mut self, cx: &mut Context<Self>) {
+        let raw = self
+            .coverage_path_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if raw.is_empty() {
+            self.coverage_status = "Enter a coverage report path".into();
+            cx.notify();
+            return;
+        }
+        let path = PathBuf::from(raw);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.root.join(path)
+        };
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.coverage_status = format!("Importing {}…", path.display()).into();
+        cx.spawn(async move |this, cx| {
+            let result = host.coverage_import(path.clone()).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(suite) => {
+                            let mut rows = crate::coverage::coverage_rows(&root, &suite);
+                            crate::coverage::sort_rows(&mut rows, app.coverage_sort_lines);
+                            let (covered, total, _, _) = crate::coverage::totals(&suite.files);
+                            app.coverage_status = format!(
+                                "{} · {} files · {} lines",
+                                suite.runner,
+                                suite.files.len(),
+                                crate::coverage::format_percent(covered, total)
+                            )
+                            .into();
+                            app.coverage_rows = rows;
+                            app.coverage_suite = Some(suite);
+                        }
+                        Err(error) => {
+                            app.coverage_rows.clear();
+                            app.coverage_suite = None;
+                            app.coverage_status =
+                                format!("Coverage import failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn run_build(&mut self, kind: ide_build::compile::BuildKind, cx: &mut Context<Self>) {
         if self.build_running {
             return;
@@ -3724,6 +3814,7 @@ impl Workbench {
             Command::ShowSearch => self.select_sidebar(SidebarMode::Search, cx),
             Command::ShowTodo => self.select_sidebar(SidebarMode::Todo, cx),
             Command::ShowDependencies => self.select_sidebar(SidebarMode::Dependencies, cx),
+            Command::ShowCoverage => self.select_sidebar(SidebarMode::Coverage, cx),
             Command::ShowGit => self.select_sidebar(SidebarMode::Git, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
@@ -4719,6 +4810,7 @@ impl Workbench {
             SidebarMode::Search => "Search",
             SidebarMode::Todo => "TODO",
             SidebarMode::Dependencies => "Dependencies",
+            SidebarMode::Coverage => "Coverage",
             SidebarMode::Git => "Git",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
@@ -4974,6 +5066,29 @@ impl Workbench {
         self.dependency_coordinates
             .first()
             .map(crate::build_tools::coordinate_label)
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_coverage(&mut self, path: String, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Coverage, cx);
+        self.coverage_path_input.update(cx, |input, cx| {
+            input.set_content(path, cx);
+        });
+        self.import_coverage(cx);
+    }
+
+    pub fn coverage_file_count(&self) -> usize {
+        self.coverage_rows.len()
+    }
+
+    pub fn coverage_status(&self) -> String {
+        self.coverage_status.to_string()
+    }
+
+    pub fn coverage_first(&self) -> String {
+        self.coverage_rows
+            .first()
+            .map(|row| row.rel_path.clone())
             .unwrap_or_default()
     }
 
@@ -8505,6 +8620,155 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_coverage(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let has_branches = self
+            .coverage_suite
+            .as_ref()
+            .is_some_and(|suite| suite.has_branches);
+        let mut rows = div()
+            .id("coverage-files")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.coverage_rows.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(if self.coverage_status.starts_with("Importing") {
+                        "Importing report…"
+                    } else {
+                        "No coverage data. Import an lcov, JaCoCo or Go report."
+                    }),
+            );
+        }
+        for (index, row) in self.coverage_rows.iter().take(1_000).enumerate() {
+            let path = row.path.clone();
+            let branches_covered = row.branches_covered;
+            let branches_total = row.branches_total;
+            let lines_percent = crate::coverage::percent(row.lines_covered, row.lines_total);
+            let color = match lines_percent {
+                Some(percent) if percent < 50.0 => theme.error,
+                Some(percent) if percent < 80.0 => theme.warning,
+                Some(_) => theme.accent,
+                None => theme.faint,
+            };
+            rows = rows.child(
+                div()
+                    .id(("coverage-file", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.5))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_path(path.clone(), cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .child(row.rel_path.clone()),
+                    )
+                    .when(has_branches, |item| {
+                        item.child(
+                            div()
+                                .w(px(72.))
+                                .text_size(px(9.))
+                                .text_color(theme.faint)
+                                .child(crate::coverage::format_percent(
+                                    branches_covered,
+                                    branches_total,
+                                )),
+                        )
+                    })
+                    .child(div().w(px(82.)).text_size(px(9.5)).text_color(color).child(
+                        crate::coverage::format_percent(row.lines_covered, row.lines_total),
+                    )),
+            );
+        }
+        let sort_lines = self.coverage_sort_lines;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("coverage-import")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.import_coverage(cx);
+                            }))
+                            .child("Import"),
+                    )
+                    .child(
+                        div()
+                            .id("coverage-sort")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if sort_lines { theme.text } else { theme.faint })
+                            .bg(if sort_lines {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.coverage_sort_lines = !this.coverage_sort_lines;
+                                crate::coverage::sort_rows(
+                                    &mut this.coverage_rows,
+                                    this.coverage_sort_lines,
+                                );
+                                cx.notify();
+                            }))
+                            .child(if sort_lines { "Line % ↑" } else { "Path A-Z" }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.coverage_status.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.coverage_path_input.clone()),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_bottom_panel(
         &mut self,
         _window: &mut Window,
@@ -9204,6 +9468,7 @@ impl Render for Workbench {
         let search = self.render_search_panel(cx);
         let todo = self.render_todo(cx);
         let dependencies = self.render_dependencies(cx);
+        let coverage = self.render_coverage(cx);
         let git = self.render_git_panel(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
@@ -9213,6 +9478,7 @@ impl Render for Workbench {
             SidebarMode::Search => search,
             SidebarMode::Todo => todo,
             SidebarMode::Dependencies => dependencies,
+            SidebarMode::Coverage => coverage,
             SidebarMode::Git => git,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
@@ -9231,6 +9497,7 @@ impl Render for Workbench {
             ("SRC", SidebarMode::Search),
             ("TODO", SidebarMode::Todo),
             ("DEP", SidebarMode::Dependencies),
+            ("COV", SidebarMode::Coverage),
             ("GIT", SidebarMode::Git),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),

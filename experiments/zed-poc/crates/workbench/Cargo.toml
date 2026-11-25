@@ -21,6 +21,7 @@ gpui_platform.workspace = true
 ide-core.workspace = true
 ide-agent = { path = "../../../../crates/ide-agent" }
 ide-build = { path = "../../../../crates/ide-build" }
+ide-coverage = { path = "../../../../crates/ide-coverage" }
 ide-db = { path = "../../../../crates/ide-db" }
 ide-dap = { path = "../../../../crates/ide-dap" }
 ide-host.workspace = true
