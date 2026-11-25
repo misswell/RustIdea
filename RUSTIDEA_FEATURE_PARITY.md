@@ -33,8 +33,8 @@ release must not be described as a complete IDE replacement.
 | macOS IME | **Partial** | `ElementInputHandler` marked text range and UTF-16 replacement are implemented; real Chinese IME composition has not been interactively verified. |
 | editor core rendering | **Partial** | Monospace text, line height, current-line/caret/selection/spans, CJK/astral text handling, horizontal scrolling and a bounded shaped-line layout cache exist. Syntax highlighting now parses in the background and commits only for the latest version. Soft wrap, RTL verification, font zoom, whitespace rendering, indent guides, relative numbers and minimap are missing. |
 | editor advanced editing | **Missing** | Multi-cursor, rectangular/column selection, bracket completion/matching, automatic and smart indent, code folding, sticky scroll, code lens, inline hints, overwrite mode and drag-to-move text. |
-| editor search | **Partial** | Project-wide search/replace is native; in-editor find-next, replace, regex match highlighting and all-match decorations are missing. |
-| editor LSP, code insight | **Partial** | Diagnostics, go-to-definition and format-document are wired. Completion, hover, rename, code actions, inlay hints, signatures, code actions and full navigation history are missing. |
+| editor search | **Partial** | Project-wide search/replace and in-editor find-next/find-previous with wrapping are native. In-editor replace, regex options and all-match decorations are missing. |
+| editor LSP, code insight | **Partial** | Diagnostics, completion (filter, snippet insertion and additional edits), hover documentation, rename through a workspace edit, code actions with edit application, go-to-definition and format-document are wired. References, signature help, inlay hints, semantic tokens, folding ranges and full navigation history are missing. Command-only code actions are reported as unavailable. |
 | navigation, structure | **Partial** | Native line navigation and a line-oriented structure panel exist. The symbol index/palette is basic; breadcrumbs, inheritance navigation and refactoring are missing. |
 | refactor, code actions | **Service only** | Reused crates compile; no native refactor command surface. |
 | multi-view synchronization | **MVP native** | `DocumentStore` uses lexical UI identity plus backend canonical identity, keeps one `DocumentBuffer` per file and reference-counts tabs/splits; Save As rekeys the same buffer. Pending edits coalesce into one backend diff, and disjoint backend edits are rebased. Interactive split editing remains unverified. |
@@ -56,7 +56,7 @@ release must not be described as a complete IDE replacement.
 |---|---|---|
 | VCS status, staging, commit, log, diff | **MVP native** | Native changes/log/branch panels, stage/unstage/discard/commit and textual diff preview via `ops::vcs`. Inline editable diff, blame, shelves UI, merge/rebase workflows and full hunk application are missing. |
 | GitHub | **Service only** | `ide-github` is vendored; no native GitHub UI or operations. |
-| remote development, SSH, deployment | **Placeholder** | Remote Host panel exists but is an explanatory stub. No SSH configs, remote mounts, port forwarding or deployment actions. |
+| remote development, SSH, deployment | **Partial** | Remote Host panel lists the reused OpenIDEA SSH configurations, shows live connected state and opens a real SSH shell through `ide_ssh`/`ops::term::spawn_ssh`; disconnect is wired. Remote filesystem mounts, port forwarding, deployment targets and configuration editing are missing. |
 
 ## Execution, debugging and tools
 
@@ -86,13 +86,15 @@ release must not be described as a complete IDE replacement.
 
 1. Finish interactive Phase 2 evidence: window/clipboard/undo/IME, large-file timing and sustained-memory checks.
 2. Finish Phase 3 editor capabilities.
-3. Implement native LSP completion, hover, rename, code actions and full
+3. Finish the remaining LSP surfaces: references, signature help, inlay hints,
+   semantic tokens, folding ranges, command-backed code actions and complete
    diagnostics navigation.
 4. Build true multi-window and crash-recovery tests; conflict tests exist.
 5. Replace terminal ANSI text handling with a complete native terminal screen
    model or a non-WebView equivalent.
 6. Implement actual DAP sessions and debug panels.
-7. Implement plugin, MCP, agent, remote/SSH and tools surfaces.
+7. Implement plugin, MCP and agent surfaces, then finish remote filesystem
+   mounts, port forwarding and deployment on top of the working SSH shell.
 8. Port remaining language/tool windows without WebView fallback.
 9. Complete OpenIDEA data migration and item-by-item parity tests.
 10. Collect the OpenIDEA/RustIdea UI performance baseline and interactive

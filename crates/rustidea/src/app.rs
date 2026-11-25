@@ -11,7 +11,7 @@ use gpui::{
 };
 use ide_core::event::{IdeEvent, NotifyLevel, ServerStatus};
 use ide_core::settings::Settings;
-use ide_core::{Diagnostic, DocId, RequestId, Severity};
+use ide_core::{Diagnostic, DocId, Pos, RequestId, Severity};
 use ide_host::ops::project::ProjectInfo;
 use ide_host::ops::vcs;
 use ide_index::SymbolFilter;
@@ -68,9 +68,16 @@ actions!(
         RefreshProject,
         TrustProject,
         FindInFile,
+        FindNext,
+        FindPrevious,
         FormatDocument,
         GoToDefinition,
         GoToLine,
+        Completion,
+        Hover,
+        RenameSymbol,
+        CodeActions,
+        DismissOverlay,
         SelectAll,
         ShowCharacterPalette,
         NewTerminal,
@@ -207,6 +214,7 @@ struct GitState {
     selected: Option<PathBuf>,
     commit_message: String,
     diff_preview: Option<(PathBuf, String)>,
+    output: String,
     loading: bool,
     error: Option<String>,
 }
@@ -233,6 +241,11 @@ enum OverlayKind {
     QuickOpen,
     SearchEverywhere,
     GoToLine,
+    Completion,
+    Hover,
+    Rename,
+    CodeActions,
+    Find,
 }
 
 #[derive(Clone, Debug)]
@@ -258,6 +271,15 @@ enum UiAction {
     RefreshGit,
     OpenSettings,
     GoToLinePrompt,
+    Completion,
+    Hover,
+    RenameSymbol,
+    CodeActions,
+    FindInFile,
+    FindNext,
+    FindPrevious,
+    ApplyCompletion(Box<ide_lsp::types::CompletionItem>),
+    ApplyCodeAction(Box<ide_lsp::types::CodeAction>),
     None,
 }
 
@@ -274,6 +296,7 @@ struct OverlayState {
     items: Vec<PaletteItem>,
     selected: usize,
     error: Option<String>,
+    message: Option<String>,
 }
 
 struct DragState {
@@ -359,10 +382,17 @@ pub struct RustIdea {
     _db_subscriptions: Vec<Subscription>,
     db_result: String,
     db_status: Option<String>,
+    ssh_configs: Vec<ide_core::remote_settings::SshConfiguration>,
+    ssh_status: Option<String>,
     server_statuses: BTreeMap<String, (ServerStatus, Option<String>)>,
     pending_close: Option<Entity<DocumentBuffer>>,
     opening_project: bool,
     last_tree_epoch: u64,
+    completion_items: Vec<ide_lsp::types::CompletionItem>,
+    code_action_items: Vec<ide_lsp::types::CodeAction>,
+    pending_editor_focus: bool,
+    pending_ui_action: Option<UiAction>,
+    find_query: String,
 }
 
 impl RustIdea {
@@ -406,6 +436,7 @@ impl RustIdea {
                     app.schedule_search(cx);
                 }
                 TextInputEvent::Submit(_) => app.run_search(cx),
+                TextInputEvent::MoveSelection(_) => {}
                 TextInputEvent::Cancel => {
                     app.sidebar_kind = SidebarKind::Project;
                     cx.notify();
@@ -417,6 +448,7 @@ impl RustIdea {
             |app: &mut RustIdea, _input, event: &TextInputEvent, cx| match event {
                 TextInputEvent::Change(value) => app.search.replace = value.clone(),
                 TextInputEvent::Submit(_) => app.replace_all(cx),
+                TextInputEvent::MoveSelection(_) => {}
                 TextInputEvent::Cancel => {
                     app.search.replace_mode = false;
                     cx.notify();
@@ -441,6 +473,7 @@ impl RustIdea {
             |app: &mut RustIdea, _input, event: &TextInputEvent, cx| match event {
                 TextInputEvent::Change(query) => app.update_overlay_items(query, cx),
                 TextInputEvent::Submit(_) => app.accept_overlay(cx),
+                TextInputEvent::MoveSelection(delta) => app.move_overlay_selection(*delta, cx),
                 TextInputEvent::Cancel => {
                     app.overlay = None;
                     cx.notify();
@@ -474,6 +507,7 @@ impl RustIdea {
                     let _ = app;
                 }
                 TextInputEvent::Change(_) => {}
+                TextInputEvent::MoveSelection(_) => {}
             },
         ));
 
@@ -571,10 +605,17 @@ impl RustIdea {
             _db_subscriptions: db_subscriptions,
             db_result: String::new(),
             db_status: None,
+            ssh_configs: Vec::new(),
+            ssh_status: None,
             server_statuses: BTreeMap::new(),
             pending_close: None,
             opening_project: false,
             last_tree_epoch: 0,
+            completion_items: Vec::new(),
+            code_action_items: Vec::new(),
+            pending_editor_focus: false,
+            pending_ui_action: None,
+            find_query: String::new(),
         };
         app.start_event_pump(host_for_pump, cx);
         app
@@ -1480,6 +1521,7 @@ impl RustIdea {
             SidebarKind::Git => self.refresh_git(cx),
             SidebarKind::Settings => self.reload_settings(cx),
             SidebarKind::Database => self.load_db_sources(cx),
+            SidebarKind::Remote => self.load_ssh_configs(cx),
             _ => {}
         }
         cx.notify();
@@ -2076,6 +2118,109 @@ impl RustIdea {
             .ok();
         })
         .detach();
+        cx.notify();
+    }
+
+    fn attach_terminal_stream(
+        &mut self,
+        id: ide_core::TerminalId,
+        mut output: tokio::sync::mpsc::UnboundedReceiver<String>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            while let Some(chunk) = output.recv().await {
+                this.update(cx, |app, cx| {
+                    if let Some(terminal) = app
+                        .terminals
+                        .iter_mut()
+                        .find(|terminal| terminal.info.id == id)
+                    {
+                        terminal.output.push_str(&chunk);
+                        if terminal.output.len() > 4_000_000 {
+                            let split = terminal.output.len().saturating_sub(3_500_000);
+                            terminal.output.drain(..split);
+                        }
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn load_ssh_configs(&mut self, cx: &mut Context<Self>) {
+        self.ssh_configs = self.host.host().ssh.configs();
+        self.ssh_status = Some(format!("{} SSH configuration(s)", self.ssh_configs.len()));
+        cx.notify();
+    }
+
+    fn connect_ssh(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(config) = self.ssh_configs.get(index).cloned() else {
+            return;
+        };
+        let host = self.host.clone();
+        let id = config.id.clone();
+        self.ssh_status = Some(format!("Connecting {}…", config.label()));
+        cx.spawn(async move |this, cx| {
+            let (tx, output) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let emit: ide_host::ops::Emit<String> = Arc::new(move |chunk| {
+                let _ = tx.send(chunk);
+            });
+            let runtime = host.runtime().clone();
+            let host_handle = host.host().clone();
+            let result = runtime
+                .spawn(async move {
+                    ide_host::ops::term::spawn_ssh(
+                        &host_handle,
+                        crate::native_host::MAIN_WINDOW,
+                        &id,
+                        120,
+                        30,
+                        emit,
+                    )
+                    .await
+                })
+                .await;
+            this.update(cx, |app, cx| {
+                match result {
+                    Ok(Ok(info)) => {
+                        app.ssh_status = Some(format!("Connected {}", info.title));
+                        app.status = format!("SSH terminal {} started", info.title);
+                        app.bottom_kind = BottomKind::Terminal;
+                        app.bottom_visible = true;
+                        app.active_terminal = app.terminals.len();
+                        let terminal_id = info.id;
+                        app.terminals.push(TerminalTab {
+                            info,
+                            output: String::new(),
+                        });
+                        app.attach_terminal_stream(terminal_id, output, cx);
+                    }
+                    Ok(Err(error)) => {
+                        app.ssh_status = Some(error.message.clone());
+                        app.status = format!("SSH connection failed: {}", error.message);
+                    }
+                    Err(error) => {
+                        app.ssh_status = Some(format!("SSH task failed: {error}"));
+                        app.status = format!("SSH connection failed: {error}");
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn disconnect_ssh(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(config) = self.ssh_configs.get(index).cloned() else {
+            return;
+        };
+        self.host.host().ssh.disconnect(&config.id);
+        self.ssh_status = Some(format!("Disconnected {}", config.label()));
+        self.status = format!("Disconnected {}", config.label());
         cx.notify();
     }
 
@@ -3549,8 +3694,462 @@ impl RustIdea {
         cx.notify();
     }
 
+    /// Request completions at the active caret and show them in the shared
+    /// palette overlay. The backend language-server request runs off the UI
+    /// thread; only the ready list is installed in the workbench.
+    fn request_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let Some(doc) = tab.buffer.read(cx).host_doc() else {
+            self.status = "The active buffer has no language server document".into();
+            cx.notify();
+            return;
+        };
+        let offset = tab.editor.read(cx).cursor_offset(cx);
+        let (line, col) = tab.buffer.read(cx).offset_to_line_col(offset);
+        let host = self.host.clone();
+        self.status = "Loading completions…".into();
+        cx.spawn_in(window, async move |this, cx| {
+            let request = RequestId::next();
+            let result = host
+                .run(move |backend| async move {
+                    ide_host::ops::lsp::lsp_completion(
+                        &backend,
+                        crate::native_host::MAIN_WINDOW,
+                        request,
+                        doc,
+                        Pos::new(line, col),
+                        None,
+                    )
+                    .await
+                })
+                .await;
+            this.update_in(cx, |app, window, cx| {
+                match result {
+                    Ok(list) if !list.items.is_empty() => {
+                        app.completion_items = list.items;
+                        let input = app.palette_input.clone();
+                        app.overlay = Some(OverlayState {
+                            kind: OverlayKind::Completion,
+                            input: input.clone(),
+                            items: Vec::new(),
+                            selected: 0,
+                            error: None,
+                            message: None,
+                        });
+                        input.update(cx, |input, cx| input.clear(cx));
+                        app.update_overlay_items("", cx);
+                        let focus = input.read(cx).focus_handle(cx);
+                        window.focus(&focus);
+                        app.status = format!("{} completion(s)", app.completion_items.len());
+                    }
+                    Ok(_) => app.status = "No completions at the caret".into(),
+                    Err(error) => app.status = format!("Completion failed: {}", error.message),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Show the language server's documentation for the symbol at the caret.
+    fn request_hover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let Some(doc) = tab.buffer.read(cx).host_doc() else {
+            self.status = "The active buffer has no language server document".into();
+            cx.notify();
+            return;
+        };
+        let offset = tab.editor.read(cx).cursor_offset(cx);
+        let (line, col) = tab.buffer.read(cx).offset_to_line_col(offset);
+        let host = self.host.clone();
+        self.status = "Loading documentation…".into();
+        cx.spawn_in(window, async move |this, cx| {
+            let request = RequestId::next();
+            let result = host
+                .run(move |backend| async move {
+                    ide_host::ops::lsp::lsp_hover(
+                        &backend,
+                        crate::native_host::MAIN_WINDOW,
+                        request,
+                        doc,
+                        Pos::new(line, col),
+                    )
+                    .await
+                })
+                .await;
+            this.update_in(cx, |app, window, cx| {
+                match result {
+                    Ok(Some(hover)) => {
+                        app.overlay = Some(OverlayState {
+                            kind: OverlayKind::Hover,
+                            input: app.palette_input.clone(),
+                            items: Vec::new(),
+                            selected: 0,
+                            error: None,
+                            message: Some(hover.contents.value),
+                        });
+                        window.focus(&app.focus_handle.clone());
+                        app.status = "Documentation".into();
+                    }
+                    Ok(None) => app.status = "No documentation at the caret".into(),
+                    Err(error) => app.status = format!("Hover failed: {}", error.message),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Ask for a new symbol name. The rename itself runs after the prompt is
+    /// submitted so the popup cannot block on a slow language server.
+    fn open_rename_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        if tab.buffer.read(cx).host_doc().is_none() {
+            self.status = "The active buffer has no language server document".into();
+            cx.notify();
+            return;
+        }
+        let offset = tab.editor.read(cx).cursor_offset(cx);
+        let (line, col) = tab.buffer.read(cx).offset_to_line_col(offset);
+        let current_range = tab.buffer.read(cx).word_range_at(offset);
+        let current = tab
+            .buffer
+            .read(cx)
+            .slice(current_range.start, current_range.end);
+        let input = self.palette_input.clone();
+        input.update(cx, |input, cx| input.clear(cx));
+        self.overlay = Some(OverlayState {
+            kind: OverlayKind::Rename,
+            input: input.clone(),
+            items: vec![PaletteItem {
+                title: "Type the new name and press Enter".into(),
+                detail: if current.is_empty() {
+                    format!("line {}, column {}", line + 1, col + 1)
+                } else {
+                    format!("Rename {current}")
+                },
+                action: UiAction::None,
+            }],
+            selected: 0,
+            error: None,
+            message: None,
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        self.status = if current.is_empty() {
+            "Rename symbol at the caret".into()
+        } else {
+            format!("Rename {current}")
+        };
+        cx.notify();
+    }
+
+    fn apply_rename(&mut self, new_name: String, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let Some(doc) = tab.buffer.read(cx).host_doc() else {
+            self.status = "The active buffer has no language server document".into();
+            cx.notify();
+            return;
+        };
+        let offset = tab.editor.read(cx).cursor_offset(cx);
+        let (line, col) = tab.buffer.read(cx).offset_to_line_col(offset);
+        let host = self.host.clone();
+        self.status = format!("Renaming to {new_name}…");
+        cx.spawn(async move |this, cx| {
+            let request = RequestId::next();
+            let renamed = host
+                .run(move |backend| async move {
+                    ide_host::ops::lsp::lsp_rename(
+                        &backend,
+                        crate::native_host::MAIN_WINDOW,
+                        request,
+                        doc,
+                        Pos::new(line, col),
+                        new_name,
+                    )
+                    .await
+                })
+                .await;
+            let result = match renamed {
+                Ok(renamed) if renamed.edit.files.is_empty() => {
+                    Err("The language server found nothing to rename".to_owned())
+                }
+                Ok(renamed) => {
+                    let edit = renamed.edit;
+                    host.run(move |backend| async move {
+                        ide_host::ops::lsp::apply_workspace_edit(
+                            &backend,
+                            crate::native_host::MAIN_WINDOW,
+                            edit,
+                        )
+                        .await
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.message)
+                }
+                Err(error) => Err(error.message),
+            };
+            this.update(cx, |app, cx| {
+                match result {
+                    Ok(()) => app.status = "Rename applied".into(),
+                    Err(message) => app.status = format!("Rename failed: {message}"),
+                }
+                app.pending_editor_focus = true;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn request_code_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let Some(doc) = tab.buffer.read(cx).host_doc() else {
+            self.status = "The active buffer has no language server document".into();
+            cx.notify();
+            return;
+        };
+        let offset = tab.editor.read(cx).cursor_offset(cx);
+        let (line, col) = tab.buffer.read(cx).offset_to_line_col(offset);
+        let position = Pos::new(line, col);
+        let range = ide_core::Range::new(position, position);
+        let host = self.host.clone();
+        self.status = "Loading code actions…".into();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = host
+                .run(move |backend| async move {
+                    ide_host::ops::lsp::lsp_code_actions(
+                        &backend,
+                        crate::native_host::MAIN_WINDOW,
+                        doc,
+                        range,
+                        Vec::new(),
+                    )
+                    .await
+                })
+                .await;
+            this.update_in(cx, |app, window, cx| {
+                match result {
+                    Ok(actions) if !actions.is_empty() => {
+                        app.code_action_items = actions;
+                        let input = app.palette_input.clone();
+                        input.update(cx, |input, cx| input.clear(cx));
+                        app.overlay = Some(OverlayState {
+                            kind: OverlayKind::CodeActions,
+                            input: input.clone(),
+                            items: Vec::new(),
+                            selected: 0,
+                            error: None,
+                            message: None,
+                        });
+                        app.update_overlay_items("", cx);
+                        let focus = input.read(cx).focus_handle(cx);
+                        window.focus(&focus);
+                        app.status = format!("{} code action(s)", app.code_action_items.len());
+                    }
+                    Ok(_) => app.status = "No code actions at the caret".into(),
+                    Err(error) => app.status = format!("Code actions failed: {}", error.message),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn apply_completion(&mut self, item: ide_lsp::types::CompletionItem, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let buffer = tab.buffer.clone();
+        let anchor = tab.editor.read(cx).cursor_offset(cx);
+        let fallback = buffer.read(cx).word_range_at(anchor);
+        let replace = match item.replace_range {
+            Some(range) => {
+                let start = buffer
+                    .read(cx)
+                    .offset_for_line_col(range.start.line, range.start.col);
+                let end = buffer
+                    .read(cx)
+                    .offset_for_line_col(range.end.line, range.end.col);
+                start..end.max(start)
+            }
+            None => fallback,
+        };
+        let text = if item.is_snippet {
+            ide_lsp::snippet_text(&item.insert_text)
+        } else {
+            item.insert_text.clone()
+        };
+        let mut edits: Vec<(u32, u32, String)> = Vec::new();
+        edits.push((replace.start, replace.end, text.clone()));
+        for edit in &item.additional_edits {
+            let start = buffer
+                .read(cx)
+                .offset_for_line_col(edit.range.start.line, edit.range.start.col);
+            let end = buffer
+                .read(cx)
+                .offset_for_line_col(edit.range.end.line, edit.range.end.col);
+            edits.push((start, end.max(start), edit.new_text.clone()));
+        }
+        edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+        let shift: i64 = edits
+            .iter()
+            .filter(|(start, end, _)| {
+                *end <= replace.start && !(*start == replace.start && *end == replace.end)
+            })
+            .map(|(start, end, text)| {
+                text.encode_utf16().count() as i64 - (*end as i64 - *start as i64)
+            })
+            .sum();
+        buffer.update(cx, |buffer, cx| {
+            for (start, end, text) in edits {
+                buffer.apply_local(start..end, &text, rustidea_editor::EditSource::Local, cx);
+            }
+        });
+        let caret =
+            (replace.start as i64 + text.encode_utf16().count() as i64 + shift).max(0) as u32;
+        tab.editor
+            .update(cx, |editor, cx| editor.place_caret(caret, cx));
+        self.overlay = None;
+        self.pending_editor_focus = true;
+        self.status = format!("Inserted {}", item.label);
+        cx.notify();
+    }
+
+    fn apply_code_action(&mut self, action: ide_lsp::types::CodeAction, cx: &mut Context<Self>) {
+        self.overlay = None;
+        let Some(edit) = action.edit else {
+            self.status = if action.command.is_some() {
+                format!(
+                    "“{}” needs a client command and is not available in the native build yet",
+                    action.title
+                )
+            } else {
+                format!("“{}” has no edit to apply", action.title)
+            };
+            self.pending_editor_focus = true;
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let title = action.title.clone();
+        self.status = format!("Applying {}…", action.title);
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .run(move |backend| async move {
+                    ide_host::ops::lsp::apply_workspace_edit(
+                        &backend,
+                        crate::native_host::MAIN_WINDOW,
+                        edit,
+                    )
+                    .await
+                })
+                .await;
+            this.update(cx, |app, cx| {
+                match result {
+                    Ok(()) => app.status = format!("Applied {title}"),
+                    Err(error) => app.status = format!("Code action failed: {}", error.message),
+                }
+                app.pending_editor_focus = true;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn go_to_line_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_command_palette(window, OverlayKind::GoToLine, cx);
+    }
+
+    fn open_find_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab().is_none() {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        }
+        let input = self.palette_input.clone();
+        input.update(cx, |input, cx| input.clear(cx));
+        self.overlay = Some(OverlayState {
+            kind: OverlayKind::Find,
+            input: input.clone(),
+            items: vec![PaletteItem {
+                title: "Type text and press Enter to find the next match".into(),
+                detail: if self.find_query.is_empty() {
+                    "⌘G next · Ctrl+Shift+G previous".into()
+                } else {
+                    format!("Last: {}", self.find_query)
+                },
+                action: UiAction::None,
+            }],
+            selected: 0,
+            error: None,
+            message: None,
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        self.status = "Find in file".into();
+        cx.notify();
+    }
+
+    fn run_find(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.find_query.is_empty() {
+            self.status = "Enter text to find first".into();
+            cx.notify();
+            return;
+        }
+        let Some(tab) = self.active_tab() else {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let query = self.find_query.clone();
+        let found = tab
+            .editor
+            .update(cx, |editor, cx| editor.find(&query, forward, cx));
+        self.status = if found {
+            format!(
+                "{}: {query}",
+                if forward {
+                    "Found next"
+                } else {
+                    "Found previous"
+                }
+            )
+        } else {
+            format!("No match for {query}")
+        };
+        self.pending_editor_focus = true;
+        cx.notify();
     }
 
     fn open_problem(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -3579,10 +4178,27 @@ impl RustIdea {
             items: Vec::new(),
             selected: 0,
             error: None,
+            message: None,
         });
         self.update_overlay_items("", cx);
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus);
+        cx.notify();
+    }
+
+    fn move_overlay_selection(&mut self, delta: i8, cx: &mut Context<Self>) {
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        let len = overlay.items.len();
+        if len == 0 {
+            return;
+        }
+        overlay.selected = if delta < 0 {
+            overlay.selected.saturating_sub(1)
+        } else {
+            (overlay.selected + 1).min(len - 1)
+        };
         cx.notify();
     }
 
@@ -3622,6 +4238,82 @@ impl RustIdea {
                     overlay.selected = 0;
                 }
             }
+            OverlayKind::Completion => {
+                let items = self
+                    .completion_items
+                    .iter()
+                    .filter(|item| {
+                        query.is_empty()
+                            || item.label.to_lowercase().contains(&query)
+                            || item
+                                .filter_text
+                                .as_deref()
+                                .is_some_and(|text| text.to_lowercase().contains(&query))
+                            || item
+                                .detail
+                                .as_deref()
+                                .is_some_and(|text| text.to_lowercase().contains(&query))
+                    })
+                    .map(|item| {
+                        let mut detail = item.label_detail.clone().unwrap_or_default();
+                        if let Some(description) = &item.label_description {
+                            if !detail.is_empty() {
+                                detail.push(' ');
+                            }
+                            detail.push_str(description);
+                        } else if let Some(description) = &item.detail {
+                            if !detail.is_empty() {
+                                detail.push(' ');
+                            }
+                            detail.push_str(description);
+                        }
+                        if detail.is_empty() {
+                            detail = item
+                                .kind
+                                .map(|kind| format!("{kind:?}"))
+                                .unwrap_or_default();
+                        }
+                        PaletteItem {
+                            title: item.label.clone(),
+                            detail,
+                            action: UiAction::ApplyCompletion(Box::new(item.clone())),
+                        }
+                    })
+                    .collect();
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.items = items;
+                    overlay.selected = 0;
+                }
+            }
+            OverlayKind::CodeActions => {
+                let items = self
+                    .code_action_items
+                    .iter()
+                    .filter(|action| {
+                        query.is_empty() || action.title.to_lowercase().contains(&query)
+                    })
+                    .map(|action| PaletteItem {
+                        title: action.title.clone(),
+                        detail: action
+                            .kind
+                            .clone()
+                            .or_else(|| action.disabled_reason.clone())
+                            .unwrap_or_else(|| {
+                                if action.edit.is_some() {
+                                    "Edit".into()
+                                } else {
+                                    "Command".into()
+                                }
+                            }),
+                        action: UiAction::ApplyCodeAction(Box::new(action.clone())),
+                    })
+                    .collect();
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.items = items;
+                    overlay.selected = 0;
+                }
+            }
+            OverlayKind::Rename | OverlayKind::Hover | OverlayKind::Find => {}
             OverlayKind::QuickOpen | OverlayKind::SearchEverywhere => {
                 if query.is_empty() {
                     if let Some(overlay) = self.overlay.as_mut() {
@@ -3730,6 +4422,54 @@ impl RustIdea {
             cx.notify();
             return;
         }
+        if matches!(
+            overlay.kind,
+            OverlayKind::Completion
+                | OverlayKind::CodeActions
+                | OverlayKind::Rename
+                | OverlayKind::Hover
+                | OverlayKind::Find
+        ) {
+            let kind = overlay.kind;
+            let action = overlay
+                .items
+                .get(overlay.selected)
+                .map(|item| item.action.clone());
+            let name = overlay.input.read(cx).content().trim().to_owned();
+            self.overlay = None;
+            match kind {
+                OverlayKind::Completion | OverlayKind::CodeActions => {
+                    if let Some(action) = action {
+                        self.perform_ui_action(action, None, cx);
+                    } else {
+                        self.pending_editor_focus = true;
+                    }
+                }
+                OverlayKind::Rename => {
+                    if name.is_empty() {
+                        self.status = "Enter a new symbol name".into();
+                        self.pending_editor_focus = true;
+                    } else {
+                        self.apply_rename(name, cx);
+                    }
+                }
+                OverlayKind::Hover => {
+                    self.pending_editor_focus = true;
+                }
+                OverlayKind::Find => {
+                    if name.is_empty() {
+                        self.status = "Enter text to find".into();
+                        self.pending_editor_focus = true;
+                    } else {
+                        self.find_query = name;
+                        self.run_find(true, cx);
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         let Some(item) = overlay.items.get(overlay.selected).cloned() else {
             return;
         };
@@ -3825,6 +4565,13 @@ impl RustIdea {
         push("Refresh Project", "Project", UiAction::RefreshProject);
         push("Refresh Git", "Version Control", UiAction::RefreshGit);
         push("Go to Line…", "⌥⌘G", UiAction::GoToLinePrompt);
+        push("Find in File…", "⌘F", UiAction::FindInFile);
+        push("Find Next", "⌘G", UiAction::FindNext);
+        push("Find Previous", "Ctrl+Shift+G", UiAction::FindPrevious);
+        push("Code Completion", "Ctrl+Space", UiAction::Completion);
+        push("Quick Documentation", "Ctrl+Shift+H", UiAction::Hover);
+        push("Rename Symbol…", "F2", UiAction::RenameSymbol);
+        push("Code Actions", "⌥Enter", UiAction::CodeActions);
         items
     }
 
@@ -3834,6 +4581,31 @@ impl RustIdea {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        if window.is_none()
+            && matches!(
+                &action,
+                UiAction::NewFile
+                    | UiAction::OpenFile
+                    | UiAction::OpenFolder
+                    | UiAction::Save
+                    | UiAction::SaveAs
+                    | UiAction::CloseTab
+                    | UiAction::NextTab
+                    | UiAction::PreviousTab
+                    | UiAction::SplitRight
+                    | UiAction::SplitDown
+                    | UiAction::GoToLinePrompt
+                    | UiAction::Completion
+                    | UiAction::Hover
+                    | UiAction::RenameSymbol
+                    | UiAction::CodeActions
+                    | UiAction::FindInFile
+            )
+        {
+            self.pending_ui_action = Some(action);
+            cx.notify();
+            return;
+        }
         match action {
             UiAction::NewFile => {
                 if let Some(window) = window {
@@ -3899,7 +4671,36 @@ impl RustIdea {
                     self.go_to_line_prompt(window, cx);
                 }
             }
+            UiAction::Completion => {
+                if let Some(window) = window {
+                    self.request_completion(window, cx);
+                }
+            }
+            UiAction::Hover => {
+                if let Some(window) = window {
+                    self.request_hover(window, cx);
+                }
+            }
+            UiAction::RenameSymbol => {
+                if let Some(window) = window {
+                    self.open_rename_prompt(window, cx);
+                }
+            }
+            UiAction::CodeActions => {
+                if let Some(window) = window {
+                    self.request_code_actions(window, cx);
+                }
+            }
+            UiAction::FindInFile => {
+                if let Some(window) = window {
+                    self.open_find_prompt(window, cx);
+                }
+            }
+            UiAction::FindNext => self.run_find(true, cx),
+            UiAction::FindPrevious => self.run_find(false, cx),
             UiAction::OpenPath(path, line) => self.open_path(path, line, window, cx),
+            UiAction::ApplyCompletion(item) => self.apply_completion(*item, cx),
+            UiAction::ApplyCodeAction(action) => self.apply_code_action(*action, cx),
             UiAction::None => {}
         }
     }

@@ -105,7 +105,7 @@ until that evidence exists.
 
 | Check | Result |
 |---|---|
-| `cargo test -p rustidea` | Pass: 31 binary tests + 67 integration tests |
+| `cargo test -p rustidea` | Pass: 34 binary tests + 68 integration tests |
 | document sync regression | Pass: 10,000 sequential inputs, disjoint rebase, explicit conflict |
 | multiview regression | Pass: shared handle, tab/split view counts, Save As rekey, last-view release |
 | event overflow regression | Pass: bounded queue coalescing and document/fs recovery flags |
@@ -115,11 +115,31 @@ until that evidence exists.
 | terminal regression | Pass: ANSI stripping, CR/backspace/tab, 5,000-line cap |
 | editor input regression | Pass: 10,000 UTF-16 inserts and CRLF normalization |
 | editor undo regression | Pass: external edit rebases history, multibyte undo/redo |
+| LSP/find helpers | Pass: UTF-16 identifier replacement ranges (including CJK and astral text) and in-file find wrapping across multibyte text |
+| remote host panel | Static/state path only: configuration loading and connect call the reused `SshManager` and `spawn_ssh`; no SSH server was contacted in this run |
+
+### LSP and in-file find (0.2.0 pass)
+
+The native workbench now requests the reused OpenIDEA language-server service
+on the host Tokio runtime for completion, hover, rename and code actions. The
+ready results are installed into GPUI overlays only after the request finishes.
+Completion supports label/detail filtering, UTF-16 fallback word ranges,
+snippet-default insertion and additional edits. Rename and code actions apply
+their workspace edits through `ide_host::ops::lsp::apply_workspace_edit`; code
+actions that only carry a client command are reported as unavailable rather
+than silently ignored. In-file find-next/find-previous selects a match and
+wraps around the document.
+
+These are implementation and helper-level checks. A real language server, the
+overlay key handling and IME interaction still need an unlocked interactive
+session before they can be marked accepted.
 
 ### Important caveats
 
 - GUI interaction remains blocked by the locked macOS console; tests above are
   engine/state-level evidence, not IME/window/clipboard acceptance.
+- Completion, hover, rename and code-action overlays have not been exercised
+  against a live language server or an unlocked window.
 - The three-platform CI run for the final commit is the authoritative CI gate.
   Earlier runs on `47d95a0` and `4e4ba7a` exposed missing CI native libraries,
   missing plugin fixtures and missing `src/bindings.ts`; fixes are in the

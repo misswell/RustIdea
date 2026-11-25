@@ -21,6 +21,8 @@ actions!(
         SelectAll,
         Home,
         End,
+        Up,
+        Down,
         Paste,
         Cut,
         Copy,
@@ -35,6 +37,8 @@ pub enum TextInputEvent {
     Change(String),
     Submit(String),
     Cancel,
+    /// Move the owning list selection instead of the text caret.
+    MoveSelection(i8),
 }
 
 pub struct TextInput {
@@ -199,6 +203,14 @@ impl TextInput {
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TextInputEvent::Submit(self.content.to_string()));
+    }
+
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::MoveSelection(-1));
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::MoveSelection(1));
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
@@ -655,6 +667,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))

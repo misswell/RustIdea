@@ -343,6 +343,43 @@ impl Editor {
         cx.notify();
     }
 
+    /// Place a collapsed caret at an absolute UTF-16 offset after a command
+    /// inserted text, keeping the buffer and the editor in the same state.
+    pub fn place_caret(&mut self, offset: u32, cx: &mut Context<Self>) {
+        let len = self.buffer.read(cx).len_utf16();
+        self.selection = Selection::caret(offset.min(len));
+        self.marked_range = None;
+        self.ensure_caret_visible(cx);
+        cx.notify();
+    }
+
+    /// Find the next occurrence of plain text and select it. Searching wraps
+    /// around the document, matching the usual IDE find-next behaviour.
+    pub fn find(&mut self, query: &str, forward: bool, cx: &mut Context<Self>) -> bool {
+        if query.is_empty() {
+            return false;
+        }
+        let selected = self.selected_range();
+        let text = self.buffer.read(cx).text();
+        let cursor = if forward {
+            selected.end
+        } else {
+            selected.start
+        };
+        let byte_cursor = self.buffer.read(cx).offset_to_byte(cursor);
+        let found = find_bytes(&text, query, byte_cursor, forward);
+        let Some(byte) = found else {
+            return false;
+        };
+        let start = self.buffer.read(cx).byte_to_offset(byte);
+        let end = start + query.encode_utf16().count() as u32;
+        self.selection = Selection::range(start, end);
+        self.marked_range = None;
+        self.ensure_caret_visible(cx);
+        cx.notify();
+        true
+    }
+
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         let target = if self.selection.is_empty() {
             self.previous_boundary(self.caret(), cx)
@@ -1472,6 +1509,25 @@ fn char_class(character: char) -> u8 {
     }
 }
 
+fn find_bytes(text: &str, query: &str, cursor: usize, forward: bool) -> Option<usize> {
+    if text.is_empty() || query.is_empty() {
+        return None;
+    }
+    let cursor = cursor.min(text.len());
+    if forward {
+        text.get(cursor..)
+            .and_then(|tail| tail.find(query).map(|index| cursor + index))
+            .or_else(|| text.get(..cursor).and_then(|head| head.find(query)))
+    } else {
+        text.get(..cursor)
+            .and_then(|head| head.rfind(query))
+            .or_else(|| {
+                text.get(cursor..)
+                    .and_then(|tail| tail.rfind(query).map(|index| cursor + index))
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1502,5 +1558,16 @@ mod tests {
         let runs = styled_runs(text, 0, 5, Some(&(1..3)), &[], &[], base);
         assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
         assert!(runs.iter().any(|run| run.underline.is_some()));
+    }
+
+    #[test]
+    fn find_wraps_and_handles_multibyte_text() {
+        let text = "中文 alpha 中文 beta";
+        assert_eq!(find_bytes(text, "中文", 0, true), Some(0));
+        assert_eq!(find_bytes(text, "中文", 6, true), Some(13));
+        assert_eq!(find_bytes(text, "中文", text.len(), true), Some(0));
+        assert_eq!(find_bytes(text, "中文", 13, false), Some(0));
+        assert_eq!(find_bytes(text, "中文", 0, false), Some(13));
+        assert_eq!(find_bytes(text, "missing", 0, true), None);
     }
 }

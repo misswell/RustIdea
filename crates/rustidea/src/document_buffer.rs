@@ -704,8 +704,27 @@ impl DocumentBuffer {
         self.document.offset_for_line_col(line, col)
     }
 
+    pub fn offset_to_byte(&self, offset: u32) -> usize {
+        self.document.offset_to_byte(offset)
+    }
+
+    pub fn byte_to_offset(&self, byte: usize) -> u32 {
+        self.document.byte_to_offset(byte)
+    }
+
     pub fn slice(&self, from: u32, to: u32) -> String {
         self.document.slice(from, to)
+    }
+
+    /// UTF-16 identifier range around a caret on one line. Completion uses
+    /// this as the fallback replacement range when a server sends none.
+    pub fn word_range_at(&self, offset: u32) -> std::ops::Range<u32> {
+        let (line, col) = self.offset_to_line_col(offset);
+        let line_start = self.line_start(line);
+        self.document
+            .line(line)
+            .map(|text| word_range_in_line(&text, line_start, col))
+            .unwrap_or(offset..offset)
     }
 
     pub fn apply_local(
@@ -1255,6 +1274,52 @@ impl DocumentBuffer {
     }
 }
 
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_' || ch == '$'
+}
+
+fn word_range_in_line(line: &str, line_start: u32, col: u32) -> std::ops::Range<u32> {
+    let mut utf16 = 0u32;
+    let mut byte = line.len();
+    for (index, ch) in line.char_indices() {
+        let width = ch.len_utf16() as u32;
+        if utf16 + width > col {
+            byte = index;
+            break;
+        }
+        utf16 += width;
+        if utf16 == col {
+            byte = index + ch.len_utf8();
+            break;
+        }
+    }
+    if !line[..byte]
+        .chars()
+        .next_back()
+        .is_some_and(is_identifier_char)
+    {
+        let caret = line_start + line[..byte].encode_utf16().count() as u32;
+        return caret..caret;
+    }
+    let mut start = byte;
+    for (index, ch) in line[..byte].char_indices().rev() {
+        if !is_identifier_char(ch) {
+            break;
+        }
+        start = index;
+    }
+    let mut end = byte;
+    for (index, ch) in line[byte..].char_indices() {
+        if !is_identifier_char(ch) {
+            break;
+        }
+        end = byte + index + ch.len_utf8();
+    }
+    let start = line_start + line[..start].encode_utf16().count() as u32;
+    let end = line_start + line[..end].encode_utf16().count() as u32;
+    start..end
+}
+
 fn normalize_host_path(path: PathBuf) -> PathBuf {
     if path.to_string_lossy().starts_with("untitled:") {
         path
@@ -1308,5 +1373,15 @@ mod tests {
         assert_eq!(first.len, second.len);
         assert!(first.content_changed(&second));
         assert!(!first.same_content(&second));
+    }
+
+    #[test]
+    fn word_range_uses_utf16_and_unicode_identifiers() {
+        assert_eq!(word_range_in_line("let value = 1;", 0, 5), 4..9);
+        assert_eq!(word_range_in_line("let value = 1;", 0, 8), 4..9);
+        assert_eq!(word_range_in_line("let 中文 = 1;", 0, 5), 4..6);
+        assert_eq!(word_range_in_line("foo bar", 0, 3), 0..3);
+        assert_eq!(word_range_in_line("foo bar", 0, 4), 4..4);
+        assert_eq!(word_range_in_line("😀name", 0, 3), 2..6);
     }
 }

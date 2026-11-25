@@ -7,6 +7,7 @@
 | `47d95a0` / run 45376849176 | Ubuntu `glib-sys` missing | CI installs GLib/GTK/cairo/pango/atk development packages |
 | `b711f9d` / run 45381745413 | plugin fixture `dist/plugin.wasm` missing | checked in the upstream fixture components and unignored `crates/ide-plugin/tests/fixtures/*/dist/` |
 | `4e4ba7a` / run 45389131502 | `src/bindings.ts` missing in `ide-host/tests/rpc.rs` | copied upstream generated `src/bindings.ts` |
+| `57f0e51` / run 45526598206 | Ubuntu `container_tunnel` port-lifecycle test raced other tests' ephemeral listeners | tunnel tests now share an async mutex; assertion remains, no test skipped |
 
 The macOS job in run 45389131502 was cancelled; Ubuntu and Windows failed only
 on the missing `bindings.ts` file. No test was skipped or deleted to produce a

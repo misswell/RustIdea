@@ -14,12 +14,14 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use app::{
-    CloseGroup, CloseTab, CommandPalette, FormatDocument, GitCommit, GitRefresh, GoToDefinition,
-    GoToLine, NewFile, NewTerminal, NextTab, OpenFile, OpenFolder, PreviousTab, QuickOpen, Quit,
-    RefreshProject, RustIdea, Save, SaveAll, SaveAs, SearchEverywhere, ShowAgents, ShowDatabase,
-    ShowDebug, ShowGit, ShowPlugins, ShowProblems, ShowProject, ShowRemote, ShowRun, ShowSearch,
-    ShowSettings, ShowStructure, ShowTerminal, ShowTools, SplitDown, SplitRight, ToggleAutosave,
-    ToggleBottomPanel, ToggleLeftPanel, ToggleRightPanel, ToggleTheme, TrustProject,
+    CloseGroup, CloseTab, CodeActions, CommandPalette, Completion, DismissOverlay, FindInFile,
+    FindNext, FindPrevious, FormatDocument, GitCommit, GitRefresh, GoToDefinition, GoToLine, Hover,
+    NewFile, NewTerminal, NextTab, OpenFile, OpenFolder, PreviousTab, QuickOpen, Quit,
+    RefreshProject, RenameSymbol, RustIdea, Save, SaveAll, SaveAs, SearchEverywhere, ShowAgents,
+    ShowDatabase, ShowDebug, ShowGit, ShowPlugins, ShowProblems, ShowProject, ShowRemote, ShowRun,
+    ShowSearch, ShowSettings, ShowStructure, ShowTerminal, ShowTools, SplitDown, SplitRight,
+    ToggleAutosave, ToggleBottomPanel, ToggleLeftPanel, ToggleRightPanel, ToggleTheme,
+    TrustProject,
 };
 use gpui::{
     App, AppContext, Application, Bounds, Focusable, KeyBinding, Menu, MenuItem, SystemMenuType,
@@ -215,9 +217,9 @@ fn install_key_bindings(cx: &mut App) {
     };
     use text_input::{
         Backspace as InputBackspace, Copy as InputCopy, Cut as InputCut, Delete as InputDelete,
-        End as InputEnd, Home as InputHome, Left as InputLeft, Paste as InputPaste,
-        Right as InputRight, SelectAll as InputSelectAll, SelectLeft as InputSelectLeft,
-        SelectRight as InputSelectRight,
+        Down as InputDown, End as InputEnd, Home as InputHome, Left as InputLeft,
+        Paste as InputPaste, Right as InputRight, SelectAll as InputSelectAll,
+        SelectLeft as InputSelectLeft, SelectRight as InputSelectRight, Up as InputUp,
     };
 
     cx.bind_keys([
@@ -249,6 +251,14 @@ fn install_key_bindings(cx: &mut App) {
         KeyBinding::new("f12", GoToDefinition, None),
         KeyBinding::new("cmd-alt-g", GoToLine, None),
         KeyBinding::new("cmd-alt-shift-f", FormatDocument, None),
+        KeyBinding::new("cmd-f", FindInFile, None),
+        KeyBinding::new("cmd-g", FindNext, None),
+        KeyBinding::new("ctrl-shift-g", FindPrevious, None),
+        KeyBinding::new("ctrl-space", Completion, None),
+        KeyBinding::new("ctrl-shift-h", Hover, None),
+        KeyBinding::new("f2", RenameSymbol, None),
+        KeyBinding::new("alt-enter", CodeActions, None),
+        KeyBinding::new("escape", DismissOverlay, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("backspace", Backspace, Some("Editor")),
         KeyBinding::new("delete", Delete, Some("Editor")),
@@ -277,6 +287,8 @@ fn install_key_bindings(cx: &mut App) {
         KeyBinding::new("shift-right", InputSelectRight, Some("TextInput")),
         KeyBinding::new("home", InputHome, Some("TextInput")),
         KeyBinding::new("end", InputEnd, Some("TextInput")),
+        KeyBinding::new("up", InputUp, Some("TextInput")),
+        KeyBinding::new("down", InputDown, Some("TextInput")),
         KeyBinding::new("cmd-a", InputSelectAll, Some("TextInput")),
         KeyBinding::new("cmd-c", InputCopy, Some("TextInput")),
         KeyBinding::new("cmd-x", InputCut, Some("TextInput")),

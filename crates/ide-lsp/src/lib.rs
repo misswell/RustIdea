@@ -42,6 +42,7 @@ mod vue_navigation;
 mod vue_refs;
 mod xml_catalog;
 
+pub use convert::snippet_text;
 pub use injections::{InjectedRange, InjectionProvider, MAX_INJECTED_DOCUMENT_BYTES};
 pub use inspect::{CheckedServer, DocumentCheck, FileInspection, InspectHost, InspectOptions};
 pub use jdtls::jvm_inspect::JdtJvmInspector;

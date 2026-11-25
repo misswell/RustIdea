@@ -23,12 +23,15 @@ This repository is following the migration plan in the root `RUSTIDEA_*.md` file
   coalesces local edits, rebases disjoint backend patches, preserves local
   text on conflict, and verifies disk content with BLAKE3 before saves.
 
-This is not yet complete OpenIDEA parity. Native project search, VCS, terminal,
-run/build, database and HTTP panels are implemented at MVP depth. LSP
-completion/hover/rename, full terminal emulation, real debugger sessions,
-plugins/MCP, agents, SSH/remote development, notebooks, viewers and several
-language tool windows remain incomplete or placeholders. See
-`RUSTIDEA_FEATURE_PARITY.md` for the item-by-item status.
+This is not yet complete OpenIDEA parity. Native project search, in-file
+find-next/find-previous, VCS, terminal, run/build, database and HTTP panels are
+implemented at MVP depth. LSP completion, hover documentation, rename, code
+actions, go-to-definition and formatting are wired to the reused OpenIDEA
+language-server service. The Remote Host panel opens real SSH shells through the
+reused OpenIDEA SSH client. Multi-cursor/folding, full terminal emulation, real
+debugger sessions, plugins/MCP, agents, remote filesystem mounts, notebooks,
+viewers and several language tool windows remain incomplete or placeholders.
+See `RUSTIDEA_FEATURE_PARITY.md` for the item-by-item status.
 
 The old OpenIDEA tree is a read-only migration reference, not a runtime
 dependency. Backend crates are vendored here as they are adopted.

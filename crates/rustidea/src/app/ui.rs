@@ -288,14 +288,7 @@ impl RustIdea {
                 cx,
                 |this, _window, cx| this.show_sidebar(SidebarKind::Agents, cx),
             ),
-            SidebarKind::Remote => self.render_placeholder_panel(
-                "Remote Host",
-                "Open SSH connections, browse remote projects and deploy build outputs.",
-                "Add Host",
-                theme,
-                cx,
-                |this, _window, cx| this.show_sidebar(SidebarKind::Remote, cx),
-            ),
+            SidebarKind::Remote => self.render_remote_panel(theme, cx),
             SidebarKind::Plugins => self.render_placeholder_panel(
                 "Plugins",
                 "Install, enable and configure extensions that contribute commands, languages and tools.",
@@ -1490,7 +1483,8 @@ impl RustIdea {
                                     .text_color(theme.faint)
                                     .child(format!("{name}:{line} · {}", problem.source)),
                             ),
-                    ),
+                    )
+                    .into_any_element(),
             );
         }
         if rows.is_empty() {
@@ -1609,6 +1603,184 @@ impl RustIdea {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
+    fn render_remote_panel(&self, theme: Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let connected = self.host.host().ssh.connected();
+        let mut rows = Vec::new();
+        for (index, config) in self.ssh_configs.iter().enumerate() {
+            let auth = match config.auth {
+                ide_core::remote_settings::SshAuth::Password => "password",
+                ide_core::remote_settings::SshAuth::KeyPair => "key pair",
+                ide_core::remote_settings::SshAuth::OpenSsh => "OpenSSH config / agent",
+            };
+            let is_connected = connected.iter().any(|id| id == &config.id);
+            let name = if config.name.trim().is_empty() {
+                config.label()
+            } else {
+                config.name.clone()
+            };
+            let detail = config.label();
+            let connect = div()
+                .id(("ssh-connect", index))
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(if is_connected {
+                    theme.panel_alt
+                } else {
+                    theme.accent_muted
+                })
+                .text_color(if is_connected {
+                    theme.muted
+                } else {
+                    theme.accent
+                })
+                .text_size(px(11.))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.connect_ssh(index, cx);
+                }))
+                .child(if is_connected { "New shell" } else { "Connect" });
+            let disconnect = is_connected.then(|| {
+                div()
+                    .id(("ssh-disconnect", index))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_color(theme.error)
+                    .text_size(px(11.))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.disconnect_ssh(index, cx);
+                    }))
+                    .child("Disconnect")
+            });
+            rows.push(
+                div()
+                    .id(("ssh-row", index))
+                    .w_full()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_size(px(12.5))
+                                    .text_color(theme.text)
+                                    .child(name),
+                            )
+                            .when(is_connected, |element| {
+                                element.child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(theme.accent)
+                                        .child("CONNECTED"),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme.muted)
+                            .child(format!("{detail} · {auth}")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .pt_1()
+                            .child(connect)
+                            .children(disconnect),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if rows.is_empty() {
+            rows.push(
+                div()
+                    .p_2()
+                    .text_size(px(12.))
+                    .text_color(theme.muted)
+                    .child(
+                        "No SSH configurations. Add them in Settings; RustIdea reuses the OpenIDEA SSH settings and credentials.\n\
+                         Hosts from ~/.ssh/config work with the OpenSSH auth mode.",
+                    )
+                    .into_any_element(),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p_3()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(13.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("Remote Hosts"),
+                    )
+                    .child(
+                        div()
+                            .id("ssh-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme.panel_alt)
+                            .text_color(theme.muted)
+                            .text_size(px(11.))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                this.load_ssh_configs(cx);
+                            }))
+                            .child("Refresh"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(theme.muted)
+                    .child("Open a real SSH shell through the reused OpenIDEA SSH client."),
+            )
+            .when_some(self.ssh_status.clone(), |element, status| {
+                element.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme.accent)
+                        .child(status),
+                )
+            })
+            .child(
+                div()
+                    .id("ssh-rows")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
                     .children(rows),
             )
             .into_any_element()
@@ -2730,6 +2902,64 @@ impl RustIdea {
         let Some(overlay) = self.overlay.as_ref() else {
             return div().into_any_element();
         };
+        if overlay.kind == OverlayKind::Hover {
+            let message = overlay.message.clone().unwrap_or_default();
+            return div()
+                .absolute()
+                .top(px(76.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(720.))
+                        .max_h(px(520.))
+                        .flex()
+                        .flex_col()
+                        .rounded_lg()
+                        .bg(theme.panel)
+                        .border_1()
+                        .border_color(theme.accent)
+                        .shadow_lg()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .h(px(38.))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme.accent)
+                                        .child("DOCUMENTATION"),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .text_color(theme.faint)
+                                        .child("Esc to close"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("hover-doc")
+                                .p_3()
+                                .max_h(px(460.))
+                                .overflow_y_scroll()
+                                .text_size(px(12.))
+                                .text_color(theme.text)
+                                .child(message),
+                        ),
+                )
+                .into_any_element();
+        }
         let mut items = Vec::new();
         for (index, item) in overlay.items.iter().take(12).enumerate() {
             let selected = index == overlay.selected;
@@ -2783,6 +3013,11 @@ impl RustIdea {
             OverlayKind::QuickOpen => "OPEN FILE",
             OverlayKind::SearchEverywhere => "SEARCH EVERYWHERE",
             OverlayKind::GoToLine => "GO TO LINE",
+            OverlayKind::Completion => "CODE COMPLETION",
+            OverlayKind::Hover => "DOCUMENTATION",
+            OverlayKind::Rename => "RENAME SYMBOL",
+            OverlayKind::CodeActions => "CODE ACTIONS",
+            OverlayKind::Find => "FIND IN FILE",
         };
         div()
             .absolute()
@@ -2966,6 +3201,20 @@ impl RustIdea {
 
 impl Render for RustIdea {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(action) = self.pending_ui_action.take() {
+            cx.defer_in(window, move |app, window, cx| {
+                app.perform_ui_action(action, Some(window), cx);
+            });
+        }
+        if self.pending_editor_focus {
+            self.pending_editor_focus = false;
+            cx.defer_in(window, |app, window, cx| {
+                if let Some(tab) = app.active_tab() {
+                    let focus = tab.editor.read(cx).focus_handle(cx);
+                    window.focus(&focus);
+                }
+            });
+        }
         let theme = self.theme;
         let viewport = window.viewport_size();
         let viewport_width = f32::from(viewport.width);
@@ -3250,6 +3499,29 @@ impl Render for RustIdea {
                     this.format_active_document(cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &Completion, window, cx| this.request_completion(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &Hover, window, cx| this.request_hover(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &RenameSymbol, window, cx| {
+                    this.open_rename_prompt(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &CodeActions, window, cx| {
+                this.request_code_actions(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DismissOverlay, _window, cx| {
+                if this.overlay.take().is_some() {
+                    this.pending_editor_focus = true;
+                    cx.notify();
+                }
+            }))
+            .on_action(
+                cx.listener(|this, _: &FindInFile, window, cx| this.open_find_prompt(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &FindNext, _window, cx| this.run_find(true, cx)))
+            .on_action(cx.listener(|this, _: &FindPrevious, _window, cx| this.run_find(false, cx)))
             .child(self.render_titlebar(cx))
             .child(body)
             .child(self.render_status_bar(cx));
