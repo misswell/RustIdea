@@ -894,6 +894,17 @@ impl NativeHost {
         .await
     }
 
+    pub async fn find_files(
+        &self,
+        query: String,
+        limit: u32,
+    ) -> IdeResult<Vec<ide_index::FileMatch>> {
+        self.run(move |host| async move {
+            ide_host::ops::nav::find_files(&host, MAIN_WINDOW, query, limit).await
+        })
+        .await
+    }
+
     pub async fn git_status(&self) -> IdeResult<Vec<ide_vcs::FileStatus>> {
         self.run(move |host| async move { ide_host::ops::vcs::status(&host, MAIN_WINDOW).await })
             .await

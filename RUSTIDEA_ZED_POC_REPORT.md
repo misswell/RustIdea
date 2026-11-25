@@ -354,6 +354,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   language-server/debug-adapter status through `ops::tools::tools_list` and can
   install a selected tool (86 tools on this machine);
 - Settings shows the effective OpenIDEA settings as read-only JSON;
+- Cmd-P opens a native quick-open overlay backed by
+  `ops::nav::find_files`; typing re-queries the project index and clicking or
+  submitting opens the selected file;
 - the bottom panel also has a Build tool window backed by
   `ops::build::build_model` / `ops::build::build_run`: it streams build
   `Started`, `Step`, `Output`, `Message` and `Progress` events and shows the
@@ -382,6 +385,7 @@ Panel coverage at this commit:
 | Surface | State | Backend path |
 |---|---|---|
 | Project tree | working | `ops::fs::read_dir` |
+| Quick Open (Cmd-P) | working | `ops::nav::find_files` |
 | Find in Files | working | `ops::search` |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
@@ -470,6 +474,12 @@ Notebook smoke (two-cell `.ipynb`):
 
 ```text
 notebook_cells=2
+```
+
+Quick-open smoke:
+
+```text
+quick_open=1 quick_open_status=1 files
 ```
 
 MCP round-trip smoke in an isolated config/data root (add `/bin/echo` server,

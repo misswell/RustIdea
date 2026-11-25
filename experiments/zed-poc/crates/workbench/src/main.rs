@@ -27,7 +27,10 @@ use gpui_platform::application;
 use host::NativeHost;
 use settings::SettingsStore;
 
-actions!(rustidea_zed, [SaveDocument, CloseTab, ToggleSplit]);
+actions!(
+    rustidea_zed,
+    [SaveDocument, CloseTab, ToggleSplit, ToggleQuickOpen]
+);
 
 fn main() {
     let root = std::env::args()
@@ -108,6 +111,7 @@ fn main() {
                 KeyBinding::new("cmd-s", SaveDocument, Some("Editor")),
                 KeyBinding::new("cmd-w", CloseTab, None),
                 KeyBinding::new("cmd-\\", ToggleSplit, None),
+                KeyBinding::new("cmd-p", ToggleQuickOpen, None),
             ]);
             {
                 use text_input::{
@@ -201,6 +205,7 @@ fn main() {
                 let smoke_market = std::env::var_os("RUSTIDEA_ZED_SMOKE_MARKET").is_some();
                 let smoke_mcp_roundtrip =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_MCP_ROUNDTRIP").is_some();
+                let smoke_quick_open = std::env::var("RUSTIDEA_ZED_SMOKE_QUICK_OPEN").ok();
                 let smoke_debug = std::env::var_os("RUSTIDEA_ZED_SMOKE_DEBUG").is_some();
                 let smoke_notebook =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK").is_some();
@@ -257,6 +262,9 @@ fn main() {
                                 if smoke_mcp_roundtrip {
                                     app.smoke_mcp_roundtrip(cx);
                                 }
+                                if let Some(query) = &smoke_quick_open {
+                                    app.smoke_quick_open(query.clone(), window, cx);
+                                }
                                 if smoke_debug {
                                     app.smoke_debug(cx);
                                 }
@@ -284,7 +292,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} debug_attachables={} build_status={} build={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} debug_attachables={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -321,6 +329,8 @@ fn main() {
                                     app.market_count(),
                                     app.market_status(),
                                     app.plugin_preview_status(),
+                                    app.fast_open_count(),
+                                    app.fast_open_status(),
                                     app.debug_attachable_count(),
                                     app.build_status(),
                                     app.build_output().lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default(),

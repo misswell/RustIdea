@@ -12023,6 +12023,7 @@ dependencies = [
  "ide-db",
  "ide-host",
  "ide-http",
+ "ide-index",
  "ide-language",
  "ide-lsp",
  "ide-notebook",

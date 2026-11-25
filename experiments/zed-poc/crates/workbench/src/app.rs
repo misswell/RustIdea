@@ -309,6 +309,12 @@ pub struct Workbench {
     build_status: gpui::SharedString,
     build_output: String,
     build_running: bool,
+    fast_open: bool,
+    fast_open_input: Entity<TextInput>,
+    fast_open_results: Vec<ide_index::FileMatch>,
+    fast_open_selected: usize,
+    fast_open_status: gpui::SharedString,
+    _fast_open_subscription: Subscription,
     plugins: Vec<ide_host::plugins::PluginInfo>,
     plugins_status: gpui::SharedString,
     market_plugins: Vec<ide_host::plugins::MarketPlugin>,
@@ -430,6 +436,30 @@ impl Workbench {
                 cx,
             )
         });
+        let fast_open_input = cx.new(|cx| {
+            TextInput::new(
+                "Search project files…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let fast_open_subscription =
+            cx.subscribe(&fast_open_input, |app, _, event, cx| match event {
+                TextInputEvent::Change(query) => {
+                    app.search_quick_open(query.clone(), cx);
+                }
+                TextInputEvent::Submit(_) => {
+                    app.open_quick_open_result(cx);
+                }
+                TextInputEvent::Cancel => {
+                    app.fast_open = false;
+                    cx.notify();
+                }
+                TextInputEvent::MoveSelection(_) => {}
+            });
         let mut app = Self {
             host,
             language_registry,
@@ -521,6 +551,12 @@ impl Workbench {
             build_status: "Builds have not been loaded".into(),
             build_output: String::new(),
             build_running: false,
+            fast_open: false,
+            fast_open_input,
+            _fast_open_subscription: fast_open_subscription,
+            fast_open_results: Vec::new(),
+            fast_open_selected: 0,
+            fast_open_status: "Type a file name".into(),
             plugins: Vec::new(),
             plugins_status: "Select PLUGINS to load installed plugins".into(),
             market_plugins: Vec::new(),
@@ -2072,6 +2108,65 @@ impl Workbench {
         .detach();
     }
 
+    fn toggle_quick_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.fast_open = !self.fast_open;
+        if self.fast_open {
+            self.fast_open_selected = 0;
+            let focus = self.fast_open_input.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    fn search_quick_open(&mut self, query: String, cx: &mut Context<Self>) {
+        let query = query.trim().to_owned();
+        if query.is_empty() {
+            self.fast_open_results.clear();
+            self.fast_open_status = "Type a file name".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.find_files(query.clone(), 40).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    if !app.fast_open || app.fast_open_input.read(cx).content() != query {
+                        return app.window_handle;
+                    }
+                    match result {
+                        Ok(results) => {
+                            app.fast_open_status = format!("{} files", results.len()).into();
+                            app.fast_open_results = results;
+                            app.fast_open_selected = 0;
+                        }
+                        Err(error) => {
+                            app.fast_open_status =
+                                format!("Search failed: {}", error.message).into();
+                            app.fast_open_results.clear();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+    }
+
+    fn open_quick_open_result(&mut self, cx: &mut Context<Self>) {
+        let Some(result) = self.fast_open_results.get(self.fast_open_selected).cloned() else {
+            self.fast_open_status = "No file selected".into();
+            cx.notify();
+            return;
+        };
+        self.fast_open = false;
+        self.open_path(result.path.0, cx);
+        cx.notify();
+    }
+
     fn insert_document(
         &mut self,
         info: ide_workspace::DocumentInfo,
@@ -2828,6 +2923,25 @@ impl Workbench {
         );
     }
 
+    pub fn smoke_quick_open(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.fast_open = true;
+        self.fast_open_input.update(cx, |input, cx| {
+            input.set_content(query.clone(), cx);
+        });
+        let focus = self.fast_open_input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.search_quick_open(query, cx);
+        cx.notify();
+    }
+
+    pub fn fast_open_count(&self) -> usize {
+        self.fast_open_results.len()
+    }
+
+    pub fn fast_open_status(&self) -> &gpui::SharedString {
+        &self.fast_open_status
+    }
+
     pub fn plugins_count(&self) -> usize {
         self.plugins.len()
     }
@@ -3114,6 +3228,78 @@ impl Workbench {
                 .child(if self.split { "Unsplit" } else { "Split" }),
         );
         row
+    }
+
+    fn render_quick_open(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if !self.fast_open {
+            return div().into_any_element();
+        }
+        let theme = self.theme;
+        let mut results = div()
+            .id("quick-open-results")
+            .flex_1()
+            .min_h(px(0.))
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, result) in self.fast_open_results.iter().take(40).enumerate() {
+            let selected = index == self.fast_open_selected;
+            results = results.child(
+                div()
+                    .id(("quick-open-result", index))
+                    .h(px(26.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.fast_open_selected = index;
+                        this.open_quick_open_result(cx);
+                    }))
+                    .child(result.rel_path.clone()),
+            );
+        }
+        div()
+            .absolute()
+            .top(px(70.))
+            .left(px(300.))
+            .w(px(560.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .h(px(36.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.fast_open_input.clone()),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(9.5))
+                    .text_color(theme.faint)
+                    .child(self.fast_open_status.clone()),
+            )
+            .child(results)
+            .into_any_element()
     }
 
     fn render_project(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5508,8 +5694,10 @@ impl Render for Workbench {
         }
         let tabs = self.render_tabs(cx).into_any_element();
         let run_panel = self.render_bottom_panel(window, cx);
+        let quick_open = self.render_quick_open(cx);
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(theme.window)
@@ -5526,6 +5714,9 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &crate::ToggleSplit, _, cx| {
                 this.toggle_split(cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::ToggleQuickOpen, window, cx| {
+                this.toggle_quick_open(window, cx);
             }))
             .child(
                 div()
@@ -5616,6 +5807,7 @@ impl Render for Workbench {
                         self.diagnostics.values().sum::<usize>()
                     )),
             )
+            .child(quick_open)
     }
 }
 
