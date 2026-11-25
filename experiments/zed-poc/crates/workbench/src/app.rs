@@ -424,6 +424,10 @@ pub struct Workbench {
     settings_filter: String,
     settings_status: gpui::SharedString,
     _settings_filter_subscription: Subscription,
+    setting_edit_key: Option<String>,
+    setting_edit_input: Entity<TextInput>,
+    setting_edit_status: gpui::SharedString,
+    _setting_edit_subscription: Subscription,
     pending_goto: Option<(PathBuf, u32, u32)>,
     http_blocks: Vec<ide_http::HttpRequestBlock>,
     http_selected: usize,
@@ -731,6 +735,25 @@ impl Workbench {
                     cx.notify();
                 }
             });
+        let setting_edit_input = cx.new(|cx| {
+            TextInput::new(
+                "Setting value",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let setting_edit_subscription =
+            cx.subscribe(&setting_edit_input, |app, _, event, cx| match event {
+                TextInputEvent::Submit(_) => app.save_setting_editor(cx),
+                TextInputEvent::Cancel => {
+                    app.setting_edit_key = None;
+                    cx.notify();
+                }
+                _ => {}
+            });
         let mut app = Self {
             host,
             language_registry,
@@ -784,6 +807,10 @@ impl Workbench {
             settings_filter: String::new(),
             settings_status: "Effective OpenIDEA settings".into(),
             _settings_filter_subscription: settings_filter_subscription,
+            setting_edit_key: None,
+            setting_edit_input,
+            setting_edit_status: "Edit setting value".into(),
+            _setting_edit_subscription: setting_edit_subscription,
             pending_goto: None,
             http_blocks: Vec::new(),
             http_selected: 0,
@@ -1013,6 +1040,40 @@ impl Workbench {
         })
         .detach();
         cx.notify();
+    }
+
+    fn open_setting_editor(
+        &mut self,
+        key: String,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let raw = match value {
+            serde_json::Value::String(value) => value,
+            value => value.to_string(),
+        };
+        self.setting_edit_input
+            .update(cx, |input, cx| input.set_content(raw, cx));
+        self.setting_edit_status = format!("Editing {key}").into();
+        self.setting_edit_key = Some(key);
+        cx.notify();
+    }
+
+    fn save_setting_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.setting_edit_key.take() else {
+            return;
+        };
+        let text = self.setting_edit_input.read(cx).content().trim().to_owned();
+        let value =
+            serde_json::from_str(&text).unwrap_or_else(|_| serde_json::Value::String(text.clone()));
+        if let serde_json::Value::String(value) = &value
+            && value.is_empty()
+        {
+            self.settings_status = format!("{key} cannot be empty here").into();
+            cx.notify();
+            return;
+        }
+        self.set_setting(key, value, cx);
     }
 
     fn refresh_outline(&mut self, cx: &mut Context<Self>) {
@@ -3560,6 +3621,20 @@ impl Workbench {
         leaves.len()
     }
 
+    pub fn smoke_settings_string(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Settings, cx);
+        self.open_setting_editor(
+            "editor.fontFamily".into(),
+            serde_json::Value::String("Menlo".into()),
+            cx,
+        );
+        self.save_setting_editor(cx);
+    }
+
+    pub fn settings_font_family(&self) -> &str {
+        &self.settings_data.editor.font_family
+    }
+
     pub fn plugins_count(&self) -> usize {
         self.plugins.len()
     }
@@ -4348,6 +4423,8 @@ impl Workbench {
                 break;
             }
             let key_for_toggle = key.clone();
+            let key_for_edit = key.clone();
+            let value_for_edit = value.clone();
             let enabled = value.as_bool();
             rows.push(
                 div()
@@ -4360,6 +4437,17 @@ impl Workbench {
                     .border_b_1()
                     .border_color(theme.border)
                     .text_size(px(10.5))
+                    .when(enabled.is_none(), |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(theme.panel_alt))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.open_setting_editor(
+                                    key_for_edit.clone(),
+                                    value_for_edit.clone(),
+                                    cx,
+                                );
+                            }))
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -4439,6 +4527,81 @@ impl Workbench {
                     .min_h(px(0.))
                     .overflow_y_scroll()
                     .children(rows),
+            )
+            .into_any_element()
+    }
+
+    fn render_setting_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(key) = &self.setting_edit_key else {
+            return div().into_any_element();
+        };
+        let theme = self.theme;
+        div()
+            .absolute()
+            .top(px(140.))
+            .left(px(300.))
+            .w(px(540.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(10.5))
+                    .text_color(theme.muted)
+                    .child(key.clone()),
+            )
+            .child(div().px_2().pb_1().child(self.setting_edit_input.clone()))
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(9.5))
+                    .text_color(theme.faint)
+                    .child(self.setting_edit_status.clone()),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("setting-editor-save")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.save_setting_editor(cx);
+                            }))
+                            .child("Save"),
+                    )
+                    .child(
+                        div()
+                            .id("setting-editor-cancel")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.setting_edit_key = None;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    ),
             )
             .into_any_element()
     }
@@ -6567,6 +6730,7 @@ impl Render for Workbench {
         let quick_open = self.render_quick_open(cx);
         let command_palette = self.render_command_palette(cx);
         let symbol_search = self.render_symbol_search(cx);
+        let setting_editor = self.render_setting_editor(cx);
         div()
             .size_full()
             .relative()
@@ -6692,6 +6856,7 @@ impl Render for Workbench {
             .child(quick_open)
             .child(command_palette)
             .child(symbol_search)
+            .child(setting_editor)
     }
 }
 

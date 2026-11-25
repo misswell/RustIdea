@@ -354,8 +354,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   language-server/debug-adapter status through `ops::tools::tools_list` and can
   install a selected tool (86 tools on this machine);
 - Settings shows the effective OpenIDEA settings as a filterable, flattened
-  list; boolean values are live toggles written through
-  `ops::project::set_settings` (verified below), other values are read-only;
+  list; boolean values are live toggles, and string/number/other JSON values
+  open an inline value editor, all written through
+  `ops::project::set_settings` (verified below);
 - Cmd-P opens a native quick-open overlay backed by
   `ops::nav::find_files`; typing re-queries the project index and clicking or
   submitting opens the selected file;
@@ -408,7 +409,7 @@ Panel coverage at this commit:
 | MCP | list/toggle/add/update/remove stdio servers | `ops::agent::mcp_*` |
 | Tools | list/install | `ops::tools` |
 | Plugins | installed list + marketplace/preview/install | `PluginHost` |
-| Settings | filter + boolean toggles (other values read-only) | `ops::project::settings` / `set_settings` |
+| Settings | filter + boolean toggles + JSON value editor | `ops::project::settings` / `set_settings` |
 | Debug | attachable-process browse only | `ops::debug::debug_attachable_processes` |
 | Terminal | working VT screen | Zed `terminal` + `ops::term` |
 | Run | working | `ops::run` |
@@ -511,6 +512,13 @@ settings_rows=466 show_whitespace=true
 settings.toml: showWhitespace = true
 ```
 
+String-setting smoke in an isolated config root:
+
+```text
+settings_rows=466 font_family="Menlo"
+settings.toml: fontFamily = "Menlo"
+```
+
 MCP round-trip smoke in an isolated config/data root (add `/bin/echo` server,
 then remove it):
 
@@ -560,8 +568,8 @@ documents/project/sync/host: 24 passed; 0 failed
   session UI, notebook cell editing, remote file editing (browsing/preview
   exists) and the agent permission responses/subagent drill-down are not yet
   integrated. MCP add/update/remove is wired for stdio servers; HTTP/SSE editing
-  still lives in settings. Settings only edits booleans; typed string/number/
-  list editors are missing. Database/HTTP have working execution paths but no
+  still lives in settings. Settings edits booleans and JSON scalars; structured
+  list/map editors are missing. Database/HTTP have working execution paths but no
   source/request editors of their own. The Terminal now has a real VT screen
   and OpenIDEA PTY, but its mouse selection, hyperlinks, IME and resize path
   are not yet verified or complete.
