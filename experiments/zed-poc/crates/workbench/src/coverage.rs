@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use ide_coverage::{CoverageSuite, FileCoverage};
@@ -19,10 +20,11 @@ pub fn coverage_rows(root: &Path, suite: &CoverageSuite) -> Vec<CoverageRow> {
         .files
         .iter()
         .map(|file| {
-            let display = file.path.0.to_string_lossy();
+            let path = std::fs::canonicalize(&file.path.0).unwrap_or_else(|_| file.path.0.clone());
+            let display = path.to_string_lossy();
             let rel_path = display.strip_prefix(&prefix).unwrap_or(&display).to_owned();
             CoverageRow {
-                path: file.path.0.clone(),
+                path,
                 rel_path,
                 lines_covered: file.lines_covered,
                 lines_total: file.lines_total,
@@ -78,6 +80,49 @@ pub fn totals(files: &[FileCoverage]) -> (u32, u32, u32, u32) {
     )
 }
 
+pub fn short_percent(covered: u32, total: u32) -> Option<String> {
+    let percent = percent(covered, total)?;
+    Some(if percent > 0.0 && percent < 1.0 {
+        "<1%".into()
+    } else {
+        format!("{}%", percent.floor() as u32)
+    })
+}
+
+/// File and directory line coverage keyed by project path. Directory entries
+/// aggregate every covered file below them so the project tree can show a
+/// badge on collapsed folders.
+pub fn lookup(root: &Path, suite: &CoverageSuite) -> HashMap<PathBuf, (u32, u32)> {
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut map: HashMap<PathBuf, (u32, u32)> = HashMap::new();
+    for file in &suite.files {
+        let path = if let Ok(path) = std::fs::canonicalize(&file.path.0) {
+            path
+        } else if file.path.0.is_absolute() {
+            file.path.0.clone()
+        } else {
+            canonical.join(&file.path.0)
+        };
+        let entry = map.entry(path.clone()).or_default();
+        entry.0 += file.lines_covered;
+        entry.1 += file.lines_total;
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if !dir.starts_with(&canonical) {
+                break;
+            }
+            let entry = map.entry(dir.to_path_buf()).or_default();
+            entry.0 += file.lines_covered;
+            entry.1 += file.lines_total;
+            if dir == canonical {
+                break;
+            }
+            parent = dir.parent();
+        }
+    }
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +144,30 @@ mod tests {
         assert_eq!(format_percent(0, 0), "n/a");
         assert_eq!(format_percent(1, 200), "<1% (1/200)");
         assert_eq!(format_percent(17, 20), "85% (17/20)");
+    }
+
+    #[test]
+    fn short_percent_omits_counts() {
+        assert_eq!(short_percent(1, 200).as_deref(), Some("<1%"));
+        assert_eq!(short_percent(17, 20).as_deref(), Some("85%"));
+        assert_eq!(short_percent(0, 0), None);
+    }
+
+    #[test]
+    fn aggregates_file_and_directory_coverage() {
+        let suite = CoverageSuite {
+            runner: "lcov".into(),
+            has_branches: false,
+            files: vec![
+                file("/repo/src/A.java", 10, 10),
+                file("/repo/src/B.java", 2, 5),
+            ],
+        };
+        let map = lookup(Path::new("/repo"), &suite);
+        assert_eq!(map.get(Path::new("/repo/src/A.java")), Some(&(10, 10)));
+        assert_eq!(map.get(Path::new("/repo/src/B.java")), Some(&(2, 5)));
+        assert_eq!(map.get(Path::new("/repo/src")), Some(&(12, 15)));
+        assert_eq!(map.get(Path::new("/repo")), Some(&(12, 15)));
     }
 
     #[test]

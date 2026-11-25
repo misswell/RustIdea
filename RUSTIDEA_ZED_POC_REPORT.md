@@ -435,7 +435,7 @@ Panel coverage at this commit:
 | Replace in Files | working (all current matches, preserve case) | `ops::search::replace_in_files` |
 | TODO | working (comment scan/navigation/filters) | `ops::search` regex + comment context |
 | Dependencies | Maven/Gradle/sbt modules and libraries with filter | `ops::build::build_model` + `ide-build` |
-| Coverage | import lcov/JaCoCo/Go/SimpleCov reports, sort, per-file percentages, file navigation | `ops::coverage::coverage_import` |
+| Coverage | import lcov/JaCoCo/Go/SimpleCov reports, sort, file/directory percentages, project-tree badges, file navigation | `ops::coverage::coverage_import` |
 | Bookmarks | F3 toggle at caret, navigable list, remove, per-project JSON persistence | local store + navigation |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers | `ide-docker` |
@@ -644,7 +644,7 @@ and two branches:
 
 ```text
 coverage_files=1 coverage_status=lcov · 1 files · 66% (2/3) lines
-coverage_first="src/main/java/com/example/App.java"
+coverage_first="src/main/java/com/example/App.java" coverage_badges=7
 ```
 
 Bookmark smoke (F3 on line 1, then a fresh process reloading the same config):
@@ -802,7 +802,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff: 50 passed; 0 failed
+documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff: 52 passed; 0 failed
 ```
 
 ## Not yet done
@@ -825,8 +825,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   SSE transports. Settings edits booleans and JSON scalars; structured
   list/map editors are missing. Database/HTTP have working execution paths but no
   source/request editors of their own. Coverage imports existing lcov, JaCoCo,
-  Go and SimpleCov reports; launching a configuration under coverage and the
-  editor gutter/project badges are not implemented. Bookmarks have a navigable
+  Go and SimpleCov reports; project-tree badges show file and directory
+  coverage, but launching a configuration under coverage and the editor gutter
+  are not implemented. Bookmarks have a navigable
   panel but no editor gutter marker yet. Services lists Docker objects and can
   start/stop/restart containers, but logs, pull/prune, custom connections and
   Compose lifecycle controls are missing. GitHub lists and filters pull

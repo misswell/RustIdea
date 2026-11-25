@@ -685,6 +685,7 @@ pub struct Workbench {
     _dependency_filter_subscription: Subscription,
     coverage_suite: Option<ide_coverage::CoverageSuite>,
     coverage_rows: Vec<crate::coverage::CoverageRow>,
+    coverage_lookup: std::collections::HashMap<PathBuf, (u32, u32)>,
     coverage_status: gpui::SharedString,
     coverage_path_input: Entity<TextInput>,
     coverage_sort_lines: bool,
@@ -1494,6 +1495,7 @@ impl Workbench {
             _dependency_filter_subscription: dependency_filter_subscription,
             coverage_suite: None,
             coverage_rows: Vec::new(),
+            coverage_lookup: std::collections::HashMap::new(),
             coverage_status: "Import a coverage report to inspect it".into(),
             coverage_path_input,
             coverage_sort_lines: true,
@@ -3440,6 +3442,7 @@ impl Workbench {
                         Ok(suite) => {
                             let mut rows = crate::coverage::coverage_rows(&root, &suite);
                             crate::coverage::sort_rows(&mut rows, app.coverage_sort_lines);
+                            let lookup = crate::coverage::lookup(&root, &suite);
                             let (covered, total, _, _) = crate::coverage::totals(&suite.files);
                             app.coverage_status = format!(
                                 "{} · {} files · {} lines",
@@ -3449,10 +3452,12 @@ impl Workbench {
                             )
                             .into();
                             app.coverage_rows = rows;
+                            app.coverage_lookup = lookup;
                             app.coverage_suite = Some(suite);
                         }
                         Err(error) => {
                             app.coverage_rows.clear();
+                            app.coverage_lookup.clear();
                             app.coverage_suite = None;
                             app.coverage_status =
                                 format!("Coverage import failed: {}", error.message).into();
@@ -7212,6 +7217,10 @@ impl Workbench {
             .unwrap_or_default()
     }
 
+    pub fn coverage_badge_count(&self) -> usize {
+        self.coverage_lookup.len()
+    }
+
     pub fn smoke_bookmark(&mut self, cx: &mut Context<Self>) {
         self.select_sidebar(SidebarMode::Bookmarks, cx);
         self.toggle_bookmark(cx);
@@ -8344,11 +8353,13 @@ impl Workbench {
     fn render_project(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let nodes = self.tree.nodes();
+        let coverage = self.coverage_lookup.clone();
         let row_count = nodes.len();
         let app = cx.entity();
         uniform_list("project-tree", row_count, move |range, _window, _cx| {
             let nodes = nodes.clone();
             let app = app.clone();
+            let coverage = coverage.clone();
             range
                 .map(|index| {
                     let node = nodes[index].clone();
@@ -8357,6 +8368,22 @@ impl Workbench {
                     let is_directory = node.is_directory;
                     let expanded = node.expanded;
                     let is_more = node.more;
+                    let coverage_badge =
+                        coverage
+                            .get(&node.path)
+                            .copied()
+                            .and_then(|(covered, total)| {
+                                let percent = crate::coverage::percent(covered, total)?;
+                                let color = if percent < 50.0 {
+                                    theme.error
+                                } else if percent < 80.0 {
+                                    theme.warning
+                                } else {
+                                    theme.accent
+                                };
+                                crate::coverage::short_percent(covered, total)
+                                    .map(|label| (label, color))
+                            });
                     let color = if is_more {
                         theme.accent
                     } else if node.ignored {
@@ -8394,6 +8421,15 @@ impl Workbench {
                             },
                         ))
                         .child(div().flex_1().min_w(px(0.)).truncate().child(name))
+                        .when_some(coverage_badge, |row, (label, color)| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(8.5))
+                                    .text_color(color)
+                                    .child(label),
+                            )
+                        })
                 })
                 .collect::<Vec<_>>()
         })
