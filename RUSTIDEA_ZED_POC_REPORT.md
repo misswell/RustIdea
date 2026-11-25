@@ -472,6 +472,13 @@ Notebook smoke (two-cell `.ipynb`):
 notebook_cells=2
 ```
 
+MCP round-trip smoke in an isolated config/data root (add `/bin/echo` server,
+then remove it):
+
+```text
+WORKBENCH_MCP_ROUNDTRIP added=1 removed=0 status=New stdio MCP server
+```
+
 Build smoke on the Maven project:
 
 ```text

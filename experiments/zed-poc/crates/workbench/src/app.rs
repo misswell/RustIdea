@@ -2793,6 +2793,41 @@ impl Workbench {
         self.select_sidebar(SidebarMode::Plugins, cx);
     }
 
+    pub fn smoke_mcp_roundtrip(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Mcp, cx);
+        self.new_mcp_server(cx);
+        self.mcp_name_input.update(cx, |input, cx| {
+            input.set_content("smoke-echo", cx);
+        });
+        self.mcp_command_input.update(cx, |input, cx| {
+            input.set_content("/bin/echo", cx);
+        });
+        self.mcp_args_input.update(cx, |input, cx| {
+            input.set_content("hello", cx);
+        });
+        self.save_mcp_server(cx);
+        let added = self.mcp_servers.len();
+        let Some(server) = self
+            .mcp_servers
+            .iter()
+            .find(|server| server.name == "smoke-echo")
+            .cloned()
+        else {
+            eprintln!(
+                "WORKBENCH_MCP_ROUNDTRIP add_failed status={}",
+                self.mcp_status
+            );
+            return;
+        };
+        self.mcp_selected = Some(server.id);
+        self.remove_selected_mcp_server(cx);
+        eprintln!(
+            "WORKBENCH_MCP_ROUNDTRIP added={added} removed={} status={}",
+            self.mcp_servers.len(),
+            self.mcp_status
+        );
+    }
+
     pub fn plugins_count(&self) -> usize {
         self.plugins.len()
     }

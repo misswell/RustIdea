@@ -199,6 +199,8 @@ fn main() {
                 let smoke_build = std::env::var_os("RUSTIDEA_ZED_SMOKE_BUILD").is_some();
                 let smoke_plugins = std::env::var_os("RUSTIDEA_ZED_SMOKE_PLUGINS").is_some();
                 let smoke_market = std::env::var_os("RUSTIDEA_ZED_SMOKE_MARKET").is_some();
+                let smoke_mcp_roundtrip =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_MCP_ROUNDTRIP").is_some();
                 let smoke_debug = std::env::var_os("RUSTIDEA_ZED_SMOKE_DEBUG").is_some();
                 let smoke_notebook =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK").is_some();
@@ -251,6 +253,9 @@ fn main() {
                                 }
                                 if smoke_market {
                                     app.smoke_market(cx);
+                                }
+                                if smoke_mcp_roundtrip {
+                                    app.smoke_mcp_roundtrip(cx);
                                 }
                                 if smoke_debug {
                                     app.smoke_debug(cx);
