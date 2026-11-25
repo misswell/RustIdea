@@ -8,9 +8,10 @@ use gpui::{
     ClickEvent, Context, Entity, Focusable as _, Subscription, UniformListScrollHandle, Window,
     div, prelude::*, px, uniform_list,
 };
-use ide_core::{DocId, IdeEvent};
+use ide_core::{DocId, IdeEvent, OutlineItem, Severity};
 use language::{BufferEvent, Diagnostic, DiagnosticEntry, DiagnosticMessage, DiagnosticSet};
 use lsp::LanguageServerId;
+use text::Point as TextPoint;
 
 use crate::bridge::{ZedDocument, is_buffer_edited};
 use crate::code_actions::OpenIdeaCodeActionProvider;
@@ -29,6 +30,15 @@ enum SidebarMode {
     Project,
     Search,
     Git,
+    Outline,
+    Problems,
+    Database,
+    Http,
+    Remote,
+    Agents,
+    Plugins,
+    Tools,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +72,16 @@ pub struct InitialState {
     pub project: ide_host::ops::project::ProjectInfo,
     pub root_listing: Vec<ide_vfs::FileEntry>,
     pub document: Option<ide_workspace::DocumentInfo>,
+}
+
+#[derive(Clone)]
+struct ProblemItem {
+    path: PathBuf,
+    line: u32,
+    column: u32,
+    severity: Severity,
+    message: String,
+    source: Option<String>,
 }
 
 pub struct Workbench {
@@ -104,6 +124,29 @@ pub struct Workbench {
     terminal_starting: bool,
     terminal_status: gpui::SharedString,
     terminal_output: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    outline: Vec<OutlineItem>,
+    outline_status: gpui::SharedString,
+    outline_doc: Option<DocId>,
+    problems: Vec<ProblemItem>,
+    settings_text: gpui::SharedString,
+    pending_goto: Option<(PathBuf, u32, u32)>,
+    http_blocks: Vec<ide_http::HttpRequestBlock>,
+    http_selected: usize,
+    http_status: gpui::SharedString,
+    http_output: String,
+    db_sources: Vec<ide_db::DataSource>,
+    db_connected: Vec<String>,
+    db_selected: usize,
+    db_status: gpui::SharedString,
+    db_output: String,
+    ssh_configs: Vec<ide_core::remote_settings::SshConfiguration>,
+    ssh_selected: usize,
+    remote_status: gpui::SharedString,
+    agents: Vec<ide_agent::AgentProvider>,
+    agents_status: gpui::SharedString,
+    tools: Vec<ide_tools::ToolInfo>,
+    tools_selected: usize,
+    tools_status: gpui::SharedString,
 }
 
 impl Workbench {
@@ -212,6 +255,29 @@ impl Workbench {
             terminal_starting: false,
             terminal_status: "Click TERMINAL to start a shell".into(),
             terminal_output: None,
+            outline: Vec::new(),
+            outline_status: "Open a file to see its structure".into(),
+            outline_doc: None,
+            problems: Vec::new(),
+            settings_text: "Select SETTINGS to load effective settings".into(),
+            pending_goto: None,
+            http_blocks: Vec::new(),
+            http_selected: 0,
+            http_status: "Open an .http file to list requests".into(),
+            http_output: String::new(),
+            db_sources: Vec::new(),
+            db_connected: Vec::new(),
+            db_selected: 0,
+            db_status: "Select DATABASE to load data sources".into(),
+            db_output: String::new(),
+            ssh_configs: Vec::new(),
+            ssh_selected: 0,
+            remote_status: "Select REMOTE to load SSH configurations".into(),
+            agents: Vec::new(),
+            agents_status: "Select AGENTS to load providers".into(),
+            tools: Vec::new(),
+            tools_selected: 0,
+            tools_status: "Select TOOLS to load tool status".into(),
         };
         if let Some(document) = document {
             app.insert_document(document, &registry_for_initial, cx);
@@ -286,7 +352,521 @@ impl Workbench {
 
     fn activate(&mut self, doc: DocId, cx: &mut Context<Self>) {
         self.active = Some(doc);
+        if self.sidebar_mode == SidebarMode::Outline {
+            self.refresh_outline(cx);
+        }
+        if self.sidebar_mode == SidebarMode::Http {
+            self.refresh_http(cx);
+        }
         cx.notify();
+    }
+
+    fn select_sidebar(&mut self, mode: SidebarMode, cx: &mut Context<Self>) {
+        self.sidebar_mode = mode;
+        match mode {
+            SidebarMode::Outline => self.refresh_outline(cx),
+            SidebarMode::Settings => {
+                self.settings_text = self.host.settings_json().into();
+            }
+            SidebarMode::Git => self.refresh_git(cx),
+            SidebarMode::Http => self.refresh_http(cx),
+            SidebarMode::Database => self.refresh_db(cx),
+            SidebarMode::Remote => self.refresh_remote(cx),
+            SidebarMode::Agents => self.refresh_agents(cx),
+            SidebarMode::Tools => self.refresh_tools(cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn refresh_outline(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.active else {
+            self.outline.clear();
+            self.outline_doc = None;
+            self.outline_status = "Open a file to see its structure".into();
+            cx.notify();
+            return;
+        };
+        if self.outline_doc == Some(doc) && !self.outline.is_empty() {
+            return;
+        }
+        self.outline_doc = Some(doc);
+        self.outline.clear();
+        self.outline_status = "Loading document outline…".into();
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let outline = host.document_outline(doc).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match outline {
+                        Ok(items) => {
+                            let count = items.len();
+                            app.outline = items;
+                            app.outline_status = format!("{count} top-level items").into();
+                        }
+                        Err(error) => {
+                            app.outline.clear();
+                            app.outline_status =
+                                format!("Outline failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_http(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.active else {
+            self.http_blocks.clear();
+            self.http_status = "Open an .http file to list requests".into();
+            cx.notify();
+            return;
+        };
+        let Some(document) = self.documents.get(&doc) else {
+            self.http_blocks.clear();
+            self.http_status = "Open an .http file to list requests".into();
+            cx.notify();
+            return;
+        };
+        let text = document.text(cx);
+        let parsed = ide_http::parse::parse(&text);
+        self.http_blocks = parsed
+            .requests
+            .into_iter()
+            .map(|request| request.block)
+            .collect();
+        self.http_selected = self
+            .http_selected
+            .min(self.http_blocks.len().saturating_sub(1));
+        self.http_status = if self.http_blocks.is_empty() {
+            "No requests parsed from this file".into()
+        } else {
+            format!("{} requests", self.http_blocks.len()).into()
+        };
+        cx.notify();
+    }
+
+    fn run_selected_http(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.active else {
+            self.http_status = "Open an .http file first".into();
+            cx.notify();
+            return;
+        };
+        if self.http_blocks.is_empty() {
+            self.refresh_http(cx);
+        }
+        let Some(block) = self.http_blocks.get(self.http_selected) else {
+            self.http_status = "No request selected".into();
+            cx.notify();
+            return;
+        };
+        let method = block.method.clone();
+        let url = block.url.clone();
+        let Some(document) = self.documents.get(&doc) else {
+            self.http_status = "Open an .http file first".into();
+            cx.notify();
+            return;
+        };
+        let text = document.text(cx);
+        let path = document.path.clone();
+        let index = self.http_selected as u32;
+        let root = self.root.clone();
+        let host = self.host.clone();
+        self.http_status = format!("Running {method} {url}…").into();
+        self.http_output.clear();
+        cx.spawn(async move |this, cx| {
+            let result = host.run_http(text, index, Some(path), root).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(exchange) => {
+                            if let Some(response) = &exchange.response {
+                                app.http_status = format!(
+                                    "{} {} · {} bytes · {:.1} ms",
+                                    response.status,
+                                    response.status_text,
+                                    response.size,
+                                    response.total_ms
+                                )
+                                .into();
+                                let mut output = format!(
+                                    "{} {} {}\n",
+                                    response.version, response.status, response.status_text
+                                );
+                                for (name, value) in &response.headers {
+                                    output.push_str(&format!("{name}: {value}\n"));
+                                }
+                                output.push('\n');
+                                if let Some(body) = &response.body {
+                                    output.push_str(body);
+                                    if response.truncated {
+                                        output.push_str("\n… body truncated");
+                                    }
+                                } else {
+                                    output.push_str("(binary body)");
+                                }
+                                app.http_output = output;
+                                if app.http_output.len() > 2_000_000 {
+                                    let split = app.http_output.len().saturating_sub(1_800_000);
+                                    app.http_output.drain(..split);
+                                }
+                            } else {
+                                app.http_status = exchange
+                                    .entry
+                                    .error
+                                    .clone()
+                                    .unwrap_or_else(|| "Request failed".into())
+                                    .into();
+                                app.http_output.clear();
+                            }
+                        }
+                        Err(error) => {
+                            app.http_status = format!("HTTP failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_db(&mut self, cx: &mut Context<Self>) {
+        let sources = self.host.db_sources();
+        let connected = self.host.db_connected();
+        match sources {
+            Ok(sources) => {
+                self.db_sources = sources;
+                self.db_selected = self
+                    .db_selected
+                    .min(self.db_sources.len().saturating_sub(1));
+                self.db_status = if self.db_sources.is_empty() {
+                    "No data sources configured".into()
+                } else {
+                    format!("{} data sources", self.db_sources.len()).into()
+                };
+            }
+            Err(error) => {
+                self.db_sources.clear();
+                self.db_status = format!("Data sources failed: {}", error.message).into();
+            }
+        }
+        self.db_connected = connected.unwrap_or_default();
+        cx.notify();
+    }
+
+    fn connect_selected_db(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
+            self.db_status = "No data source selected".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let id = source.id.clone();
+        self.db_status = format!("Connecting to {}…", source.name).into();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_connect(id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.db_status = match result {
+                        Ok(()) => "Connected".into(),
+                        Err(error) => format!("Connect failed: {}", error.message).into(),
+                    };
+                    app.db_connected = app.host.db_connected().unwrap_or_default();
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn run_selected_db_sql(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
+            self.db_status = "No data source selected".into();
+            cx.notify();
+            return;
+        };
+        let Some(doc) = self.active else {
+            self.db_status = "Open a .sql file to run a statement".into();
+            cx.notify();
+            return;
+        };
+        let Some(document) = self.documents.get(&doc) else {
+            self.db_status = "Open a .sql file to run a statement".into();
+            cx.notify();
+            return;
+        };
+        let text = document.text(cx);
+        let id = source.id.clone();
+        let host = self.host.clone();
+        self.db_status = format!("Running on {}…", source.name).into();
+        self.db_output.clear();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_execute(id, text, 0, 0).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(outcomes) => {
+                            let summary = outcomes
+                                .iter()
+                                .map(|outcome| {
+                                    if let Some(error) = &outcome.error {
+                                        format!("error: {error}")
+                                    } else if let Some(result) = &outcome.result {
+                                        format!(
+                                            "{} row(s), {} ms",
+                                            result.rows.len(),
+                                            result.elapsed_ms
+                                        )
+                                    } else {
+                                        "no result".to_string()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" | ");
+                            app.db_status = summary.into();
+                            app.db_output = serde_json::to_string_pretty(&outcomes)
+                                .unwrap_or_else(|error| format!("format result: {error}"));
+                            if app.db_output.len() > 2_000_000 {
+                                let split = app.db_output.len().saturating_sub(1_800_000);
+                                app.db_output.drain(..split);
+                            }
+                        }
+                        Err(error) => {
+                            app.db_status = format!("Query failed: {}", error.message).into();
+                            app.db_output.clear();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_remote(&mut self, cx: &mut Context<Self>) {
+        self.ssh_configs = self.host.ssh_configs();
+        self.ssh_selected = self
+            .ssh_selected
+            .min(self.ssh_configs.len().saturating_sub(1));
+        self.remote_status = if self.ssh_configs.is_empty() {
+            "No SSH configurations".into()
+        } else {
+            format!("{} SSH configurations", self.ssh_configs.len()).into()
+        };
+        cx.notify();
+    }
+
+    fn open_ssh_terminal(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(config) = self.ssh_configs.get(self.ssh_selected).cloned() else {
+            self.remote_status = "No SSH configuration selected".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let theme = self.theme;
+        let window_handle = self.window_handle;
+        let (output_tx, output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        self.remote_status = format!("Connecting to {}…", config.label()).into();
+        self.terminal_status = self.remote_status.clone();
+        self.bottom_mode = BottomMode::Terminal;
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .spawn_ssh_terminal(
+                    config.id.clone(),
+                    crate::terminal_pane::COLUMNS as u16,
+                    crate::terminal_pane::ROWS as u16,
+                    output_tx,
+                )
+                .await;
+            this.update_in(cx, |app, window, cx| {
+                match result {
+                    Ok(info) => {
+                        if let Some(old) = app.terminal.take() {
+                            let _ = app.host.kill_terminal(old.read(cx).id());
+                        }
+                        let terminal = cx.new(|cx| {
+                            TerminalPane::new(
+                                host.clone(),
+                                info.id,
+                                info.title.clone().into(),
+                                info.pid,
+                                theme,
+                                window,
+                                cx,
+                            )
+                        });
+                        app.terminal = Some(terminal);
+                        app.terminal_status = format!("SSH · {}", config.name).into();
+                        app.remote_status = format!("SSH session open · {}", config.label()).into();
+                        app.bottom_mode = BottomMode::Terminal;
+                        app.attach_terminal_output(output_rx, cx);
+                    }
+                    Err(error) => {
+                        app.remote_status = format!("SSH failed: {}", error.message).into();
+                        app.terminal_status = app.remote_status.clone();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+            refresh_window(window_handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_agents(&mut self, cx: &mut Context<Self>) {
+        match self.host.agent_providers() {
+            Ok(agents) => {
+                self.agents_status = if agents.is_empty() {
+                    "No agent providers".into()
+                } else {
+                    format!("{} agent providers", agents.len()).into()
+                };
+                self.agents = agents;
+            }
+            Err(error) => {
+                self.agents.clear();
+                self.agents_status = format!("Agents failed: {}", error.message).into();
+            }
+        }
+        cx.notify();
+    }
+
+    fn refresh_tools(&mut self, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        self.tools_status = "Loading tools…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.tools_list().await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(tools) => {
+                            app.tools_status = format!("{} tools", tools.len()).into();
+                            app.tools = tools;
+                            app.tools_selected =
+                                app.tools_selected.min(app.tools.len().saturating_sub(1));
+                        }
+                        Err(error) => {
+                            app.tools.clear();
+                            app.tools_status = format!("Tools failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn install_selected_tool(&mut self, cx: &mut Context<Self>) {
+        let Some(tool) = self.tools.get(self.tools_selected).cloned() else {
+            self.tools_status = "No tool selected".into();
+            cx.notify();
+            return;
+        };
+        if !tool.can_install {
+            self.tools_status = tool
+                .unavailable_reason
+                .clone()
+                .unwrap_or_else(|| "This tool cannot be installed here".into())
+                .into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        let name = tool.name.clone();
+        self.tools_status = format!("Installing {}…", tool.display_name).into();
+        cx.spawn(async move |this, cx| {
+            let result = host.tools_install(name).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(tool) => {
+                            app.tools_status = format!("{} installed", tool.display_name).into();
+                        }
+                        Err(error) => {
+                            app.tools_status = format!("Install failed: {}", error.message).into();
+                        }
+                    }
+                    app.refresh_tools(cx);
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn goto_position(
+        &mut self,
+        doc: DocId,
+        line: u32,
+        column: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate(doc, cx);
+        let Some(editor) = self.ensure_editor(doc, false, window, cx) else {
+            return;
+        };
+        let multi_buffer = editor.read(cx).buffer().clone();
+        let snapshot = multi_buffer.read(cx).snapshot(cx);
+        let anchor = snapshot.anchor_before(TextPoint::new(line, column));
+        editor.update(cx, |editor, cx| {
+            editor.change_selections(Default::default(), window, cx, |selection| {
+                selection.select_ranges([anchor..anchor]);
+            });
+        });
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn open_or_goto(
+        &mut self,
+        path: PathBuf,
+        line: u32,
+        column: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((doc, _)) = self
+            .documents
+            .iter()
+            .find(|(_, document)| document.path == path)
+        {
+            let doc = *doc;
+            self.goto_position(doc, line, column, window, cx);
+            return;
+        }
+        self.pending_goto = Some((path.clone(), line, column));
+        self.open_path(path, cx);
     }
 
     fn ensure_editor(
@@ -626,7 +1206,7 @@ impl Workbench {
             rows: crate::terminal_pane::ROWS as u16,
             shell_integration: true,
         };
-        let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (output_tx, output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         cx.spawn(async move |this, cx| {
             let result = host.spawn_terminal(options, output_tx).await;
             this.update_in(cx, |app, window, cx| {
@@ -652,33 +1232,7 @@ impl Workbench {
                         app.terminal_status = format!("{} · pid {:?}", info.title, info.pid).into();
                         app.terminal_starting = false;
                         app.bottom_mode = BottomMode::Terminal;
-                        cx.spawn(async move |this, cx| {
-                            while let Some(chunk) = output_rx.recv().await {
-                                let handle = this
-                                    .update(cx, |app, cx| {
-                                        if let Some(terminal) = &app.terminal {
-                                            terminal.update(cx, |pane, cx| pane.feed(&chunk, cx));
-                                        }
-                                        cx.notify();
-                                        app.window_handle
-                                    })
-                                    .ok()
-                                    .flatten();
-                                refresh_window(handle, cx);
-                            }
-                            let handle = this
-                                .update(cx, |app, cx| {
-                                    if let Some(terminal) = &app.terminal {
-                                        terminal.update(cx, |pane, cx| pane.mark_exited(None, cx));
-                                    }
-                                    cx.notify();
-                                    app.window_handle
-                                })
-                                .ok()
-                                .flatten();
-                            refresh_window(handle, cx);
-                        })
-                        .detach();
+                        app.attach_terminal_output(output_rx, cx);
                         if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                             let command = "printf 'WORKBENCH_TERMINAL_OK\\n'\r";
                             if let Err(error) = host.write_terminal(terminal_id, command) {
@@ -699,6 +1253,40 @@ impl Workbench {
         })
         .detach();
         cx.notify();
+    }
+
+    fn attach_terminal_output(
+        &self,
+        mut output_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            while let Some(chunk) = output_rx.recv().await {
+                let handle = this
+                    .update(cx, |app, cx| {
+                        if let Some(terminal) = &app.terminal {
+                            terminal.update(cx, |pane, cx| pane.feed(&chunk, cx));
+                        }
+                        cx.notify();
+                        app.window_handle
+                    })
+                    .ok()
+                    .flatten();
+                refresh_window(handle, cx);
+            }
+            let handle = this
+                .update(cx, |app, cx| {
+                    if let Some(terminal) = &app.terminal {
+                        terminal.update(cx, |pane, cx| pane.mark_exited(None, cx));
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
     }
 
     pub fn terminal_text(&self, cx: &gpui::App) -> Option<String> {
@@ -1016,6 +1604,70 @@ impl Workbench {
         self.start_selected_run(cx);
     }
 
+    pub fn smoke_outline(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Outline, cx);
+    }
+
+    pub fn outline_status(&self) -> &gpui::SharedString {
+        &self.outline_status
+    }
+
+    pub fn outline_count(&self) -> usize {
+        fn count(items: &[OutlineItem]) -> usize {
+            items.iter().map(|item| 1 + count(&item.children)).sum()
+        }
+        count(&self.outline)
+    }
+
+    pub fn problem_count(&self) -> usize {
+        self.problems.len()
+    }
+
+    pub fn smoke_http(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Http, cx);
+        self.run_selected_http(cx);
+    }
+
+    pub fn http_status(&self) -> &gpui::SharedString {
+        &self.http_status
+    }
+
+    pub fn http_output(&self) -> &str {
+        &self.http_output
+    }
+
+    pub fn db_status(&self) -> &gpui::SharedString {
+        &self.db_status
+    }
+
+    pub fn smoke_db(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Database, cx);
+    }
+
+    pub fn smoke_remote(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Remote, cx);
+    }
+
+    pub fn remote_status(&self) -> &gpui::SharedString {
+        &self.remote_status
+    }
+
+    pub fn smoke_agents(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Agents, cx);
+    }
+
+    pub fn smoke_tools(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Tools, cx);
+    }
+
+    pub fn agents_count(&self) -> usize {
+        self.agents.len()
+    }
+
+    pub fn tools_count(&self) -> usize {
+        self.tools.len()
+    }
+
     pub fn smoke_run_status(&self) -> String {
         self.run_status.to_string()
     }
@@ -1092,7 +1744,22 @@ impl Workbench {
                 let Some(document) = self.documents.get(&doc_id) else {
                     return;
                 };
-                let snapshot = document.buffer.read(cx).snapshot();
+                let buffer = document.buffer.clone();
+                let snapshot = buffer.read(cx).snapshot();
+                self.problems.retain(|problem| problem.path != path.0);
+                for diagnostic in &items {
+                    self.problems.push(ProblemItem {
+                        path: path.0.clone(),
+                        line: diagnostic.range.start.line,
+                        column: diagnostic.range.start.col,
+                        severity: diagnostic.severity,
+                        message: diagnostic.message.clone(),
+                        source: diagnostic.source.clone().or(Some(source.clone())),
+                    });
+                }
+                if self.problems.len() > 5_000 {
+                    self.problems.drain(..self.problems.len() - 5_000);
+                }
                 let entries: Vec<DiagnosticEntry<text::PointUtf16>> = items
                     .into_iter()
                     .map(|diagnostic| {
@@ -1120,7 +1787,7 @@ impl Workbench {
                     .collect();
                 let set = DiagnosticSet::new(entries, &snapshot);
                 let count = set.len();
-                document.buffer.update(cx, |buffer, cx| {
+                buffer.update(cx, |buffer, cx| {
                     buffer.update_diagnostics(server_id, set, cx);
                 });
                 self.diagnostics.insert(path.0, count);
@@ -1305,6 +1972,790 @@ impl Workbench {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.tree_scroll)
+    }
+
+    fn append_outline_rows(
+        &self,
+        items: &[OutlineItem],
+        depth: usize,
+        doc: DocId,
+        rows: &mut Vec<gpui::AnyElement>,
+        cx: &mut Context<Self>,
+    ) {
+        let theme = self.theme;
+        for item in items.iter().take(200) {
+            let line = item.selection_range.start.line;
+            let column = item.selection_range.start.col;
+            let label = item.name.clone();
+            let detail = item.detail.clone();
+            rows.push(
+                div()
+                    .id(("outline-item", rows.len()))
+                    .h(px(24.))
+                    .pl(px(8.0 + depth as f32 * 12.0))
+                    .pr_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(11.))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.goto_position(doc, line, column, window, cx);
+                    }))
+                    .child(div().flex_1().truncate().child(label))
+                    .when_some(detail, |row, detail| {
+                        row.child(
+                            div()
+                                .text_size(px(9.5))
+                                .text_color(theme.faint)
+                                .truncate()
+                                .child(detail),
+                        )
+                    })
+                    .into_any_element(),
+            );
+            self.append_outline_rows(&item.children, depth + 1, doc, rows, cx);
+        }
+    }
+
+    fn render_outline(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let Some(doc) = self.active else {
+            return div()
+                .p_3()
+                .text_size(px(11.))
+                .text_color(theme.faint)
+                .child("Open a file to see its structure")
+                .into_any_element();
+        };
+        let mut rows = Vec::new();
+        self.append_outline_rows(&self.outline, 0, doc, &mut rows, cx);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(self.outline_status.clone()),
+            )
+            .child(
+                div()
+                    .id("outline-list")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
+    fn render_problems(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = Vec::new();
+        let mut problems = self.problems.clone();
+        problems.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.line.cmp(&right.line))
+                .then(left.column.cmp(&right.column))
+        });
+        for (index, problem) in problems.into_iter().take(500).enumerate() {
+            let color = match problem.severity {
+                Severity::Error => theme.error,
+                Severity::Warning => theme.warning,
+                Severity::Info => theme.accent,
+                Severity::Hint => theme.muted,
+            };
+            let path = problem.path.clone();
+            let file = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let line = problem.line;
+            let column = problem.column;
+            let location = format!("{file}:{}:{}", line + 1, column + 1);
+            let message = problem.message.clone();
+            let source = problem.source.clone().unwrap_or_default();
+            rows.push(
+                div()
+                    .id(("problem", index))
+                    .min_h(px(30.))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.open_or_goto(path.clone(), line, column, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(10.))
+                            .text_color(color)
+                            .child(location)
+                            .when(!source.is_empty(), |row| {
+                                row.child(div().text_color(theme.faint).child(source))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(message),
+                    )
+                    .into_any_element(),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(format!(
+                        "{} problems · {} errors",
+                        self.problems.len(),
+                        self.problems
+                            .iter()
+                            .filter(|problem| problem.severity == Severity::Error)
+                            .count()
+                    )),
+            )
+            .child(
+                div()
+                    .id("problems-list")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .when(rows.is_empty(), |list| {
+                        list.child(
+                            div()
+                                .p_3()
+                                .text_size(px(11.))
+                                .text_color(theme.faint)
+                                .child("No problems reported by the backend"),
+                        )
+                    })
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings(&self) -> gpui::AnyElement {
+        let theme = self.theme;
+        let lines: Vec<String> = self.settings_text.lines().map(str::to_owned).collect();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child("Effective OpenIDEA settings (read-only)"),
+            )
+            .child(
+                div()
+                    .id("settings-json")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_scroll()
+                    .p_2()
+                    .font_family("Menlo")
+                    .text_size(px(10.5))
+                    .text_color(theme.text)
+                    .flex()
+                    .flex_col()
+                    .children(lines.into_iter().map(|line| div().child(line))),
+            )
+            .into_any_element()
+    }
+
+    fn render_http(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut requests = div()
+            .id("http-requests")
+            .flex_none()
+            .max_h(px(150.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, block) in self.http_blocks.iter().take(80).enumerate() {
+            let selected = index == self.http_selected;
+            requests = requests.child(
+                div()
+                    .id(("http-request", index))
+                    .px_2()
+                    .py_1()
+                    .text_size(px(10.5))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.http_selected = index;
+                        cx.notify();
+                    }))
+                    .child(format!("{} {}", block.method, block.url)),
+            );
+        }
+        let mut lines: Vec<String> = self.http_output.lines().map(str::to_owned).collect();
+        if lines.len() > 400 {
+            lines.drain(..lines.len() - 400);
+        }
+        let output = div()
+            .id("http-output")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_scroll()
+            .p_2()
+            .font_family("Menlo")
+            .text_size(px(10.5))
+            .text_color(theme.text)
+            .flex()
+            .flex_col()
+            .when(lines.is_empty(), |view| {
+                view.child(
+                    div()
+                        .text_color(theme.faint)
+                        .child("Response appears here."),
+                )
+            })
+            .children(lines.into_iter().map(|line| div().child(line)));
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("http-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_http(cx);
+                            }))
+                            .child("Parse"),
+                    )
+                    .child(
+                        div()
+                            .id("http-send")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.run_selected_http(cx);
+                            }))
+                            .child("Send"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.http_status.clone()),
+                    ),
+            )
+            .child(requests)
+            .child(output)
+            .into_any_element()
+    }
+
+    fn render_db(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut sources = div()
+            .id("db-sources")
+            .flex_none()
+            .max_h(px(180.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, source) in self.db_sources.iter().take(80).enumerate() {
+            let selected = index == self.db_selected;
+            let connected = self.db_connected.contains(&source.id);
+            sources = sources.child(
+                div()
+                    .id(("db-source", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.5))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.db_selected = index;
+                        cx.notify();
+                    }))
+                    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if connected {
+                        theme.accent
+                    } else {
+                        theme.faint
+                    }))
+                    .child(div().flex_1().truncate().child(source.name.clone()))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child(format!("{:?}", source.driver).to_lowercase()),
+                    ),
+            );
+        }
+        let mut lines: Vec<String> = self.db_output.lines().map(str::to_owned).collect();
+        if lines.len() > 400 {
+            lines.drain(..lines.len() - 400);
+        }
+        let output = div()
+            .id("db-output")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_scroll()
+            .p_2()
+            .font_family("Menlo")
+            .text_size(px(10.5))
+            .text_color(theme.text)
+            .flex()
+            .flex_col()
+            .when(lines.is_empty(), |view| {
+                view.child(
+                    div()
+                        .text_color(theme.faint)
+                        .child("Open a SQL file, select a source, then run."),
+                )
+            })
+            .children(lines.into_iter().map(|line| div().child(line)));
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("db-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_db(cx);
+                            }))
+                            .child("Refresh"),
+                    )
+                    .child(
+                        div()
+                            .id("db-connect")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.connect_selected_db(cx);
+                            }))
+                            .child("Connect"),
+                    )
+                    .child(
+                        div()
+                            .id("db-run")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.run_selected_db_sql(cx);
+                            }))
+                            .child("Run SQL"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.db_status.clone()),
+                    ),
+            )
+            .child(sources)
+            .child(output)
+            .into_any_element()
+    }
+
+    fn render_remote(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("ssh-configs")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, config) in self.ssh_configs.iter().take(80).enumerate() {
+            let selected = index == self.ssh_selected;
+            let name = config.name.clone();
+            let label = config.label();
+            rows = rows.child(
+                div()
+                    .id(("ssh-config", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .text_size(px(10.5))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.ssh_selected = index;
+                        cx.notify();
+                    }))
+                    .child(name)
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.faint)
+                            .child(label),
+                    ),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("ssh-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_remote(cx);
+                            }))
+                            .child("Refresh"),
+                    )
+                    .child(
+                        div()
+                            .id("ssh-open")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_ssh_terminal(window, cx);
+                            }))
+                            .child("Open SSH"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.remote_status.clone()),
+                    ),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
+    fn render_agents(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("agent-providers")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, agent) in self.agents.iter().take(80).enumerate() {
+            rows = rows.child(
+                div()
+                    .id(("agent", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.5))
+                    .text_color(if agent.installed {
+                        theme.text
+                    } else {
+                        theme.muted
+                    })
+                    .child(
+                        div()
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(if agent.installed {
+                                theme.accent
+                            } else {
+                                theme.faint
+                            }),
+                    )
+                    .child(div().flex_1().truncate().child(agent.name.clone()))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(agent.program.clone()),
+                    ),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("agents-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_agents(cx);
+                            }))
+                            .child("Refresh"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.agents_status.clone()),
+                    ),
+            )
+            .child(rows)
+            .when(self.agents.is_empty(), |view| {
+                view.child(
+                    div()
+                        .p_3()
+                        .text_size(px(10.5))
+                        .text_color(theme.faint)
+                        .child("ACP agent providers will appear here."),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_tools(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("tool-list")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, tool) in self.tools.iter().take(200).enumerate() {
+            let selected = index == self.tools_selected;
+            rows = rows.child(
+                div()
+                    .id(("tool", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .text_size(px(10.5))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.tools_selected = index;
+                        cx.notify();
+                    }))
+                    .child(tool.display_name.clone())
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(format!(
+                                "{:?} · {}",
+                                tool.status,
+                                tool.version.clone().unwrap_or_default()
+                            )),
+                    ),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("tools-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_tools(cx);
+                            }))
+                            .child("Refresh"),
+                    )
+                    .child(
+                        div()
+                            .id("tools-install")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.install_selected_tool(cx);
+                            }))
+                            .child("Install"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.tools_status.clone()),
+                    ),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
+    fn render_placeholder(&self, title: &'static str) -> gpui::AnyElement {
+        let theme = self.theme;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_4()
+            .child(div().text_size(px(12.)).text_color(theme.text).child(title))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child("Backend integration for this panel is not implemented yet."),
+            )
+            .into_any_element()
     }
 
     fn render_git_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1772,6 +3223,16 @@ impl Render for Workbench {
             let focus = editor.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
         }
+        if let Some((path, line, column)) = self.pending_goto.clone()
+            && let Some((doc, _)) = self
+                .documents
+                .iter()
+                .find(|(_, document)| document.path == path)
+        {
+            let doc = *doc;
+            self.pending_goto = None;
+            self.goto_position(doc, line, column, window, cx);
+        }
         let active_editor = self
             .active
             .and_then(|doc| self.editors.get(&(doc, false)).cloned());
@@ -1782,11 +3243,58 @@ impl Render for Workbench {
         let project = self.render_project(cx).into_any_element();
         let search = self.render_search_panel(cx);
         let git = self.render_git_panel(cx);
+        let outline = self.render_outline(window, cx);
+        let problems = self.render_problems(window, cx);
+        let settings = self.render_settings();
         let sidebar_body = match self.sidebar_mode {
             SidebarMode::Project => project,
             SidebarMode::Search => search,
             SidebarMode::Git => git,
+            SidebarMode::Outline => outline,
+            SidebarMode::Problems => problems,
+            SidebarMode::Settings => settings,
+            SidebarMode::Database => self.render_db(cx),
+            SidebarMode::Http => self.render_http(cx),
+            SidebarMode::Remote => self.render_remote(cx),
+            SidebarMode::Agents => self.render_agents(cx),
+            SidebarMode::Plugins => self.render_placeholder("Plugins"),
+            SidebarMode::Tools => self.render_tools(cx),
         };
+        let sidebar_tabs = [
+            ("PRJ", SidebarMode::Project),
+            ("SRC", SidebarMode::Search),
+            ("GIT", SidebarMode::Git),
+            ("OUT", SidebarMode::Outline),
+            ("PRB", SidebarMode::Problems),
+            ("DB", SidebarMode::Database),
+            ("HTTP", SidebarMode::Http),
+            ("SSH", SidebarMode::Remote),
+            ("AGT", SidebarMode::Agents),
+            ("PLG", SidebarMode::Plugins),
+            ("TLS", SidebarMode::Tools),
+            ("SET", SidebarMode::Settings),
+        ];
+        let mut sidebar_buttons = Vec::new();
+        for (index, (label, mode)) in sidebar_tabs.into_iter().enumerate() {
+            let active = self.sidebar_mode == mode;
+            sidebar_buttons.push(
+                div()
+                    .id(("sidebar-tab", index))
+                    .px(px(6.))
+                    .py(px(3.))
+                    .rounded_sm()
+                    .text_size(px(9.5))
+                    .cursor_pointer()
+                    .text_color(if active { theme.text } else { theme.muted })
+                    .bg(if active { theme.panel_alt } else { theme.panel })
+                    .hover(|style| style.text_color(theme.text))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.select_sidebar(mode, cx);
+                    }))
+                    .child(label)
+                    .into_any_element(),
+            );
+        }
         let tabs = self.render_tabs(cx).into_any_element();
         let run_panel = self.render_bottom_panel(window, cx);
         div()
@@ -1825,86 +3333,13 @@ impl Render for Workbench {
                             .flex_col()
                             .child(
                                 div()
-                                    .h(px(30.))
                                     .px_2()
+                                    .py_1()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
-                                    .gap_1()
-                                    .text_size(px(11.))
-                                    .child(
-                                        div()
-                                            .id("sidebar-project")
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_sm()
-                                            .cursor_pointer()
-                                            .text_color(
-                                                if self.sidebar_mode == SidebarMode::Project {
-                                                    theme.text
-                                                } else {
-                                                    theme.muted
-                                                },
-                                            )
-                                            .bg(if self.sidebar_mode == SidebarMode::Project {
-                                                theme.panel_alt
-                                            } else {
-                                                theme.panel
-                                            })
-                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                                this.sidebar_mode = SidebarMode::Project;
-                                                cx.notify();
-                                            }))
-                                            .child("PROJECT"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("sidebar-search")
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_sm()
-                                            .cursor_pointer()
-                                            .text_color(
-                                                if self.sidebar_mode == SidebarMode::Search {
-                                                    theme.text
-                                                } else {
-                                                    theme.muted
-                                                },
-                                            )
-                                            .bg(if self.sidebar_mode == SidebarMode::Search {
-                                                theme.panel_alt
-                                            } else {
-                                                theme.panel
-                                            })
-                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                                this.sidebar_mode = SidebarMode::Search;
-                                                cx.notify();
-                                            }))
-                                            .child("SEARCH"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("sidebar-git")
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_sm()
-                                            .cursor_pointer()
-                                            .text_color(if self.sidebar_mode == SidebarMode::Git {
-                                                theme.text
-                                            } else {
-                                                theme.muted
-                                            })
-                                            .bg(if self.sidebar_mode == SidebarMode::Git {
-                                                theme.panel_alt
-                                            } else {
-                                                theme.panel
-                                            })
-                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                                this.sidebar_mode = SidebarMode::Git;
-                                                this.refresh_git(cx);
-                                                cx.notify();
-                                            }))
-                                            .child("GIT"),
-                                    ),
+                                    .gap(px(3.))
+                                    .children(sidebar_buttons),
                             )
                             .child(div().flex_1().min_h(px(0.)).child(sidebar_body)),
                     )

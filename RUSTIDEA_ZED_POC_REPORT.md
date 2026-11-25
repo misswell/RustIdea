@@ -331,6 +331,22 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   translated with Zed's own `to_esc_str` mapping and written back to the
   OpenIDEA terminal session; paste honours bracketed-paste mode. It does not
   use the old text-only terminal stub or xterm.js;
+- the sidebar is now a compact multi-panel workbench: Project, Search, Git,
+  Outline, Problems, Database, HTTP, Remote, Agents, Plugins, Tools and
+  Settings;
+- Outline calls OpenIDEA's LSP/tree-sitter `doc_outline` and navigates
+  selection; Problems aggregates real backend diagnostics and navigates to
+  file/line;
+- Database lists OpenIDEA data sources, connects them, and runs the statement
+  at the caret from the active SQL document through `ops::db::execute`;
+- HTTP parses the active `.http` file, lists requests, and executes the
+  selected request through `ide_http::run`, showing status, headers and body;
+- Remote lists OpenIDEA SSH configurations and opens a real SSH PTY-backed
+  terminal through `ops::term::spawn_ssh`;
+- Agents lists trusted OpenIDEA ACP providers (16 on this machine); Tools lists
+  language-server/debug-adapter status through `ops::tools::tools_list` and can
+  install a selected tool (86 tools on this machine);
+- Settings shows the effective OpenIDEA settings as read-only JSON;
 - buffer edits are sent incrementally to
   `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
   `DocPatched` events and diagnostics are applied back to Zed buffers;
@@ -385,6 +401,25 @@ terminal="/private/tmp/rustidea-java-workbench-smoke $ | WORKBENCH_TERMINAL_OK
 This proves the OpenIDEA PTY stream reached the Zed VT grid. It is not an
 onscreen key-by-key or IME acceptance test.
 
+HTTP smoke against a local `http.server`:
+
+```text
+http_status=200 OK · 26 bytes · 1.7 ms
+http="HTTP/1.0 200 OK"
+```
+
+Outline smoke on the Java project:
+
+```text
+outline_status=2 top-level items outline_items=5
+```
+
+Agents/Tools smoke:
+
+```text
+agents=16 tools=86
+```
+
 The first line of the Java file on disk was the inserted marker after the
 process exited, so the multi-document workbench path exercised:
 
@@ -416,10 +451,11 @@ documents/project/sync/host: 24 passed; 0 failed
 - External-change reload/conflict handling in the Zed Buffer path (the POC only
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
-- OpenIdea Agents, MCP, plugins, remote filesystem, notebook, database, HTTP,
-  debugger and the rest of the workbench UI are not yet integrated into this
-  Zed-hosted application. The Terminal now has a real VT screen and OpenIDEA
-  PTY, but its mouse selection, hyperlinks, IME and resize path are not yet
-  verified or complete.
+- Plugins (full PluginHost loading and UI contributions), debugger UI, notebook,
+  remote filesystem (as opposed to the SSH terminal), MCP management and agent
+  task creation/prompt UI are not yet integrated. Database/HTTP have working
+  execution paths but no source/request editors of their own. The Terminal now
+  has a real VT screen and OpenIDEA PTY, but its mouse selection, hyperlinks,
+  IME and resize path are not yet verified or complete.
 
 This document is a POC report, not a claim of OpenIdea parity.

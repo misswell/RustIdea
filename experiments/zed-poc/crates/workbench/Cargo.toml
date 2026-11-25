@@ -19,8 +19,11 @@ fs = { path = "../../../../third_party/zed/crates/fs" }
 gpui.workspace = true
 gpui_platform.workspace = true
 ide-core.workspace = true
+ide-agent = { path = "../../../../crates/ide-agent" }
+ide-db = { path = "../../../../crates/ide-db" }
 ide-dap = { path = "../../../../crates/ide-dap" }
 ide-host.workspace = true
+ide-http = { path = "../../../../crates/ide-http" }
 ide-language.workspace = true
 ide-lsp.workspace = true
 ide-run = { path = "../../../../crates/ide-run" }

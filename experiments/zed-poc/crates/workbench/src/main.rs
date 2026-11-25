@@ -190,6 +190,12 @@ fn main() {
                 let smoke_run = std::env::var_os("RUSTIDEA_ZED_SMOKE_RUN").is_some();
                 let smoke_terminal =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some();
+                let smoke_outline = std::env::var_os("RUSTIDEA_ZED_SMOKE_OUTLINE").is_some();
+                let smoke_http = std::env::var_os("RUSTIDEA_ZED_SMOKE_HTTP").is_some();
+                let smoke_db = std::env::var_os("RUSTIDEA_ZED_SMOKE_DB").is_some();
+                let smoke_remote = std::env::var_os("RUSTIDEA_ZED_SMOKE_REMOTE").is_some();
+                let smoke_agents = std::env::var_os("RUSTIDEA_ZED_SMOKE_AGENTS").is_some();
+                let smoke_tools = std::env::var_os("RUSTIDEA_ZED_SMOKE_TOOLS").is_some();
                 let smoke_search = std::env::var("RUSTIDEA_ZED_SMOKE_SEARCH").ok();
                 let completion_position = std::env::var("RUSTIDEA_ZED_SMOKE_COMPLETION_POS")
                     .ok()
@@ -213,6 +219,24 @@ fn main() {
                                 if smoke_terminal {
                                     app.smoke_start_terminal(window, cx);
                                 }
+                                if smoke_outline {
+                                    app.smoke_outline(cx);
+                                }
+                                if smoke_http {
+                                    app.smoke_http(cx);
+                                }
+                                if smoke_db {
+                                    app.smoke_db(cx);
+                                }
+                                if smoke_remote {
+                                    app.smoke_remote(cx);
+                                }
+                                if smoke_agents {
+                                    app.smoke_agents(cx);
+                                }
+                                if smoke_tools {
+                                    app.smoke_tools(cx);
+                                }
                                 if let Some(pattern) = &smoke_search {
                                     app.smoke_search(pattern, cx);
                                 }
@@ -234,7 +258,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} agents={} tools={} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -255,6 +279,15 @@ fn main() {
                                                 .join(" | ")
                                         })
                                         .unwrap_or_default(),
+                                    app.outline_status(),
+                                    app.outline_count(),
+                                    app.problem_count(),
+                                    app.http_status(),
+                                    app.http_output().lines().next().unwrap_or_default(),
+                                    app.db_status(),
+                                    app.remote_status(),
+                                    app.agents_count(),
+                                    app.tools_count(),
                                     app.smoke_active_text(cx).lines().next().unwrap_or_default()
                                 );
                                 cx.quit();

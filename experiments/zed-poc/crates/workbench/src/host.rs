@@ -448,6 +448,84 @@ impl NativeHost {
             .flatten()
     }
 
+    pub async fn document_outline(&self, doc: DocId) -> IdeResult<Vec<ide_core::OutlineItem>> {
+        self.run(move |host| async move {
+            ide_host::ops::doc::doc_outline(&host, MAIN_WINDOW, doc).await
+        })
+        .await
+    }
+
+    pub fn settings_json(&self) -> String {
+        serde_json::to_string_pretty(&self.settings())
+            .unwrap_or_else(|error| format!("settings serialization failed: {error}"))
+    }
+
+    pub async fn run_http(
+        &self,
+        text: String,
+        index: u32,
+        file: Option<PathBuf>,
+        root: PathBuf,
+    ) -> IdeResult<ide_http::HttpExchange> {
+        self.runtime
+            .spawn(async move {
+                let cancel = ide_core::CancellationToken::new();
+                ide_http::run(
+                    ide_http::RunInput {
+                        text: &text,
+                        index,
+                        file: file.as_deref(),
+                        root: Some(&root),
+                        env: None,
+                    },
+                    &cancel,
+                )
+                .await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn db_sources(&self) -> IdeResult<Vec<ide_db::DataSource>> {
+        ide_host::ops::db::sources(&self.host, MAIN_WINDOW)
+    }
+
+    pub fn db_connected(&self) -> IdeResult<Vec<String>> {
+        ide_host::ops::db::connected(&self.host, MAIN_WINDOW)
+    }
+
+    pub async fn db_connect(&self, id: String) -> IdeResult<()> {
+        self.run(
+            move |host| async move { ide_host::ops::db::connect(&host, MAIN_WINDOW, &id).await },
+        )
+        .await
+    }
+
+    pub async fn db_execute(
+        &self,
+        id: String,
+        text: String,
+        from: u32,
+        to: u32,
+    ) -> IdeResult<Vec<ide_host::ops::db::StatementOutcome>> {
+        self.run(move |host| async move {
+            let statements =
+                ide_host::ops::db::statements(&host, MAIN_WINDOW, &id, &text, from, to)?;
+            ide_host::ops::db::execute(
+                &host,
+                MAIN_WINDOW,
+                ide_core::RequestId::next(),
+                &id,
+                statements,
+                0,
+                200,
+                None,
+            )
+            .await
+        })
+        .await
+    }
+
     pub fn run_configs(&self) -> IdeResult<Vec<ide_run::RunConfig>> {
         ide_host::ops::run::configs(&self.host, MAIN_WINDOW)
     }
@@ -494,6 +572,55 @@ impl NativeHost {
 
     pub fn kill_terminal(&self, id: TerminalId) -> IdeResult<()> {
         ide_host::ops::term::kill(&self.host, id)
+    }
+
+    pub fn ssh_configs(&self) -> Vec<ide_core::remote_settings::SshConfiguration> {
+        self.host.ssh.configs()
+    }
+
+    pub fn agent_providers(&self) -> IdeResult<Vec<ide_agent::AgentProvider>> {
+        ide_host::ops::agent::providers(&self.host, MAIN_WINDOW)
+    }
+
+    pub async fn tools_list(&self) -> IdeResult<Vec<ide_tools::ToolInfo>> {
+        self.run(
+            move |host| async move { ide_host::ops::tools::tools_list(&host, MAIN_WINDOW).await },
+        )
+        .await
+    }
+
+    pub async fn tools_install(&self, name: String) -> IdeResult<ide_tools::ToolInfo> {
+        self.run(move |host| async move {
+            let channel = ide_host::ops::Channel::new(|_event: ide_tools::InstallEvent| {});
+            ide_host::ops::tools::tools_install(
+                &host,
+                MAIN_WINDOW,
+                name,
+                ide_core::RequestId::next(),
+                channel,
+            )
+            .await
+        })
+        .await
+    }
+
+    pub async fn spawn_ssh_terminal(
+        &self,
+        id: String,
+        cols: u16,
+        rows: u16,
+        output: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> IdeResult<ide_terminal::TerminalInfo> {
+        let host = self.host.clone();
+        self.runtime
+            .spawn(async move {
+                let emit: ide_host::ops::Emit<String> = Arc::new(move |chunk| {
+                    let _ = output.send(chunk);
+                });
+                ide_host::ops::term::spawn_ssh(&host, MAIN_WINDOW, &id, cols, rows, emit).await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
 
     pub async fn start_search(
