@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Focusable, FontStyle, FontWeight, Hsla, KeyDownEvent,
-    MouseButton, Render, ScrollEvent, SharedString, StyledText, TextRun, Window, div, point,
-    prelude::*, px, rgb, size,
+    App, Bounds, ClipboardItem, Context, Edges, Element, ElementId, ElementInputHandler,
+    EntityInputHandler, FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hsla,
+    InspectorElementId, KeyDownEvent, LayoutId, MouseButton, Position, Render, ScrollEvent,
+    SharedString, Style, StyledText, TextRun, UTF16Selection, Window, div, point, prelude::*, px,
+    relative, rgb, size,
 };
 use ide_core::TerminalId;
 use terminal::{
@@ -29,6 +31,7 @@ pub struct TerminalPane {
     title: SharedString,
     pid: Option<u32>,
     exited: bool,
+    marked_range: Option<std::ops::Range<usize>>,
     _subscription: gpui::Subscription,
 }
 
@@ -81,6 +84,7 @@ impl TerminalPane {
             title,
             pid,
             exited: false,
+            marked_range: None,
             _subscription: subscription,
         }
     }
@@ -146,6 +150,9 @@ impl TerminalPane {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
+        if event.prefer_character_input && keystroke.key_char.is_some() {
+            return;
+        }
         if keystroke.modifiers.platform {
             match keystroke.key.as_str() {
                 "c" => {
@@ -341,6 +348,161 @@ impl Focusable for TerminalPane {
     }
 }
 
+impl EntityInputHandler for TerminalPane {
+    fn text_for_range(
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _adjusted_range: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        self.marked_range.clone()
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.marked_range = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked_range = None;
+        if !text.is_empty() {
+            self.send_input(text, cx);
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.marked_range =
+            new_selected_range.or_else(|| (!new_text.is_empty()).then_some(0..new_text.len()));
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: std::ops::Range<usize>,
+        element_bounds: Bounds<gpui::Pixels>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Bounds<gpui::Pixels>> {
+        let content = self.terminal.read(cx).last_content();
+        let line = content.cursor.point.line.max(0) as f32;
+        let column = content.cursor.point.column as f32;
+        Some(Bounds::new(
+            point(
+                element_bounds.left() + px(4.0 + column * CELL_WIDTH),
+                element_bounds.top() + px(28.0 + line * LINE_HEIGHT),
+            ),
+            size(px(2.), px(LINE_HEIGHT)),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<gpui::Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+
+    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        !self.exited
+    }
+}
+
+struct TerminalInputElement {
+    pane: gpui::Entity<TerminalPane>,
+}
+
+impl Element for TerminalInputElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let style = Style {
+            position: Position::Absolute,
+            inset: Edges::all(relative(0.0).into()),
+            size: size(relative(1.0).into(), relative(1.0).into()),
+            ..Default::default()
+        };
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let focus = self.pane.read(cx).focus_handle.clone();
+        window.handle_input(
+            &focus,
+            ElementInputHandler::new(bounds, self.pane.clone()),
+            cx,
+        );
+    }
+}
+
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = self.terminal.update(cx, |terminal, cx| {
@@ -398,6 +560,7 @@ impl Render for TerminalPane {
         let title = self.title.clone();
         let pid = self.pid;
         let focus_handle = self.focus_handle.clone();
+        let pane = cx.entity();
         div()
             .id("terminal-pane")
             .size_full()
@@ -447,5 +610,6 @@ impl Render for TerminalPane {
                             .child(cursor_element),
                     ),
             )
+            .child(TerminalInputElement { pane })
     }
 }

@@ -330,7 +330,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   attributes, a cursor block/bar/underline and scrollback. Key events are
   translated with Zed's own `to_esc_str` mapping and written back to the
   OpenIDEA terminal session; paste honours bracketed-paste mode. It does not
-  use the old text-only terminal stub or xterm.js;
+  use the old text-only terminal stub or xterm.js; an `EntityInputHandler`
+  marked-range path now forwards committed IME text and reports cursor bounds;
 - the sidebar is now a compact multi-panel workbench: Project, Search, Git,
   Outline, Problems, Database, HTTP, Remote, Agents, Plugins, Tools and
   Settings;
@@ -575,7 +576,8 @@ documents/project/sync/host: 24 passed; 0 failed
   still lives in settings. Settings edits booleans and JSON scalars; structured
   list/map editors are missing. Database/HTTP have working execution paths but no
   source/request editors of their own. The Terminal now has a real VT screen
-  and OpenIDEA PTY, but its mouse selection, hyperlinks, IME and resize path
-  are not yet verified or complete.
+  and OpenIDEA PTY, but its mouse selection, hyperlinks, IME composition and
+  resize path are not yet verified or complete (the IME input handler is
+  wired, but locked-screen visual/IME verification is still unavailable).
 
 This document is a POC report, not a claim of OpenIdea parity.
