@@ -207,6 +207,10 @@ pub struct NativeHost {
 }
 
 impl NativeHost {
+    pub fn config_dir(&self) -> PathBuf {
+        self.host.config_dir.clone()
+    }
+
     pub fn start() -> Result<Arc<Self>> {
         let config_dir = ide_host::data_dirs::config_dir(IDENTIFIER)
             .map_err(anyhow::Error::msg)

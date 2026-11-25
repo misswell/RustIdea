@@ -34,6 +34,7 @@ enum SidebarMode {
     Todo,
     Dependencies,
     Coverage,
+    Bookmarks,
     Git,
     Outline,
     Problems,
@@ -69,6 +70,7 @@ enum Command {
     ShowTodo,
     ShowDependencies,
     ShowCoverage,
+    ShowBookmarks,
     ShowGit,
     ShowOutline,
     ShowProblems,
@@ -100,7 +102,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 39] = [
+    const ALL: [Command; 40] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -112,6 +114,7 @@ impl Command {
         Command::ShowTodo,
         Command::ShowDependencies,
         Command::ShowCoverage,
+        Command::ShowBookmarks,
         Command::ShowGit,
         Command::ShowOutline,
         Command::ShowProblems,
@@ -155,6 +158,7 @@ impl Command {
             Command::ShowTodo => "Show TODO",
             Command::ShowDependencies => "Show Dependencies",
             Command::ShowCoverage => "Show Coverage",
+            Command::ShowBookmarks => "Show Bookmarks",
             Command::ShowGit => "Show Version Control",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
@@ -547,6 +551,10 @@ pub struct Workbench {
     coverage_path_input: Entity<TextInput>,
     coverage_sort_lines: bool,
     _coverage_input_subscription: Subscription,
+    bookmarks: Vec<crate::bookmarks::Bookmark>,
+    bookmark_store: crate::bookmarks::BookmarkStore,
+    bookmarks_file: PathBuf,
+    bookmarks_status: gpui::SharedString,
     git_status: Vec<ide_vcs::FileStatus>,
     git_branch: Option<ide_vcs::BranchInfo>,
     git_message_input: Entity<TextInput>,
@@ -1025,6 +1033,9 @@ impl Workbench {
                 }
                 _ => {}
             });
+        let bookmarks_file = host.config_dir().join("bookmarks.json");
+        let bookmark_store = crate::bookmarks::BookmarkStore::load(&bookmarks_file);
+        let bookmarks = bookmark_store.project(&root).to_vec();
         let mut app = Self {
             host,
             language_registry,
@@ -1081,6 +1092,10 @@ impl Workbench {
             coverage_path_input,
             coverage_sort_lines: true,
             _coverage_input_subscription: coverage_input_subscription,
+            bookmarks,
+            bookmark_store,
+            bookmarks_file,
+            bookmarks_status: "F3 toggles a line bookmark".into(),
             git_status: Vec::new(),
             git_branch: None,
             git_message_input,
@@ -3824,6 +3839,72 @@ impl Workbench {
         cx.notify();
     }
 
+    fn toggle_bookmark(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.active else {
+            self.bookmarks_status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let Some(editor) = self.editors.get(&(doc, false)).cloned() else {
+            self.bookmarks_status = "The active file has no editor".into();
+            cx.notify();
+            return;
+        };
+        let row = editor.update(cx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            editor.selections.newest_adjusted(&snapshot).head().row
+        });
+        let Some(path) = self
+            .documents
+            .get(&doc)
+            .map(|document| document.path.clone())
+        else {
+            return;
+        };
+        let multi_buffer = editor.read(cx).buffer().clone();
+        let text = multi_buffer
+            .read(cx)
+            .snapshot(cx)
+            .text_for_range(TextPoint::new(row, 0)..TextPoint::new(row + 1, 0))
+            .collect::<String>()
+            .trim_end()
+            .to_owned();
+        let added = crate::bookmarks::toggle(&mut self.bookmarks, path.clone(), row, text);
+        self.bookmark_store
+            .set_project(&self.root, self.bookmarks.clone());
+        match self.bookmark_store.save(&self.bookmarks_file) {
+            Ok(()) => {
+                self.bookmarks_status = if added {
+                    format!("Bookmarked {}:{}", path.display(), row + 1)
+                } else {
+                    format!("Removed bookmark {}:{}", path.display(), row + 1)
+                }
+                .into();
+            }
+            Err(error) => {
+                self.bookmarks_status = format!("Bookmark save failed: {error}").into();
+            }
+        }
+        if self.sidebar_mode == SidebarMode::Bookmarks {
+            self.bookmarks_status = format!("{} bookmarks", self.bookmarks.len()).into();
+        }
+        cx.notify();
+    }
+
+    fn remove_bookmark(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.bookmarks.len() {
+            return;
+        }
+        self.bookmarks.remove(index);
+        self.bookmark_store
+            .set_project(&self.root, self.bookmarks.clone());
+        self.bookmarks_status = match self.bookmark_store.save(&self.bookmarks_file) {
+            Ok(()) => format!("{} bookmarks", self.bookmarks.len()).into(),
+            Err(error) => format!("Bookmark save failed: {error}").into(),
+        };
+        cx.notify();
+    }
+
     fn filtered_commands(&self) -> Vec<Command> {
         let query = self.command_palette_query.to_lowercase();
         Command::ALL
@@ -3889,6 +3970,7 @@ impl Workbench {
             Command::ShowTodo => self.select_sidebar(SidebarMode::Todo, cx),
             Command::ShowDependencies => self.select_sidebar(SidebarMode::Dependencies, cx),
             Command::ShowCoverage => self.select_sidebar(SidebarMode::Coverage, cx),
+            Command::ShowBookmarks => self.select_sidebar(SidebarMode::Bookmarks, cx),
             Command::ShowGit => self.select_sidebar(SidebarMode::Git, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
@@ -4974,6 +5056,7 @@ impl Workbench {
             SidebarMode::Todo => "TODO",
             SidebarMode::Dependencies => "Dependencies",
             SidebarMode::Coverage => "Coverage",
+            SidebarMode::Bookmarks => "Bookmarks",
             SidebarMode::Git => "Git",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
@@ -5268,6 +5351,26 @@ impl Workbench {
         self.coverage_rows
             .first()
             .map(|row| row.rel_path.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_bookmark(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Bookmarks, cx);
+        self.toggle_bookmark(cx);
+    }
+
+    pub fn bookmark_count(&self) -> usize {
+        self.bookmarks.len()
+    }
+
+    pub fn bookmark_status(&self) -> String {
+        self.bookmarks_status.to_string()
+    }
+
+    pub fn bookmark_first(&self) -> String {
+        self.bookmarks
+            .first()
+            .map(|bookmark| format!("{}:{}", bookmark.path, bookmark.line + 1))
             .unwrap_or_default()
     }
 
@@ -9114,6 +9217,126 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_bookmarks(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("bookmark-list")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.bookmarks.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child("No bookmarks. Put the caret on a line and press F3."),
+            );
+        }
+        let root_prefix = crate::bookmarks::project_key(&self.root);
+        let prefix = format!("{root_prefix}/");
+        for (index, bookmark) in self.bookmarks.iter().take(1_000).enumerate() {
+            let rel_path = bookmark
+                .path
+                .strip_prefix(&prefix)
+                .unwrap_or(&bookmark.path)
+                .to_owned();
+            let path = PathBuf::from(&bookmark.path);
+            let line = bookmark.line;
+            rows = rows.child(
+                div()
+                    .id(("bookmark-row", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.5))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.open_or_goto(path.clone(), line, 0, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(div().truncate().text_color(theme.text).child(
+                                if bookmark.text.trim().is_empty() {
+                                    "(empty line)".to_owned()
+                                } else {
+                                    bookmark.text.clone()
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(9.))
+                                    .text_color(theme.faint)
+                                    .child(format!("{rel_path}:{}", line + 1)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(("bookmark-remove", index))
+                            .px_1()
+                            .rounded_sm()
+                            .text_color(theme.faint)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_bookmark(index, cx);
+                            }))
+                            .child("×"),
+                    ),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("bookmark-add")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.toggle_bookmark(cx);
+                            }))
+                            .child("Toggle at caret"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.bookmarks_status.clone()),
+                    ),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_bottom_panel(
         &mut self,
         _window: &mut Window,
@@ -9814,6 +10037,7 @@ impl Render for Workbench {
         let todo = self.render_todo(cx);
         let dependencies = self.render_dependencies(cx);
         let coverage = self.render_coverage(cx);
+        let bookmarks = self.render_bookmarks(cx);
         let git = self.render_git_panel(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
@@ -9824,6 +10048,7 @@ impl Render for Workbench {
             SidebarMode::Todo => todo,
             SidebarMode::Dependencies => dependencies,
             SidebarMode::Coverage => coverage,
+            SidebarMode::Bookmarks => bookmarks,
             SidebarMode::Git => git,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
@@ -9843,6 +10068,7 @@ impl Render for Workbench {
             ("TODO", SidebarMode::Todo),
             ("DEP", SidebarMode::Dependencies),
             ("COV", SidebarMode::Coverage),
+            ("BMK", SidebarMode::Bookmarks),
             ("GIT", SidebarMode::Git),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
@@ -9922,6 +10148,9 @@ impl Render for Workbench {
             )
             .on_action(cx.listener(|this, _: &crate::FindUsages, _, cx| {
                 this.find_usages_at_cursor(cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::ToggleBookmark, _, cx| {
+                this.toggle_bookmark(cx);
             }))
             .child(
                 div()
