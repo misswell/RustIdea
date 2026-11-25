@@ -31,6 +31,7 @@ use crate::theme::{Theme, ThemeMode};
 enum SidebarMode {
     Project,
     Search,
+    Todo,
     Git,
     Outline,
     Problems,
@@ -63,6 +64,7 @@ enum Command {
     FindUsages,
     ShowProject,
     ShowSearch,
+    ShowTodo,
     ShowGit,
     ShowOutline,
     ShowProblems,
@@ -89,10 +91,11 @@ enum Command {
     RefreshMarket,
     RefreshRemote,
     RefreshDatabase,
+    RefreshTodo,
 }
 
 impl Command {
-    const ALL: [Command; 34] = [
+    const ALL: [Command; 36] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -101,6 +104,7 @@ impl Command {
         Command::FindUsages,
         Command::ShowProject,
         Command::ShowSearch,
+        Command::ShowTodo,
         Command::ShowGit,
         Command::ShowOutline,
         Command::ShowProblems,
@@ -127,6 +131,7 @@ impl Command {
         Command::RefreshMarket,
         Command::RefreshRemote,
         Command::RefreshDatabase,
+        Command::RefreshTodo,
     ];
 
     fn label(self) -> &'static str {
@@ -139,6 +144,7 @@ impl Command {
             Command::FindUsages => "Find usages at cursor",
             Command::ShowProject => "Show Project",
             Command::ShowSearch => "Show Find in Files",
+            Command::ShowTodo => "Show TODO",
             Command::ShowGit => "Show Version Control",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
@@ -165,6 +171,7 @@ impl Command {
             Command::RefreshMarket => "Refresh plugin marketplace",
             Command::RefreshRemote => "Refresh SSH configurations",
             Command::RefreshDatabase => "Refresh data sources",
+            Command::RefreshTodo => "Refresh TODO items",
         }
     }
 
@@ -463,6 +470,11 @@ pub struct Workbench {
     search_results: Vec<ide_search::FileMatches>,
     search_status: gpui::SharedString,
     _search_subscription: Subscription,
+    todo_items: Vec<crate::todo::TodoItem>,
+    todo_status: gpui::SharedString,
+    todo_case_sensitive: bool,
+    todo_comments_only: bool,
+    todo_generation: u64,
     git_status: Vec<ide_vcs::FileStatus>,
     git_branch: Option<ide_vcs::BranchInfo>,
     git_message_input: Entity<TextInput>,
@@ -920,6 +932,11 @@ impl Workbench {
             search_results: Vec::new(),
             search_status: "Type a pattern and press Enter".into(),
             _search_subscription: search_subscription,
+            todo_items: Vec::new(),
+            todo_status: "Open TODO to scan the project".into(),
+            todo_case_sensitive: true,
+            todo_comments_only: true,
+            todo_generation: 0,
             git_status: Vec::new(),
             git_branch: None,
             git_message_input,
@@ -1179,6 +1196,7 @@ impl Workbench {
             SidebarMode::Agents => self.refresh_agents(cx),
             SidebarMode::Tools => self.refresh_tools(cx),
             SidebarMode::Plugins => self.refresh_plugins(cx),
+            SidebarMode::Todo => self.refresh_todo(cx),
             _ => {}
         }
         cx.notify();
@@ -3626,6 +3644,7 @@ impl Workbench {
             Command::FindUsages => self.find_usages_at_cursor(cx),
             Command::ShowProject => self.select_sidebar(SidebarMode::Project, cx),
             Command::ShowSearch => self.select_sidebar(SidebarMode::Search, cx),
+            Command::ShowTodo => self.select_sidebar(SidebarMode::Todo, cx),
             Command::ShowGit => self.select_sidebar(SidebarMode::Git, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
@@ -3673,6 +3692,7 @@ impl Workbench {
             Command::RefreshMarket => self.refresh_market(cx),
             Command::RefreshRemote => self.refresh_remote(cx),
             Command::RefreshDatabase => self.refresh_db(cx),
+            Command::RefreshTodo => self.refresh_todo(cx),
         }
         cx.notify();
     }
@@ -4073,6 +4093,82 @@ impl Workbench {
                                     summary.matches,
                                     if summary.limit_hit {
                                         " (limit reached)"
+                                    } else {
+                                        ""
+                                    }
+                                )
+                                .into();
+                            }
+                        }
+                        cx.notify();
+                        app.window_handle
+                    })
+                    .ok()
+                    .flatten();
+                refresh_window(handle, cx);
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_todo(&mut self, cx: &mut Context<Self>) {
+        self.todo_generation = self.todo_generation.wrapping_add(1);
+        let generation = self.todo_generation;
+        self.todo_items.clear();
+        self.todo_status = "Scanning project TODO comments…".into();
+        let query =
+            crate::todo::build_todo_query(self.todo_case_sensitive, self.todo_comments_only);
+        let host = self.host.clone();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let emit: ide_host::ops::Emit<ide_host::ops::search::SearchEvent> =
+            Arc::new(move |event| {
+                let _ = event_tx.send(event);
+            });
+        cx.spawn(async move |this, cx| {
+            let result = host.start_search(query, emit).await;
+            if let Err(error) = &result {
+                let handle = this
+                    .update(cx, |app, cx| {
+                        if app.todo_generation == generation {
+                            app.todo_status = format!("TODO scan failed: {}", error.message).into();
+                            cx.notify();
+                        }
+                        app.window_handle
+                    })
+                    .ok()
+                    .flatten();
+                refresh_window(handle, cx);
+                return;
+            }
+            while let Some(event) = event_rx.recv().await {
+                let handle = this
+                    .update(cx, |app, cx| {
+                        if app.todo_generation != generation {
+                            return app.window_handle;
+                        }
+                        match event {
+                            ide_host::ops::search::SearchEvent::File { file } => {
+                                app.todo_items
+                                    .extend(crate::todo::todo_items_from_file(&file));
+                                app.todo_status = format!(
+                                    "{} TODO items in {} files",
+                                    app.todo_items.len(),
+                                    app.todo_items
+                                        .iter()
+                                        .map(|item| &item.path)
+                                        .collect::<BTreeSet<_>>()
+                                        .len()
+                                )
+                                .into();
+                            }
+                            ide_host::ops::search::SearchEvent::Done { summary } => {
+                                app.todo_status = format!(
+                                    "{} TODO items · {} files scanned{}",
+                                    app.todo_items.len(),
+                                    summary.files,
+                                    if summary.limit_hit {
+                                        " · limit reached"
                                     } else {
                                         ""
                                     }
@@ -4541,6 +4637,7 @@ impl Workbench {
         match self.sidebar_mode {
             SidebarMode::Project => "Project",
             SidebarMode::Search => "Search",
+            SidebarMode::Todo => "TODO",
             SidebarMode::Git => "Git",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
@@ -4748,6 +4845,25 @@ impl Workbench {
 
     pub fn smoke_search_files(&self) -> usize {
         self.search_results.len()
+    }
+
+    pub fn smoke_todo(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Todo, cx);
+    }
+
+    pub fn todo_count(&self) -> usize {
+        self.todo_items.len()
+    }
+
+    pub fn todo_status(&self) -> String {
+        self.todo_status.to_string()
+    }
+
+    pub fn todo_first(&self) -> String {
+        self.todo_items
+            .first()
+            .map(|item| format!("{}:{}", item.rel_path, item.line + 1))
+            .unwrap_or_default()
     }
 
     pub fn smoke_git_files(&self) -> usize {
@@ -7930,6 +8046,174 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_todo(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("todo-items")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.todo_items.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(if self.todo_status.starts_with("Scanning") {
+                        "Scanning…"
+                    } else {
+                        "No TODO comments found"
+                    }),
+            );
+        }
+        for (index, item) in self.todo_items.iter().take(500).enumerate() {
+            let path = item.path.clone();
+            let line = item.line;
+            let column = item.column;
+            let color = if item.keyword == "FIXME" {
+                theme.error
+            } else if item.keyword == "TODO" {
+                theme.accent
+            } else {
+                theme.warning
+            };
+            rows = rows.child(
+                div()
+                    .id(("todo-item", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.5))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.open_or_goto(path.clone(), line, column, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(38.))
+                            .text_color(color)
+                            .child(item.keyword.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(theme.text)
+                                    .child(item.text.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(9.))
+                                    .text_color(theme.faint)
+                                    .child(format!("{}:{}", item.rel_path, item.line + 1)),
+                            ),
+                    ),
+            );
+        }
+        let case_sensitive = self.todo_case_sensitive;
+        let comments_only = self.todo_comments_only;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("todo-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_todo(cx);
+                            }))
+                            .child("Scan"),
+                    )
+                    .child(
+                        div()
+                            .id("todo-case")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if case_sensitive {
+                                theme.text
+                            } else {
+                                theme.faint
+                            })
+                            .bg(if case_sensitive {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.todo_case_sensitive = !this.todo_case_sensitive;
+                                this.refresh_todo(cx);
+                            }))
+                            .child("Aa"),
+                    )
+                    .child(
+                        div()
+                            .id("todo-comments")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if comments_only {
+                                theme.text
+                            } else {
+                                theme.faint
+                            })
+                            .bg(if comments_only {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.todo_comments_only = !this.todo_comments_only;
+                                this.refresh_todo(cx);
+                            }))
+                            .child("Comments"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.todo_status.clone()),
+                    ),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_bottom_panel(
         &mut self,
         _window: &mut Window,
@@ -8627,6 +8911,7 @@ impl Render for Workbench {
             .and_then(|doc| self.editors.get(&(doc, true)).cloned());
         let project = self.render_project(cx).into_any_element();
         let search = self.render_search_panel(cx);
+        let todo = self.render_todo(cx);
         let git = self.render_git_panel(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
@@ -8634,6 +8919,7 @@ impl Render for Workbench {
         let sidebar_body = match self.sidebar_mode {
             SidebarMode::Project => project,
             SidebarMode::Search => search,
+            SidebarMode::Todo => todo,
             SidebarMode::Git => git,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
@@ -8650,6 +8936,7 @@ impl Render for Workbench {
         let sidebar_tabs = [
             ("PRJ", SidebarMode::Project),
             ("SRC", SidebarMode::Search),
+            ("TODO", SidebarMode::Todo),
             ("GIT", SidebarMode::Git),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),

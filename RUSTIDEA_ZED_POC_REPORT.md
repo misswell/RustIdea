@@ -338,9 +338,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   OpenIDEA terminal session; paste honours bracketed-paste mode. It does not
   use the old text-only terminal stub or xterm.js; an `EntityInputHandler`
   marked-range path now forwards committed IME text and reports cursor bounds;
-- the sidebar is now a compact multi-panel workbench: Project, Search, Git,
-  Outline, Problems, Database, HTTP, Remote, Agents, Plugins, Tools and
-  Settings;
+- the sidebar is now a compact multi-panel workbench: Project, Search, TODO,
+  Git, Outline, Problems, Database, HTTP, Remote, Notebook, MCP, Agents,
+  Plugins, Tools and Settings;
 - Outline calls OpenIDEA's LSP/tree-sitter `doc_outline` and navigates
   selection; Problems aggregates real backend diagnostics and navigates to
   file/line;
@@ -423,10 +423,11 @@ Panel coverage at this commit:
 | Project tree | working | `ops::fs::read_dir` |
 | Quick Open (Cmd-P) | working | `ops::nav::find_files` |
 | Zed default macOS keymap | loaded (603 bindings) | `settings::KeymapFile` |
-| Command Palette (Cmd-Shift-P) | working (34 commands) | local dispatch |
+| Command Palette (Cmd-Shift-P) | working (36 commands) | local dispatch |
 | Go to Symbol (Cmd-Shift-O) | working | `ops::nav::find_symbols` |
 | Find Usages (Alt-F7) | working | `ops::lsp::lsp_references` |
 | Find in Files | working | `ops::search` |
+| TODO | working (comment scan/navigation/filters) | `ops::search` regex + comment context |
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
@@ -594,6 +595,14 @@ remove it):
 WORKBENCH_MCP_TRANSPORT name=smoke-http transport=http url=Some("https://mcp.example.test/mcp") command=None
 WORKBENCH_MCP_TRANSPORT name=smoke-sse transport=sse url=Some("https://mcp.example.test/mcp") command=None
 WORKBENCH_MCP_TRANSPORT remaining=0
+```
+
+TODO smoke on a Java project containing two comment TODOs, one TODO inside a
+string and one outside a comment:
+
+```text
+todo=2 todo_status=2 TODO items · 1 files scanned
+todo_first="src/main/java/com/example/App.java:4"
 ```
 
 Build smoke on the Maven project:

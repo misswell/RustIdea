@@ -14,6 +14,7 @@ mod sync;
 mod terminal_pane;
 mod text_input;
 mod theme;
+mod todo;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -301,6 +302,7 @@ fn main() {
                 let smoke_notebook_add =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK_ADD").is_some();
                 let smoke_search = std::env::var("RUSTIDEA_ZED_SMOKE_SEARCH").ok();
+                let smoke_todo = std::env::var_os("RUSTIDEA_ZED_SMOKE_TODO").is_some();
                 let completion_position = std::env::var("RUSTIDEA_ZED_SMOKE_COMPLETION_POS")
                     .ok()
                     .and_then(|position| {
@@ -396,6 +398,9 @@ fn main() {
                                 if let Some(pattern) = &smoke_search {
                                     app.smoke_search(pattern, cx);
                                 }
+                                if smoke_todo {
+                                    app.smoke_todo(cx);
+                                }
                                 if let Some((line, column)) = completion_position {
                                     app.smoke_request_completion(line, column, cx);
                                 }
@@ -427,7 +432,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -435,6 +440,9 @@ fn main() {
                                     app.smoke_run_output().lines().last().unwrap_or_default(),
                                     app.smoke_search_status(),
                                     app.smoke_search_files(),
+                                    app.todo_count(),
+                                    app.todo_status(),
+                                    app.todo_first(),
                                     app.smoke_git_branch(),
                                     app.smoke_git_files(),
                                     app.terminal_status(),
