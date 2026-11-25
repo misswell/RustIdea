@@ -225,6 +225,8 @@ fn main() {
                 let smoke_settings_string =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_SETTINGS_STRING").is_some();
                 let smoke_debug = std::env::var_os("RUSTIDEA_ZED_SMOKE_DEBUG").is_some();
+                let smoke_debug_attach =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_DEBUG_ATTACH").is_some();
                 let smoke_notebook =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK").is_some();
                 let smoke_notebook_edit =
@@ -305,6 +307,9 @@ fn main() {
                                 if smoke_debug {
                                     app.smoke_debug(cx);
                                 }
+                                if smoke_debug_attach {
+                                    app.smoke_debug(cx);
+                                }
                                 if smoke_notebook {
                                     app.smoke_notebook(cx);
                                 }
@@ -332,6 +337,9 @@ fn main() {
                                 if smoke_notebook_add {
                                     app.smoke_notebook_add_markdown(cx);
                                 }
+                                if smoke_debug_attach {
+                                    app.smoke_debug_attach(cx);
+                                }
                             })
                             .ok();
                             cx.background_executor()
@@ -339,7 +347,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} build_status={} build={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} git_branch={} git_files={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -388,6 +396,7 @@ fn main() {
                                     app.settings_whitespace(),
                                     app.settings_font_family(),
                                     app.debug_attachable_count(),
+                                    app.debug_status_text(),
                                     app.build_status(),
                                     app.build_output().lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default(),
                                     app.smoke_active_text(cx).lines().next().unwrap_or_default()

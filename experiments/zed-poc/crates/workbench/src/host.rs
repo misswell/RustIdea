@@ -826,6 +826,27 @@ impl NativeHost {
         .await
     }
 
+    pub async fn debug_start(
+        &self,
+        config: ide_dap::LaunchConfig,
+    ) -> IdeResult<ide_core::DebugSessionId> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_start(&host, MAIN_WINDOW, config).await
+        })
+        .await
+    }
+
+    pub fn debug_sessions(&self) -> IdeResult<Vec<ide_dap::SessionInfo>> {
+        ide_host::ops::debug::debug_sessions(&self.host, MAIN_WINDOW)
+    }
+
+    pub async fn debug_stop(&self, session: ide_core::DebugSessionId) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_stop(&host, MAIN_WINDOW, session).await
+        })
+        .await
+    }
+
     pub async fn spawn_ssh_terminal(
         &self,
         id: String,

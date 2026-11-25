@@ -383,8 +383,11 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   capabilities, signed), renders each optional capability as a checkbox, and
   installs with the selected optional grants through `install_from_dir`;
 - Debug scans `ops::debug::debug_attachable_processes` and lists debug-capable
-  run configurations. The panel is a process/browse surface; starting a session
-  and the variables/stack/frames UI are still pending;
+  run configurations, starts attach sessions for Node/Python/.NET/Go/native
+  processes through `ops::debug::debug_start`, lists/stop sessions and streams
+  `DebugEvent::Output` into a console; Java/Unity attach configs, breakpoints
+  and variables/stack/frames are still pending. No attachable process was
+  visible to the scanner in the smoke environment;
 - Notebook opens the active `.ipynb` through `ops::notebook::open`, renders
   code/markdown cells and stored outputs, and runs all code cells through
   `ops::notebook::execute`; each cell opens a Zed-Editor modal for multi-line
@@ -420,7 +423,7 @@ Panel coverage at this commit:
 | Tools | list/install | `ops::tools` |
 | Plugins | installed list + marketplace/preview/install + optional-capability consent | `PluginHost` |
 | Settings | filter + boolean toggles + JSON value editor | `ops::project::settings` / `set_settings` |
-| Debug | attachable-process browse only | `ops::debug::debug_attachable_processes` |
+| Debug | attachable browse + attach/session list/console (runtime unverified) | `ops::debug` |
 | Terminal | working VT screen | Zed `terminal` + `ops::term` |
 | Run | working | `ops::run` |
 | Build | working | `ops::build` |
@@ -588,9 +591,10 @@ documents/project/sync/host: 24 passed; 0 failed
 - External-change reload/conflict handling in the Zed Buffer path (the POC only
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
-- Plugin live UI contributions, full debugger
-  session UI, notebook rich-output editing, live remote-write verification
-  (UI path exists), structured question/form widgets and live subagent/form verification
+- Plugin live UI contributions, full debugger session UI (variables/stack/
+  breakpoints) and Java/Unity attach, notebook rich-output editing, live
+  remote-write verification (UI path exists), structured question/form widgets
+  and live subagent/form verification
   are not yet integrated. MCP add/update/remove is wired for stdio servers; HTTP/SSE editing
   still lives in settings. Settings edits booleans and JSON scalars; structured
   list/map editors are missing. Database/HTTP have working execution paths but no

@@ -517,6 +517,9 @@ pub struct Workbench {
     plugin_install_busy: bool,
     debug_attachables: Vec<ide_dap::attach::AttachableProcess>,
     debug_selected: usize,
+    debug_sessions: Vec<ide_dap::SessionInfo>,
+    debug_session_selected: usize,
+    debug_console: String,
     debug_status: gpui::SharedString,
 }
 
@@ -934,6 +937,9 @@ impl Workbench {
             plugin_install_busy: false,
             debug_attachables: Vec::new(),
             debug_selected: 0,
+            debug_sessions: Vec::new(),
+            debug_session_selected: 0,
+            debug_console: String::new(),
             debug_status: "Select DEBUG to scan attachable processes".into(),
         };
         if let Some(document) = document {
@@ -2673,8 +2679,9 @@ impl Workbench {
                     match result {
                         Ok(processes) => {
                             app.debug_status = format!(
-                                "{} attachable processes · {} debuggable run configs",
+                                "{} attachable · {} sessions · {} debuggable run configs",
                                 processes.len(),
+                                app.debug_sessions.len(),
                                 app.run_configs
                                     .iter()
                                     .filter(|config| config.debug_adapter.is_some())
@@ -2690,6 +2697,124 @@ impl Workbench {
                             app.debug_attachables.clear();
                             app.debug_status =
                                 format!("Debug scan failed: {}", error.message).into();
+                        }
+                    }
+                    app.debug_sessions = app.host.debug_sessions().unwrap_or_default();
+                    app.debug_session_selected = app
+                        .debug_session_selected
+                        .min(app.debug_sessions.len().saturating_sub(1));
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn attach_debug_process(&mut self, cx: &mut Context<Self>) {
+        use ide_dap::attach::AttachKind;
+        let Some(process) = self.debug_attachables.get(self.debug_selected).cloned() else {
+            self.debug_status = "No attachable process selected".into();
+            cx.notify();
+            return;
+        };
+        let extra = match process.kind {
+            AttachKind::Node => serde_json::json!({
+                "type": "pwa-node",
+                "address": process.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
+                "port": process.port,
+                "processId": if process.port.is_none() { Some(process.pid.to_string()) } else { None },
+                "continueOnAttach": true,
+            }),
+            AttachKind::Python => {
+                if let Some(port) = process.port {
+                    serde_json::json!({"debugServer": port, "justMyCode": true})
+                } else {
+                    serde_json::json!({"processId": process.pid, "justMyCode": true})
+                }
+            }
+            AttachKind::Dotnet => {
+                serde_json::json!({"processId": process.pid, "justMyCode": true})
+            }
+            AttachKind::Go => {
+                serde_json::json!({"mode": "local", "processId": process.pid})
+            }
+            AttachKind::Native => serde_json::json!({"pid": process.pid}),
+            AttachKind::Java | AttachKind::Unity => {
+                self.debug_status = format!(
+                    "Attach config for {:?} is not implemented yet",
+                    process.kind
+                )
+                .into();
+                cx.notify();
+                return;
+            }
+        };
+        let config = ide_dap::LaunchConfig {
+            name: format!("{} ({})", process.name, process.pid),
+            adapter: process.adapter.clone(),
+            request: "attach".into(),
+            program: None,
+            args: Vec::new(),
+            cwd: Some(ide_core::IpcPath(self.root.clone())),
+            env: Default::default(),
+            extra_json: Some(extra.to_string()),
+        };
+        let host = self.host.clone();
+        self.debug_status = format!("Starting debug adapter for {}…", process.name).into();
+        cx.spawn(async move |this, cx| {
+            let result = host.debug_start(config).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(session) => {
+                            app.debug_status = format!("Session {session} started").into();
+                            app.debug_sessions = app.host.debug_sessions().unwrap_or_default();
+                        }
+                        Err(error) => {
+                            app.debug_status =
+                                format!("Debug start failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn stop_debug_session(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self
+            .debug_sessions
+            .get(self.debug_session_selected)
+            .cloned()
+        else {
+            self.debug_status = "No debug session selected".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let name = session.name.clone();
+        self.debug_status = format!("Stopping {name}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.debug_stop(session.id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(()) => {
+                            app.debug_status = format!("Stopped {name}").into();
+                            app.debug_sessions = app.host.debug_sessions().unwrap_or_default();
+                        }
+                        Err(error) => {
+                            app.debug_status =
+                                format!("Debug stop failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -4027,6 +4152,15 @@ impl Workbench {
         self.refresh_debug(cx);
     }
 
+    pub fn smoke_debug_attach(&mut self, cx: &mut Context<Self>) {
+        self.debug_selected = 0;
+        self.attach_debug_process(cx);
+    }
+
+    pub fn debug_status_text(&self) -> &gpui::SharedString {
+        &self.debug_status
+    }
+
     pub fn debug_attachable_count(&self) -> usize {
         self.debug_attachables.len()
     }
@@ -4220,6 +4354,38 @@ impl Workbench {
                     };
                 }
             }
+            IdeEvent::Debug { event, .. } => match event {
+                ide_core::event::DebugEvent::Started { name, adapter, .. } => {
+                    self.debug_console
+                        .push_str(&format!("== {name} ({adapter}) ==\n"));
+                    self.debug_status = format!("{name} started").into();
+                    self.debug_sessions = self.host.debug_sessions().unwrap_or_default();
+                }
+                ide_core::event::DebugEvent::Output { output, category } => {
+                    if !output.is_empty() {
+                        self.debug_console
+                            .push_str(&format!("[{category}] {output}\n"));
+                        if self.debug_console.len() > 2_000_000 {
+                            let split = self.debug_console.len().saturating_sub(1_800_000);
+                            self.debug_console.drain(..split);
+                        }
+                    }
+                }
+                ide_core::event::DebugEvent::Stopped { reason, .. } => {
+                    self.debug_status = format!("Stopped: {reason}").into();
+                }
+                ide_core::event::DebugEvent::Continued { .. } => {
+                    self.debug_status = "Running".into();
+                }
+                ide_core::event::DebugEvent::Terminated => {
+                    self.debug_status = "Terminated".into();
+                    self.debug_sessions = self.host.debug_sessions().unwrap_or_default();
+                }
+                ide_core::event::DebugEvent::Exited { code } => {
+                    self.debug_status = format!("Exited with {code}").into();
+                }
+                _ => {}
+            },
             IdeEvent::FsChanged {
                 modified, created, ..
             } => {
@@ -7206,8 +7372,9 @@ impl Workbench {
             .into_any_element();
         let mut debug_rows = div()
             .id("debug-attachables")
-            .size_full()
-            .overflow_scroll()
+            .flex_none()
+            .max_h(px(120.))
+            .overflow_y_scroll()
             .p_2()
             .flex()
             .flex_col();
@@ -7240,19 +7407,69 @@ impl Workbench {
                     .child(label),
             );
         }
-        let debug_body = if self.debug_attachables.is_empty() {
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(10.5))
-                .text_color(theme.faint)
-                .child(self.debug_status.clone())
-                .into_any_element()
-        } else {
-            debug_rows.into_any_element()
-        };
+        let mut session_rows = div()
+            .id("debug-sessions")
+            .flex_none()
+            .max_h(px(80.))
+            .overflow_y_scroll()
+            .px_2()
+            .flex()
+            .flex_col();
+        for (index, session) in self.debug_sessions.iter().take(80).enumerate() {
+            let selected = index == self.debug_session_selected;
+            session_rows = session_rows.child(
+                div()
+                    .id(("debug-session", index))
+                    .h(px(20.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .text_size(px(10.))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.debug_session_selected = index;
+                        cx.notify();
+                    }))
+                    .child(format!("{} · {}", session.name, session.adapter)),
+            );
+        }
+        let mut debug_lines: Vec<String> = self.debug_console.lines().map(str::to_owned).collect();
+        if debug_lines.len() > 300 {
+            debug_lines.drain(..debug_lines.len() - 300);
+        }
+        let debug_console = div()
+            .id("debug-console")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_scroll()
+            .p_2()
+            .font_family("Menlo")
+            .text_size(px(9.5))
+            .text_color(theme.text)
+            .flex()
+            .flex_col()
+            .when(debug_lines.is_empty(), |view| {
+                view.child(
+                    div()
+                        .text_color(theme.faint)
+                        .child(self.debug_status.clone()),
+                )
+            })
+            .children(debug_lines.into_iter().map(|line| div().child(line)));
+        let debug_body = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(debug_rows)
+            .child(session_rows)
+            .child(debug_console)
+            .into_any_element();
         let body = match self.bottom_mode {
             BottomMode::Run => run_body.into_any_element(),
             BottomMode::Terminal => terminal_body,
@@ -7463,6 +7680,35 @@ impl Workbench {
                                     this.refresh_debug(cx);
                                 }))
                                 .child("Refresh"),
+                        )
+                        .child(
+                            div()
+                                .id("debug-attach")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.text)
+                                .bg(theme.accent_muted)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.attach_debug_process(cx);
+                                }))
+                                .child("Attach"),
+                        )
+                        .child(
+                            div()
+                                .id("debug-stop")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.error)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.stop_debug_session(cx);
+                                }))
+                                .child("Stop"),
                         )
                     })
                     .child(
