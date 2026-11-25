@@ -29,8 +29,9 @@ The POC binary is `rustidea-zed-poc`. It builds and runs with:
   completion menu.
 - `OpenIdeaSemanticsProvider`, installed with
   `Editor::set_semantics_provider`, which maps `ide_host::ops::lsp::lsp_hover`
-  results into Zed's hover blocks. Definition, highlights, rename, inlay hints
-  and semantic tokens are explicit empty stubs in this POC.
+  results into Zed's hover blocks and same-file `lsp_goto` results into Zed
+  `LocationLink`s. Cross-file definitions, highlights, rename, inlay hints and
+  semantic tokens are explicit empty stubs in this POC.
 - An OpenIdea event pump that converts `IdeEvent::Diagnostics` into a Zed
   `DiagnosticSet` and calls `Buffer::update_diagnostics`.
 
@@ -131,11 +132,22 @@ Output:
 
 ```text
 POC_LSP_HOVER "\n```typescript\nconst text: \"hello\"\n```\n"
+... 
 POC_LSP_OK count=48
 ```
 
 The hover is returned by OpenIdea LSP and converted by the Zed semantics
 provider; the actual mouse-hover popover still needs an unlocked GUI session.
+
+The same run reports a same-file definition:
+
+```text
+POC_LSP_DEFINITIONS count=1
+POC_LSP_DEFINITION /private/tmp/zed-poc-lsp-ts/test.ts 1:6
+```
+
+Cross-file definitions are currently dropped because the POC only owns one
+Zed buffer.
 
 Diagnostics bridge test with an intentional TypeScript type error:
 
@@ -154,7 +166,8 @@ source-to-id map.
 - License confirmation and the repository license change to
   GPL-3.0-or-later. No GPL release is produced from this branch.
 - Definition/highlights/rename provider wiring and the diagnostics bridge.
-  Hover and completion are wired in the POC.
+  Cross-file definitions and rename are still stubs; hover, same-file
+  definitions and completion are wired.
 - Completion documentation, `additionalTextEdits`, commit characters and
   completion resolve are not mapped yet.
 - Multi-source diagnostic merging (the POC uses one synthetic server id).

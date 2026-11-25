@@ -134,12 +134,50 @@ impl SemanticsProvider for OpenIdeaSemanticsProvider {
 
     fn definitions(
         &self,
-        _buffer: &Entity<Buffer>,
-        _position: Anchor,
-        _kind: GotoDefinitionKind,
-        _cx: &mut App,
+        buffer: &Entity<Buffer>,
+        position: Anchor,
+        kind: GotoDefinitionKind,
+        cx: &mut App,
     ) -> Option<Task<anyhow::Result<Option<Vec<LocationLink>>>>> {
-        None
+        let (line, column) = self.position(buffer, position, cx);
+        let snapshot = buffer.read(cx).snapshot();
+        let buffer = buffer.clone();
+        let backend = self.backend.clone();
+        let path = backend.path.clone();
+        let kind = match kind {
+            GotoDefinitionKind::Symbol => ide_lsp::types::GotoKind::Definition,
+            GotoDefinitionKind::Declaration => ide_lsp::types::GotoKind::Declaration,
+            GotoDefinitionKind::Type => ide_lsp::types::GotoKind::TypeDefinition,
+            GotoDefinitionKind::Implementation => ide_lsp::types::GotoKind::Implementation,
+        };
+        Some(cx.spawn(async move |_cx| {
+            let locations = backend
+                .definition(line, column, kind)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            let links = locations
+                .into_iter()
+                .filter(|location| location.path.0 == path)
+                .map(|location| {
+                    let start = snapshot.anchor_before(text::PointUtf16::new(
+                        location.range.start.line,
+                        location.range.start.col,
+                    ));
+                    let end = snapshot.anchor_before(text::PointUtf16::new(
+                        location.range.end.line,
+                        location.range.end.col,
+                    ));
+                    LocationLink {
+                        origin: None,
+                        target: language::Location {
+                            buffer: buffer.clone(),
+                            range: start..end,
+                        },
+                    }
+                })
+                .collect::<Vec<_>>();
+            Ok(Some(links))
+        }))
     }
 
     fn range_for_rename(

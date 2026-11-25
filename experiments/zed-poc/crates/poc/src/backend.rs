@@ -198,6 +198,38 @@ impl OpenIdeaBridge {
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
     }
 
+    pub async fn definition(
+        &self,
+        line: u32,
+        column: u32,
+        kind: ide_lsp::types::GotoKind,
+    ) -> IdeResult<Vec<ide_core::Location>> {
+        let host = self.host.clone();
+        let doc = self.doc;
+        self.runtime
+            .spawn(async move {
+                ide_host::ops::lsp::lsp_goto(
+                    &host,
+                    WINDOW,
+                    doc,
+                    ide_core::Pos::new(line, column),
+                    kind,
+                )
+                .await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn definition_blocking(
+        &self,
+        line: u32,
+        column: u32,
+        kind: ide_lsp::types::GotoKind,
+    ) -> IdeResult<Vec<ide_core::Location>> {
+        self.runtime.block_on(self.definition(line, column, kind))
+    }
+
     pub fn reopen_blocking(&mut self) -> IdeResult<DocumentInfo> {
         let host = self.host.clone();
         let path = self.path.clone();

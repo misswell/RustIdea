@@ -337,6 +337,24 @@ fn main() {
             Ok(None) => eprintln!("POC_LSP_HOVER none"),
             Err(error) => eprintln!("POC_LSP_HOVER_ERROR {}", error.message),
         }
+        match backend.definition_blocking(
+            line,
+            column.saturating_sub(5),
+            ide_lsp::types::GotoKind::Definition,
+        ) {
+            Ok(locations) => {
+                eprintln!("POC_LSP_DEFINITIONS count={}", locations.len());
+                for location in locations.iter().take(4) {
+                    eprintln!(
+                        "POC_LSP_DEFINITION {} {}:{}",
+                        location.path.0.display(),
+                        location.range.start.line,
+                        location.range.start.col
+                    );
+                }
+            }
+            Err(error) => eprintln!("POC_LSP_DEFINITION_ERROR {}", error.message),
+        }
         for _ in 0..30 {
             match backend.completion_blocking(line, column, Some(".".into())) {
                 Ok(list) if !list.items.is_empty() => {
