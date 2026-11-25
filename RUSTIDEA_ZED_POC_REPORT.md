@@ -80,8 +80,14 @@ Binary:
 `/Users/guofeng/Code/solo/RustIdea/experiments/zed-poc/target/debug/rustidea-zed-poc`
 
 The native window was started repeatedly and the process stayed alive. The
-macOS console is currently screen-locked, so no screenshot or keyboard/IME
-interaction is claimed.
+macOS console is now unlocked, but the agent process still creates its windows
+in a non-visible Space/session: `CGWindowListCopyWindowInfo` reports the POC
+windows with `onscreen=false`, and accessibility sees one window while screen
+capture of the user's visible desktop does not contain it. A minimal GPUI
+`rustidea-zed-hello` diagnostic binary shows the same placement. Therefore no
+real keyboard, Chinese IME, clipboard or visual hover/menu acceptance is
+claimed yet; this is an environment/window-placement blocker, not a substitute
+for passing tests.
 
 An automated end-to-end data test used a copy of the repository README:
 
@@ -230,7 +236,8 @@ outside the project root are not watched by this POC.
 - Replacing the existing RustIdea `Editor`/`DocumentBuffer` workbench entry with
   the Zed entity across tabs and splits.
 - Real window keyboard, Chinese IME, clipboard and visual verification on an
-  unlocked macOS session.
+  accessible/onscreen macOS Space. The current agent session creates windows
+  offscreen even with an unlocked console.
 - External-change reload/conflict handling in the Zed Buffer path (the POC only
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.

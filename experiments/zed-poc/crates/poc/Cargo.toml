@@ -8,6 +8,10 @@ license.workspace = true
 name = "rustidea-zed-poc"
 path = "src/main.rs"
 
+[[bin]]
+name = "rustidea-zed-hello"
+path = "src/hello.rs"
+
 [dependencies]
 anyhow.workspace = true
 assets.workspace = true
