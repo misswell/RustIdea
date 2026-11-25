@@ -219,6 +219,13 @@ pub struct StructuralApplySummary {
     pub failed: u32,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PullRequestDiff {
+    pub base: String,
+    pub head: String,
+    pub patch: String,
+}
+
 impl NativeHost {
     pub fn config_dir(&self) -> PathBuf {
         self.host.config_dir.clone()
@@ -1347,6 +1354,52 @@ impl NativeHost {
         .await
     }
 
+    pub async fn github_pr_diff(
+        &self,
+        root: PathBuf,
+        number: u32,
+        details: ide_github::PullRequestDetails,
+    ) -> IdeResult<PullRequestDiff> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                let repo_name = match ide_github::availability(&root) {
+                    ide_github::GhAvailability::Ready { repo, .. } => repo.name_with_owner,
+                    _ => github_repo_from_url(&details.summary.url),
+                };
+                let cancel = ide_core::CancellationToken::new();
+                let revisions = ide_github::prepare_diff(
+                    &root,
+                    number,
+                    &details.head_oid,
+                    &details.base_oid,
+                    &details.summary.base_ref,
+                    &repo_name,
+                    &cancel,
+                    &|_| {},
+                )?;
+                let repo = ide_vcs::Repo::discover(&revisions.root.0)?
+                    .ok_or_else(|| ide_core::IdeError::invalid("not a git repository"))?;
+                repo.set_execution_allowed(true);
+                let patch = repo.revision_patch(
+                    &revisions.base,
+                    &revisions.head,
+                    &[],
+                    8 * 1024 * 1024,
+                    &cancel,
+                )?;
+                Ok(PullRequestDiff {
+                    base: revisions.base,
+                    head: revisions.head,
+                    patch,
+                })
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
     pub async fn github_add_comment(
         &self,
         root: PathBuf,
@@ -1593,6 +1646,20 @@ impl Drop for NativeHost {
         self.host.close_project_detached(MAIN_WINDOW);
         self.host.stop_processes_on_exit();
     }
+}
+
+fn github_repo_from_url(url: &str) -> String {
+    let rest = url
+        .split_once("github.com/")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url);
+    let mut segments = rest.split('/');
+    let owner = segments.next().unwrap_or_default();
+    let repo = segments.next().unwrap_or_default();
+    if owner.is_empty() || repo.is_empty() {
+        return String::new();
+    }
+    format!("{owner}/{repo}")
 }
 
 #[cfg(test)]

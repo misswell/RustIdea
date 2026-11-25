@@ -439,7 +439,7 @@ Panel coverage at this commit:
 | Bookmarks | F3 toggle at caret, navigable list, remove, per-project JSON persistence | local store + navigation |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers | `ide-docker` |
-| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, submit review, conversation comment, open in browser | `ide-github` |
+| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, conversation comment, open in browser | `ide-github`, `ide-vcs` |
 | Heap | import `.hprof`, class table, class object pages, GC-root path | `ops::heap::debug_heap_open/classes/dominators/path` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, source navigation | `ide-profiler` |
 | Logcat | adb devices, streaming threadtime log, level/text filters | `adb` process |
@@ -690,6 +690,13 @@ github_review=Review submitted for #14768
 pr review 14768 --comment --body Smoke review comment
 ```
 
+GitHub diff smoke on a local two-commit repository through the fake `gh` CLI:
+
+```text
+github_diff_files=1 github_diff_lines=6
+github_diff_status=1 files · 6 diff lines · f326112 → dd76151
+```
+
 Heap snapshot smoke with a generated `ide-heap` sample:
 
 ```text
@@ -795,7 +802,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent: 47 passed; 0 failed
+documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff: 50 passed; 0 failed
 ```
 
 ## Not yet done
@@ -823,9 +830,10 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent:
   panel but no editor gutter marker yet. Services lists Docker objects and can
   start/stop/restart containers, but logs, pull/prune, custom connections and
   Compose lifecycle controls are missing. GitHub lists and filters pull
-  requests and shows details/checks/review comments/timeline, submits reviews
-  and conversation comments, but the diff view and timeline write actions
-  (merge/close/reopen) are missing. Heap imports and lists
+  requests and shows details/checks/review comments/timeline and a unified
+  diff, submits reviews and conversation comments, but inline-review comment
+  composition and timeline write actions (merge/close/reopen) are missing. Heap
+  imports and lists
   classes and object pages with GC-root paths, but capture from a live JVM,
   snapshot comparison and richer instance/field detail are missing. Profiler
   imports Node CPU profiles and lists methods, but

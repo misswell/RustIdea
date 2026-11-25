@@ -78,6 +78,7 @@ enum DockerTab {
 enum GitHubTab {
     Overview,
     Files,
+    Diff,
     Checks,
     Comments,
 }
@@ -720,6 +721,9 @@ pub struct Workbench {
     github_review_status: gpui::SharedString,
     github_review_busy: bool,
     _github_comment_subscription: Subscription,
+    github_diff_files: Vec<crate::pr_diff::DiffFile>,
+    github_diff_status: gpui::SharedString,
+    github_diff_busy: bool,
     heap_info: Option<ide_host::ops::heap::HeapSnapshotInfo>,
     heap_classes: Vec<ide_host::ops::heap::HeapClassRow>,
     heap_path_input: Entity<TextInput>,
@@ -1526,6 +1530,9 @@ impl Workbench {
             github_review_status: gpui::SharedString::default(),
             github_review_busy: false,
             _github_comment_subscription: github_comment_subscription,
+            github_diff_files: Vec::new(),
+            github_diff_status: "Select Diff to load changed files".into(),
+            github_diff_busy: false,
             heap_info: None,
             heap_classes: Vec::new(),
             heap_path_input,
@@ -5472,6 +5479,8 @@ impl Workbench {
         self.github_selected = Some(number);
         self.github_details = None;
         self.github_comments.clear();
+        self.github_diff_files.clear();
+        self.github_diff_status = "Select Diff to load changed files".into();
         self.github_tab = GitHubTab::Overview;
         self.github_detail_status = format!("Loading pull request #{number}…").into();
         self.load_github_pr(number, false, cx);
@@ -5519,6 +5528,60 @@ impl Workbench {
                             }
                             app.github_detail_status =
                                 format!("Pull request failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn load_github_diff(&mut self, cx: &mut Context<Self>) {
+        if self.github_diff_busy {
+            return;
+        }
+        let Some(number) = self.github_selected else {
+            self.github_diff_status = "Select a pull request first".into();
+            cx.notify();
+            return;
+        };
+        let Some(details) = self.github_details.clone() else {
+            self.github_diff_status = "Wait for pull request details to load".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.github_diff_busy = true;
+        self.github_diff_status = "Loading diff…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.github_pr_diff(root, number, details).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.github_diff_busy = false;
+                    match result {
+                        Ok(diff) => {
+                            let files = crate::pr_diff::parse(&diff.patch);
+                            let lines = files.iter().map(|file| file.lines.len()).sum::<usize>();
+                            app.github_diff_status = format!(
+                                "{} files · {} diff lines · {} → {}",
+                                files.len(),
+                                lines,
+                                &diff.base[..diff.base.len().min(7)],
+                                &diff.head[..diff.head.len().min(7)]
+                            )
+                            .into();
+                            app.github_diff_files = files;
+                        }
+                        Err(error) => {
+                            app.github_diff_files.clear();
+                            app.github_diff_status =
+                                format!("Diff failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -7297,6 +7360,26 @@ impl Workbench {
 
     pub fn github_review_status_text(&self) -> String {
         self.github_review_status.to_string()
+    }
+
+    pub fn github_diff_file_count(&self) -> usize {
+        self.github_diff_files.len()
+    }
+
+    pub fn github_diff_line_count(&self) -> usize {
+        self.github_diff_files
+            .iter()
+            .map(|file| file.lines.len())
+            .sum()
+    }
+
+    pub fn github_diff_status_text(&self) -> String {
+        self.github_diff_status.to_string()
+    }
+
+    pub fn smoke_github_diff(&mut self, cx: &mut Context<Self>) {
+        self.github_tab = GitHubTab::Diff;
+        self.load_github_diff(cx);
     }
 
     pub fn smoke_github_review(&mut self, event: &str, body: String, cx: &mut Context<Self>) {
@@ -11699,6 +11782,96 @@ impl Workbench {
                     );
                 }
             }
+            GitHubTab::Diff => {
+                if self.github_diff_busy || self.github_diff_files.is_empty() {
+                    body = body.child(
+                        div()
+                            .p_2()
+                            .text_size(px(10.5))
+                            .text_color(theme.faint)
+                            .child(self.github_diff_status.clone()),
+                    );
+                } else {
+                    for (file_index, file) in self.github_diff_files.iter().take(200).enumerate() {
+                        body = body.child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .bg(theme.panel_alt)
+                                .text_size(px(9.))
+                                .text_color(theme.muted)
+                                .child(file.path.clone())
+                                .child(
+                                    div()
+                                        .text_size(px(8.5))
+                                        .text_color(theme.faint)
+                                        .child(format!("+{} −{}", file.added, file.removed)),
+                                ),
+                        );
+                        if file.binary {
+                            body = body.child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .text_size(px(9.))
+                                    .text_color(theme.faint)
+                                    .child("Binary file"),
+                            );
+                            continue;
+                        }
+                        for (line_index, line) in file.lines.iter().take(1_000).enumerate() {
+                            let (prefix, color, bg) = match line.kind {
+                                crate::pr_diff::DiffLineKind::Hunk => {
+                                    (" ", theme.accent, theme.panel_alt)
+                                }
+                                crate::pr_diff::DiffLineKind::Added => {
+                                    ("+", theme.accent, theme.accent_muted)
+                                }
+                                crate::pr_diff::DiffLineKind::Removed => {
+                                    ("−", theme.error, theme.panel_alt)
+                                }
+                                crate::pr_diff::DiffLineKind::Context => {
+                                    (" ", theme.muted, theme.panel)
+                                }
+                                crate::pr_diff::DiffLineKind::Meta => {
+                                    ("\\", theme.faint, theme.panel)
+                                }
+                            };
+                            let old_number = line
+                                .old_line
+                                .map(|line| line.to_string())
+                                .unwrap_or_default();
+                            let new_number = line
+                                .new_line
+                                .map(|line| line.to_string())
+                                .unwrap_or_default();
+                            body = body.child(
+                                div()
+                                    .id(("github-diff-line", file_index * 1_000 + line_index))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_2()
+                                    .bg(bg)
+                                    .font_family("Menlo")
+                                    .text_size(px(8.5))
+                                    .text_color(color)
+                                    .child(
+                                        div().w(px(28.)).text_color(theme.faint).child(old_number),
+                                    )
+                                    .child(
+                                        div().w(px(28.)).text_color(theme.faint).child(new_number),
+                                    )
+                                    .child(div().w(px(8.)).child(prefix))
+                                    .child(div().flex_1().truncate().child(line.text.clone())),
+                            );
+                        }
+                    }
+                }
+            }
             GitHubTab::Checks => {
                 if details.checks.is_empty() {
                     body = body.child(
@@ -11794,6 +11967,7 @@ impl Workbench {
         let tabs = [
             (GitHubTab::Overview, "Overview"),
             (GitHubTab::Files, "Files"),
+            (GitHubTab::Diff, "Diff"),
             (GitHubTab::Checks, "Checks"),
             (GitHubTab::Comments, "Comments"),
         ];
@@ -11816,6 +11990,9 @@ impl Workbench {
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.github_tab = tab;
+                        if tab == GitHubTab::Diff && this.github_diff_files.is_empty() {
+                            this.load_github_diff(cx);
+                        }
                         cx.notify();
                     }))
                     .child(label),
