@@ -1264,6 +1264,40 @@ impl NativeHost {
         })
         .await
     }
+
+    pub async fn heap_open(&self, path: PathBuf) -> IdeResult<ide_host::ops::heap::HeapOpenResult> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            ide_host::ops::heap::debug_heap_open(
+                &host,
+                MAIN_WINDOW,
+                path.into(),
+                ide_core::RequestId::next(),
+                ide_host::ops::Channel::new(|_| {}),
+            )
+            .await
+        })
+        .await
+    }
+
+    pub async fn heap_classes(
+        &self,
+        snapshot: ide_host::ops::heap::HeapSnapshotId,
+    ) -> IdeResult<Vec<ide_host::ops::heap::HeapClassRow>> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            ide_host::ops::heap::debug_heap_classes(&host, MAIN_WINDOW, snapshot).await
+        })
+        .await
+    }
+
+    pub async fn heap_close(&self, snapshot: ide_host::ops::heap::HeapSnapshotId) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            ide_host::ops::heap::debug_heap_close(&host, MAIN_WINDOW, snapshot).await
+        })
+        .await
+    }
 }
 
 impl Drop for NativeHost {

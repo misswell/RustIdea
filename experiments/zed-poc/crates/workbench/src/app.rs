@@ -39,6 +39,7 @@ enum SidebarMode {
     GitLog,
     Services,
     GitHub,
+    Heap,
     Outline,
     Problems,
     Database,
@@ -86,6 +87,7 @@ enum Command {
     ShowGitLog,
     ShowServices,
     ShowGitHub,
+    ShowHeap,
     ShowOutline,
     ShowProblems,
     ShowDatabase,
@@ -116,7 +118,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 43] = [
+    const ALL: [Command; 44] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -133,6 +135,7 @@ impl Command {
         Command::ShowGitLog,
         Command::ShowServices,
         Command::ShowGitHub,
+        Command::ShowHeap,
         Command::ShowOutline,
         Command::ShowProblems,
         Command::ShowDatabase,
@@ -180,6 +183,7 @@ impl Command {
             Command::ShowGitLog => "Show Git Log",
             Command::ShowServices => "Show Services",
             Command::ShowGitHub => "Show GitHub Pull Requests",
+            Command::ShowHeap => "Show Heap Snapshot",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
             Command::ShowDatabase => "Show Database",
@@ -389,6 +393,21 @@ fn build_search_query(
     }
 }
 
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 fn utf16_prefix(text: &str, units: u32) -> String {
     let mut consumed = 0u32;
     let mut end = text.len();
@@ -594,6 +613,12 @@ pub struct Workbench {
     github_status: gpui::SharedString,
     github_state: ide_github::PrStateFilter,
     github_busy: bool,
+    heap_info: Option<ide_host::ops::heap::HeapSnapshotInfo>,
+    heap_classes: Vec<ide_host::ops::heap::HeapClassRow>,
+    heap_path_input: Entity<TextInput>,
+    heap_status: gpui::SharedString,
+    heap_busy: bool,
+    _heap_input_subscription: Subscription,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -1069,6 +1094,21 @@ impl Workbench {
                     app.import_coverage(cx);
                 }
             });
+        let heap_path_input = cx.new(|cx| {
+            TextInput::new(
+                "Heap snapshot path (.hprof)…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let heap_input_subscription = cx.subscribe(&heap_path_input, |app, _, event, cx| {
+            if let TextInputEvent::Submit(_) = event {
+                app.open_heap_snapshot(cx);
+            }
+        });
         let setting_edit_input = cx.new(|cx| {
             TextInput::new(
                 "Setting value",
@@ -1170,6 +1210,12 @@ impl Workbench {
             github_status: "Open GitHub to load pull requests".into(),
             github_state: ide_github::PrStateFilter::Open,
             github_busy: false,
+            heap_info: None,
+            heap_classes: Vec::new(),
+            heap_path_input,
+            heap_status: "Import an .hprof heap snapshot".into(),
+            heap_busy: false,
+            _heap_input_subscription: heap_input_subscription,
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -4047,6 +4093,7 @@ impl Workbench {
             Command::ShowGitLog => self.select_sidebar(SidebarMode::GitLog, cx),
             Command::ShowServices => self.select_sidebar(SidebarMode::Services, cx),
             Command::ShowGitHub => self.select_sidebar(SidebarMode::GitHub, cx),
+            Command::ShowHeap => self.select_sidebar(SidebarMode::Heap, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
             Command::ShowDatabase => self.select_sidebar(SidebarMode::Database, cx),
@@ -4947,6 +4994,133 @@ impl Workbench {
         cx.notify();
     }
 
+    fn open_heap_snapshot(&mut self, cx: &mut Context<Self>) {
+        if self.heap_busy {
+            return;
+        }
+        let raw = self.heap_path_input.read(cx).content().trim().to_owned();
+        if raw.is_empty() {
+            self.heap_status = "Enter an .hprof file path".into();
+            cx.notify();
+            return;
+        }
+        let path = PathBuf::from(raw);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.root.join(path)
+        };
+        let previous = self.heap_info.as_ref().map(|info| info.id);
+        let host = self.host.clone();
+        self.heap_busy = true;
+        self.heap_status = format!("Analyzing {}…", path.display()).into();
+        cx.spawn(async move |this, cx| {
+            let mut previous_error = None;
+            if let Some(previous) = previous
+                && let Err(error) = host.heap_close(previous).await
+            {
+                previous_error = Some(error.message);
+            }
+            let result = host.heap_open(path).await;
+            let result = match result {
+                Ok(ide_host::ops::heap::HeapOpenResult::Ready { snapshot }) => {
+                    let classes = host.heap_classes(snapshot.id).await;
+                    Ok((snapshot, classes))
+                }
+                Ok(ide_host::ops::heap::HeapOpenResult::NotEnoughDiskSpace {
+                    needed,
+                    available,
+                }) => Err(format!(
+                    "Not enough disk space for the index: need {}, have {}",
+                    format_bytes(needed),
+                    format_bytes(available)
+                )),
+                Ok(ide_host::ops::heap::HeapOpenResult::Cancelled) => {
+                    Err("Heap analysis cancelled".to_owned())
+                }
+                Err(error) => Err(error.message),
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.heap_busy = false;
+                    match result {
+                        Ok((snapshot, Ok(classes))) => {
+                            app.heap_status = format!(
+                                "{} · {} objects · {} classes",
+                                snapshot.label, snapshot.summary.objects, snapshot.summary.classes
+                            )
+                            .into();
+                            app.heap_classes = classes;
+                            app.heap_info = Some(snapshot);
+                        }
+                        Ok((snapshot, Err(error))) => {
+                            app.heap_status =
+                                format!("Heap classes failed: {}", error.message).into();
+                            app.heap_classes.clear();
+                            app.heap_info = Some(snapshot);
+                        }
+                        Err(message) => {
+                            app.heap_status = format!(
+                                "{}{}",
+                                previous_error
+                                    .map(|error| format!(
+                                        "Close previous snapshot failed: {error}; "
+                                    ))
+                                    .unwrap_or_default(),
+                                message
+                            )
+                            .into();
+                            app.heap_classes.clear();
+                            app.heap_info = None;
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn close_heap_snapshot(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.heap_info.as_ref().map(|info| info.id) else {
+            return;
+        };
+        if self.heap_busy {
+            return;
+        }
+        self.heap_busy = true;
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.heap_close(snapshot).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.heap_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.heap_info = None;
+                            app.heap_classes.clear();
+                            app.heap_status = "Heap snapshot closed".into();
+                        }
+                        Err(error) => {
+                            app.heap_status =
+                                format!("Close heap failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn stage_all(&mut self, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = self
             .git_status
@@ -5369,6 +5543,7 @@ impl Workbench {
             SidebarMode::GitLog => "Git Log",
             SidebarMode::Services => "Services",
             SidebarMode::GitHub => "GitHub",
+            SidebarMode::Heap => "Heap",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
             SidebarMode::Database => "Database",
@@ -5766,6 +5941,36 @@ impl Workbench {
         self.github_pulls
             .first()
             .map(|pull| format!("#{} {}", pull.number, pull.title))
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_heap(&mut self, path: String, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Heap, cx);
+        self.heap_path_input.update(cx, |input, cx| {
+            input.set_content(path, cx);
+        });
+        self.open_heap_snapshot(cx);
+    }
+
+    pub fn heap_class_count(&self) -> usize {
+        self.heap_classes.len()
+    }
+
+    pub fn heap_object_count(&self) -> u64 {
+        self.heap_info
+            .as_ref()
+            .map(|info| info.summary.objects)
+            .unwrap_or_default()
+    }
+
+    pub fn heap_status_text(&self) -> String {
+        self.heap_status.to_string()
+    }
+
+    pub fn heap_first_class(&self) -> String {
+        self.heap_classes
+            .first()
+            .map(|class| format!("{} · {}", class.name, class.count))
             .unwrap_or_default()
     }
 
@@ -9500,6 +9705,141 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_heap(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("heap-classes")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.heap_classes.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(if self.heap_busy {
+                        "Analyzing heap snapshot…"
+                    } else {
+                        "No heap snapshot loaded"
+                    }),
+            );
+        }
+        for (index, class) in self.heap_classes.iter().take(500).enumerate() {
+            rows = rows.child(
+                div()
+                    .id(("heap-class", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(theme.text)
+                                    .child(class.name.clone()),
+                            )
+                            .child(div().text_size(px(8.5)).text_color(theme.faint).child(
+                                format!(
+                                    "{} · shallow {}",
+                                    class.count,
+                                    format_bytes(class.shallow)
+                                ),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.accent)
+                            .child(format_bytes(class.retained)),
+                    ),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("heap-open")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.heap_busy {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.open_heap_snapshot(cx);
+                            }))
+                            .child(if self.heap_busy { "Loading…" } else { "Open" }),
+                    )
+                    .child(
+                        div()
+                            .id("heap-close")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.heap_info.is_some() {
+                                theme.error
+                            } else {
+                                theme.faint
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.close_heap_snapshot(cx);
+                            }))
+                            .child("Close"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.heap_status.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.heap_path_input.clone()),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut results = div()
@@ -11082,6 +11422,7 @@ impl Render for Workbench {
         let git_log = self.render_git_log(cx);
         let services = self.render_services(cx);
         let github = self.render_github(cx);
+        let heap = self.render_heap(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
         let settings = self.render_settings(cx);
@@ -11096,6 +11437,7 @@ impl Render for Workbench {
             SidebarMode::GitLog => git_log,
             SidebarMode::Services => services,
             SidebarMode::GitHub => github,
+            SidebarMode::Heap => heap,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
             SidebarMode::Settings => settings,
@@ -11119,6 +11461,7 @@ impl Render for Workbench {
             ("LOG", SidebarMode::GitLog),
             ("SRV", SidebarMode::Services),
             ("GH", SidebarMode::GitHub),
+            ("HEAP", SidebarMode::Heap),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
             ("DB", SidebarMode::Database),
@@ -11409,5 +11752,12 @@ mod tests {
         assert!(query.whole_word);
         assert_eq!(query.pattern, "TODO.*");
         assert_eq!(query.max_matches, 10_000);
+    }
+
+    #[test]
+    fn formats_heap_byte_counts() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(3 * 1024 * 1024), "3.0 MB");
     }
 }

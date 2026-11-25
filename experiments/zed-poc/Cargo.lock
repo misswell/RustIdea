@@ -12037,6 +12037,7 @@ dependencies = [
  "ide-db",
  "ide-docker",
  "ide-github",
+ "ide-heap",
  "ide-host",
  "ide-http",
  "ide-index",
