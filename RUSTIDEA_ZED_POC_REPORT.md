@@ -174,6 +174,19 @@ POC_MULTIVIEW equal=true first_len=2746 second_len=2746
 Both views held the same post-edit text. Interactive simultaneous editing and
 scroll synchronization still need an unlocked GUI session.
 
+External-change test: with a clean Zed buffer and a file inside the OpenIDEA
+project root, appending to the file on disk produced:
+
+```text
+POC_EXTERNAL_PATCH version=1
+```
+
+The OpenIdea `DocPatched` event was converted into a Zed buffer edit and the
+backend/confirmed clocks were advanced. A dirty-buffer guard refuses to apply a
+patch when the Zed clock differs from the confirmed clock and keeps local text;
+that conflict path has not yet been exercised by an interactive test. Files
+outside the project root are not watched by this POC.
+
 ## Not yet done
 
 - License confirmation and the repository license change to

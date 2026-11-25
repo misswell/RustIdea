@@ -31,7 +31,9 @@ struct PocApp {
     backend: Arc<OpenIdeaBridge>,
     backend_version: u32,
     last_clock: clock::Global,
+    confirmed_clock: clock::Global,
     syncing: bool,
+    applying_backend_patch: bool,
     save_requested: bool,
     status: gpui::SharedString,
     _subscriptions: Vec<Subscription>,
@@ -72,7 +74,7 @@ impl PocApp {
             .detach();
         }
         let subscription = cx.subscribe(&buffer, |app, _, event: &BufferEvent, cx| {
-            if matches!(event, BufferEvent::Edited { .. }) {
+            if matches!(event, BufferEvent::Edited { .. }) && !app.applying_backend_patch {
                 app.sync_edits(cx);
             }
         });
@@ -86,9 +88,11 @@ impl PocApp {
             second_editor,
             buffer,
             backend_version: backend.version,
-            last_clock: version,
+            last_clock: version.clone(),
+            confirmed_clock: version,
             backend,
             syncing: false,
+            applying_backend_patch: false,
             save_requested: false,
             status: status.into(),
             _subscriptions: vec![subscription],
@@ -133,6 +137,7 @@ impl PocApp {
                 match result {
                     Ok(version) => {
                         app.backend_version = version;
+                        app.confirmed_clock = request_clock.clone();
                         let current = app.buffer.read(cx).snapshot().version().clone();
                         if current != request_clock {
                             app.sync_edits(cx);
@@ -154,6 +159,48 @@ impl PocApp {
     }
 
     fn handle_event(&mut self, event: IdeEvent, cx: &mut Context<Self>) {
+        if let IdeEvent::DocPatched {
+            doc,
+            base_version: _,
+            version,
+            changes,
+            ..
+        } = event
+        {
+            if doc != self.backend.doc() {
+                return;
+            }
+            let snapshot = self.buffer.read(cx).snapshot();
+            if snapshot.version() != &self.confirmed_clock {
+                eprintln!("POC_EXTERNAL_CONFLICT local edits kept");
+                self.status = "External change arrived while editing; local text kept".into();
+                cx.notify();
+                return;
+            }
+            let edits: Vec<(std::ops::Range<usize>, String)> = changes
+                .iter()
+                .map(|change| {
+                    (
+                        snapshot.offset_utf16_to_offset(text::OffsetUtf16(change.from as usize))
+                            ..snapshot
+                                .offset_utf16_to_offset(text::OffsetUtf16(change.to as usize)),
+                        change.insert.clone(),
+                    )
+                })
+                .collect();
+            self.applying_backend_patch = true;
+            self.buffer.update(cx, |buffer, cx| {
+                buffer.edit(edits, None, cx);
+            });
+            self.applying_backend_patch = false;
+            self.backend_version = version;
+            self.confirmed_clock = self.buffer.read(cx).snapshot().version().clone();
+            self.last_clock = self.confirmed_clock.clone();
+            self.status = "Applied external OpenIDEA document patch".into();
+            eprintln!("POC_EXTERNAL_PATCH version={version}");
+            cx.notify();
+            return;
+        }
         let IdeEvent::Diagnostics {
             path,
             source,

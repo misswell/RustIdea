@@ -111,6 +111,10 @@ impl OpenIdeaBridge {
         self.events.lock().ok()?.take()
     }
 
+    pub fn doc(&self) -> DocId {
+        self.doc
+    }
+
     pub async fn edit(&self, base_version: u32, changes: ChangeSet) -> IdeResult<u32> {
         let host = self.host.clone();
         let doc = self.doc;
