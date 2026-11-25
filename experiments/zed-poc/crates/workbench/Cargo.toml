@@ -23,6 +23,7 @@ ide-agent = { path = "../../../../crates/ide-agent" }
 ide-build = { path = "../../../../crates/ide-build" }
 ide-coverage = { path = "../../../../crates/ide-coverage" }
 ide-db = { path = "../../../../crates/ide-db" }
+ide-docker = { path = "../../../../crates/ide-docker" }
 ide-dap = { path = "../../../../crates/ide-dap" }
 ide-host.workspace = true
 ide-http = { path = "../../../../crates/ide-http" }

@@ -37,6 +37,7 @@ enum SidebarMode {
     Bookmarks,
     Git,
     GitLog,
+    Services,
     Outline,
     Problems,
     Database,
@@ -59,6 +60,14 @@ enum BottomMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DockerTab {
+    Containers,
+    Images,
+    Volumes,
+    Networks,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Save,
     CloseTab,
@@ -74,6 +83,7 @@ enum Command {
     ShowBookmarks,
     ShowGit,
     ShowGitLog,
+    ShowServices,
     ShowOutline,
     ShowProblems,
     ShowDatabase,
@@ -104,7 +114,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 41] = [
+    const ALL: [Command; 42] = [
         Command::Save,
         Command::CloseTab,
         Command::ToggleSplit,
@@ -119,6 +129,7 @@ impl Command {
         Command::ShowBookmarks,
         Command::ShowGit,
         Command::ShowGitLog,
+        Command::ShowServices,
         Command::ShowOutline,
         Command::ShowProblems,
         Command::ShowDatabase,
@@ -164,6 +175,7 @@ impl Command {
             Command::ShowBookmarks => "Show Bookmarks",
             Command::ShowGit => "Show Version Control",
             Command::ShowGitLog => "Show Git Log",
+            Command::ShowServices => "Show Services",
             Command::ShowOutline => "Show Outline",
             Command::ShowProblems => "Show Problems",
             Command::ShowDatabase => "Show Database",
@@ -569,6 +581,10 @@ pub struct Workbench {
     git_log_filter_input: Entity<TextInput>,
     git_log_filter: String,
     _git_log_filter_subscription: Subscription,
+    docker_snapshot: Option<ide_docker::DockerSnapshot>,
+    docker_status: gpui::SharedString,
+    docker_tab: DockerTab,
+    docker_busy: bool,
     bottom_mode: BottomMode,
     terminal: Option<Entity<TerminalPane>>,
     terminal_starting: bool,
@@ -1136,6 +1152,10 @@ impl Workbench {
             git_log_filter_input,
             git_log_filter: String::new(),
             _git_log_filter_subscription: git_log_filter_subscription,
+            docker_snapshot: None,
+            docker_status: "Open Services to load Docker".into(),
+            docker_tab: DockerTab::Containers,
+            docker_busy: false,
             bottom_mode: if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
                 BottomMode::Terminal
             } else {
@@ -1383,6 +1403,7 @@ impl Workbench {
             }
             SidebarMode::Git => self.refresh_git(cx),
             SidebarMode::GitLog => self.refresh_git_log(cx),
+            SidebarMode::Services => self.refresh_docker(cx),
             SidebarMode::Http => self.refresh_http(cx),
             SidebarMode::Database => self.refresh_db(cx),
             SidebarMode::Remote => self.refresh_remote(cx),
@@ -4009,6 +4030,7 @@ impl Workbench {
             Command::ShowBookmarks => self.select_sidebar(SidebarMode::Bookmarks, cx),
             Command::ShowGit => self.select_sidebar(SidebarMode::Git, cx),
             Command::ShowGitLog => self.select_sidebar(SidebarMode::GitLog, cx),
+            Command::ShowServices => self.select_sidebar(SidebarMode::Services, cx),
             Command::ShowOutline => self.select_sidebar(SidebarMode::Outline, cx),
             Command::ShowProblems => self.select_sidebar(SidebarMode::Problems, cx),
             Command::ShowDatabase => self.select_sidebar(SidebarMode::Database, cx),
@@ -4711,6 +4733,110 @@ impl Workbench {
         cx.notify();
     }
 
+    fn refresh_docker(&mut self, cx: &mut Context<Self>) {
+        if self.docker_busy {
+            return;
+        }
+        self.docker_busy = true;
+        self.docker_status = "Loading Docker services…".into();
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.docker_snapshot().await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.docker_busy = false;
+                    match result {
+                        Ok(snapshot) => {
+                            app.docker_status = match &snapshot.availability {
+                                ide_docker::DockerAvailability::Ready {
+                                    client_version,
+                                    server_version,
+                                    context,
+                                } => format!(
+                                    "Docker {client_version} · engine {server_version}{}{}",
+                                    context
+                                        .as_ref()
+                                        .map(|context| format!(" · {context}"))
+                                        .unwrap_or_default(),
+                                    if snapshot.errors.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" · {}", snapshot.errors.join("; "))
+                                    }
+                                )
+                                .into(),
+                                ide_docker::DockerAvailability::NotInstalled => {
+                                    "Docker is not installed".into()
+                                }
+                                ide_docker::DockerAvailability::DaemonDown { message, .. } => {
+                                    format!("Docker daemon unavailable: {message}").into()
+                                }
+                            };
+                            app.docker_snapshot = Some(snapshot);
+                        }
+                        Err(error) => {
+                            app.docker_snapshot = None;
+                            app.docker_status = format!("Docker failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn docker_container_action(
+        &mut self,
+        id: String,
+        name: String,
+        op: ide_docker::ContainerOp,
+        cx: &mut Context<Self>,
+    ) {
+        if self.docker_busy {
+            return;
+        }
+        self.docker_busy = true;
+        let verb = match op {
+            ide_docker::ContainerOp::Start => "Starting",
+            ide_docker::ContainerOp::Stop => "Stopping",
+            ide_docker::ContainerOp::Restart => "Restarting",
+            ide_docker::ContainerOp::Pause => "Pausing",
+            ide_docker::ContainerOp::Unpause => "Unpausing",
+            ide_docker::ContainerOp::Kill => "Killing",
+        };
+        self.docker_status = format!("{verb} {name}…").into();
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.docker_container_op(id, op).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.docker_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.docker_status = format!("{verb} {name}").into();
+                            app.refresh_docker(cx);
+                        }
+                        Err(error) => {
+                            app.docker_status =
+                                format!("Docker action failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn stage_all(&mut self, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = self
             .git_status
@@ -5131,6 +5257,7 @@ impl Workbench {
             SidebarMode::Bookmarks => "Bookmarks",
             SidebarMode::Git => "Git",
             SidebarMode::GitLog => "Git Log",
+            SidebarMode::Services => "Services",
             SidebarMode::Outline => "Outline",
             SidebarMode::Problems => "Problems",
             SidebarMode::Database => "Database",
@@ -5474,6 +5601,41 @@ impl Workbench {
         self.git_commits
             .first()
             .map(|commit| format!("{} {}", commit.short_id, commit.summary))
+            .unwrap_or_default()
+    }
+
+    pub fn smoke_services(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Services, cx);
+    }
+
+    pub fn docker_container_count(&self) -> usize {
+        self.docker_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.containers.len())
+            .unwrap_or_default()
+    }
+
+    pub fn docker_image_count(&self) -> usize {
+        self.docker_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.images.len())
+            .unwrap_or_default()
+    }
+
+    pub fn docker_status(&self) -> String {
+        self.docker_status.to_string()
+    }
+
+    pub fn docker_first_container(&self) -> String {
+        self.docker_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.containers.first())
+            .map(|container| {
+                format!(
+                    "{} · {} · {}",
+                    container.name, container.image, container.state
+                )
+            })
             .unwrap_or_default()
     }
 
@@ -8678,6 +8840,347 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_services(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let snapshot = self.docker_snapshot.as_ref();
+        let ready = snapshot.is_some_and(|snapshot| {
+            matches!(
+                snapshot.availability,
+                ide_docker::DockerAvailability::Ready { .. }
+            )
+        });
+        let mut rows = div()
+            .id("docker-services")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if !ready {
+            rows = rows.child(
+                div()
+                    .p_3()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(self.docker_status.clone()),
+            );
+        } else if let Some(snapshot) = snapshot {
+            match self.docker_tab {
+                DockerTab::Containers => {
+                    if snapshot.containers.is_empty() {
+                        rows = rows.child(
+                            div()
+                                .p_3()
+                                .text_size(px(10.5))
+                                .text_color(theme.faint)
+                                .child("No containers"),
+                        );
+                    }
+                    for (index, container) in snapshot.containers.iter().take(200).enumerate() {
+                        let running = container.running();
+                        let state_color = if running { theme.accent } else { theme.faint };
+                        let id = container.id.clone();
+                        let name = container.name.clone();
+                        let action = if running {
+                            ide_docker::ContainerOp::Stop
+                        } else {
+                            ide_docker::ContainerOp::Start
+                        };
+                        let action_label = if running { "Stop" } else { "Start" };
+                        rows = rows.child(
+                            div()
+                                .id(("docker-container", index))
+                                .px_2()
+                                .py_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .hover(|style| style.bg(theme.panel_alt))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_size(px(10.5))
+                                        .child(
+                                            div()
+                                                .w(px(6.))
+                                                .h(px(6.))
+                                                .rounded_full()
+                                                .bg(state_color),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .truncate()
+                                                .text_color(theme.text)
+                                                .child(container.name.clone()),
+                                        )
+                                        .when_some(
+                                            container.compose_project.clone(),
+                                            |row, project| {
+                                                row.child(
+                                                    div()
+                                                        .text_size(px(8.5))
+                                                        .text_color(theme.faint)
+                                                        .child(project),
+                                                )
+                                            },
+                                        )
+                                        .child(
+                                            div()
+                                                .id(("docker-container-action", index))
+                                                .text_size(px(9.))
+                                                .text_color(theme.muted)
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(
+                                                    move |this, _: &ClickEvent, _, cx| {
+                                                        this.docker_container_action(
+                                                            id.clone(),
+                                                            name.clone(),
+                                                            action,
+                                                            cx,
+                                                        );
+                                                    },
+                                                ))
+                                                .child(action_label),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .pl(px(14.))
+                                        .text_size(px(9.))
+                                        .text_color(theme.faint)
+                                        .truncate()
+                                        .child(format!(
+                                            "{} · {}{}",
+                                            container.image,
+                                            container.status,
+                                            if container.ports.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!(" · {}", container.ports)
+                                            }
+                                        )),
+                                ),
+                        );
+                    }
+                }
+                DockerTab::Images => {
+                    if snapshot.images.is_empty() {
+                        rows = rows.child(
+                            div()
+                                .p_3()
+                                .text_size(px(10.5))
+                                .text_color(theme.faint)
+                                .child("No images"),
+                        );
+                    }
+                    for (index, image) in snapshot.images.iter().take(200).enumerate() {
+                        rows = rows.child(
+                            div()
+                                .id(("docker-image", index))
+                                .px_2()
+                                .py_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(10.))
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .hover(|style| style.bg(theme.panel_alt))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_color(theme.text)
+                                        .child(image.reference()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(9.))
+                                        .text_color(theme.faint)
+                                        .child(image.size.clone()),
+                                ),
+                        );
+                    }
+                }
+                DockerTab::Volumes => {
+                    if snapshot.volumes.is_empty() {
+                        rows = rows.child(
+                            div()
+                                .p_3()
+                                .text_size(px(10.5))
+                                .text_color(theme.faint)
+                                .child("No volumes"),
+                        );
+                    }
+                    for (index, volume) in snapshot.volumes.iter().take(200).enumerate() {
+                        rows = rows.child(
+                            div()
+                                .id(("docker-volume", index))
+                                .px_2()
+                                .py_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(10.))
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .hover(|style| style.bg(theme.panel_alt))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_color(theme.text)
+                                        .child(volume.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(9.))
+                                        .text_color(theme.faint)
+                                        .child(volume.driver.clone()),
+                                ),
+                        );
+                    }
+                }
+                DockerTab::Networks => {
+                    if snapshot.networks.is_empty() {
+                        rows = rows.child(
+                            div()
+                                .p_3()
+                                .text_size(px(10.5))
+                                .text_color(theme.faint)
+                                .child("No networks"),
+                        );
+                    }
+                    for (index, network) in snapshot.networks.iter().take(200).enumerate() {
+                        rows = rows.child(
+                            div()
+                                .id(("docker-network", index))
+                                .px_2()
+                                .py_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(10.))
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .hover(|style| style.bg(theme.panel_alt))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_color(theme.text)
+                                        .child(network.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(9.))
+                                        .text_color(theme.faint)
+                                        .child(format!("{} · {}", network.driver, network.scope)),
+                                ),
+                        );
+                    }
+                }
+            }
+        }
+        let counts = snapshot
+            .map(|snapshot| {
+                (
+                    snapshot.containers.len(),
+                    snapshot.images.len(),
+                    snapshot.volumes.len(),
+                    snapshot.networks.len(),
+                )
+            })
+            .unwrap_or_default();
+        let tabs = [
+            (DockerTab::Containers, format!("C {}", counts.0)),
+            (DockerTab::Images, format!("I {}", counts.1)),
+            (DockerTab::Volumes, format!("V {}", counts.2)),
+            (DockerTab::Networks, format!("N {}", counts.3)),
+        ];
+        let mut tab_row = div().flex().items_center().gap(px(3.));
+        for (index, (tab, label)) in tabs.into_iter().enumerate() {
+            let selected = self.docker_tab == tab;
+            tab_row = tab_row.child(
+                div()
+                    .id(("docker-tab", index))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_size(px(9.))
+                    .text_color(if selected { theme.text } else { theme.faint })
+                    .bg(if selected {
+                        theme.accent_muted
+                    } else {
+                        theme.panel_alt
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.docker_tab = tab;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("docker-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.docker_busy {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_docker(cx);
+                            }))
+                            .child(if self.docker_busy {
+                                "Loading…"
+                            } else {
+                                "Refresh"
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.docker_status.clone()),
+                    ),
+            )
+            .child(div().px_2().py_1().child(tab_row))
+            .child(rows)
+            .into_any_element()
+    }
+
     fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut results = div()
@@ -10258,6 +10761,7 @@ impl Render for Workbench {
         let bookmarks = self.render_bookmarks(cx);
         let git = self.render_git_panel(cx);
         let git_log = self.render_git_log(cx);
+        let services = self.render_services(cx);
         let outline = self.render_outline(window, cx);
         let problems = self.render_problems(window, cx);
         let settings = self.render_settings(cx);
@@ -10270,6 +10774,7 @@ impl Render for Workbench {
             SidebarMode::Bookmarks => bookmarks,
             SidebarMode::Git => git,
             SidebarMode::GitLog => git_log,
+            SidebarMode::Services => services,
             SidebarMode::Outline => outline,
             SidebarMode::Problems => problems,
             SidebarMode::Settings => settings,
@@ -10291,6 +10796,7 @@ impl Render for Workbench {
             ("BMK", SidebarMode::Bookmarks),
             ("GIT", SidebarMode::Git),
             ("LOG", SidebarMode::GitLog),
+            ("SRV", SidebarMode::Services),
             ("OUT", SidebarMode::Outline),
             ("PRB", SidebarMode::Problems),
             ("DB", SidebarMode::Database),

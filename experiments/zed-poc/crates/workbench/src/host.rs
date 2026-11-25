@@ -1209,6 +1209,34 @@ impl NativeHost {
         })
         .await
     }
+
+    pub async fn docker_snapshot(&self) -> IdeResult<ide_docker::DockerSnapshot> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(|| {
+                ide_docker::snapshot(&ide_docker::DockerEndpoint::Default)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))
+        })
+        .await
+    }
+
+    pub async fn docker_container_op(
+        &self,
+        id: String,
+        op: ide_docker::ContainerOp,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                ide_docker::container_op(&ide_docker::DockerEndpoint::Default, &[id], op)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
 }
 
 impl Drop for NativeHost {
