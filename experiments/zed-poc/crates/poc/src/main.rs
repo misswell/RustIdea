@@ -26,6 +26,7 @@ actions!(rustidea_poc, [SaveDocument]);
 
 struct PocApp {
     editor: gpui::Entity<Editor>,
+    second_editor: Option<gpui::Entity<Editor>>,
     buffer: gpui::Entity<Buffer>,
     backend: Arc<OpenIdeaBridge>,
     backend_version: u32,
@@ -52,6 +53,16 @@ impl PocApp {
             editor.set_completion_provider(Some(Rc::new(provider)));
             editor.set_semantics_provider(Some(Rc::new(semantics)));
         });
+        let second_editor = std::env::var_os("RUSTIDEA_POC_MULTIVIEW").map(|_| {
+            let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
+            let provider = OpenIdeaCompletionProvider::new(backend.clone());
+            let semantics = OpenIdeaSemanticsProvider::new(backend.clone());
+            editor.update(cx, |editor, _| {
+                editor.set_completion_provider(Some(Rc::new(provider)));
+                editor.set_semantics_provider(Some(Rc::new(semantics)));
+            });
+            editor
+        });
         if let Some(mut events) = backend.take_events() {
             cx.spawn(async move |this, cx| {
                 while let Some(event) = events.recv().await {
@@ -72,6 +83,7 @@ impl PocApp {
         );
         Self {
             editor,
+            second_editor,
             buffer,
             backend_version: backend.version,
             last_clock: version,
@@ -248,12 +260,21 @@ impl Render for PocApp {
                     .text_color(gpui::rgb(0x9b9ea9))
                     .child(self.status.clone()),
             )
-            .child(
+            .child(if let Some(second) = self.second_editor.clone() {
                 div()
                     .flex_1()
                     .min_h(px(0.))
-                    .child(self.editor.clone()),
-            )
+                    .flex()
+                    .child(div().flex_1().h_full().child(self.editor.clone()))
+                    .child(div().flex_1().h_full().child(second))
+                    .into_any_element()
+            } else {
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(self.editor.clone())
+                    .into_any_element()
+            })
     }
 }
 
@@ -456,6 +477,27 @@ fn main() {
                                     eprintln!("POC_SAVE_OK {marker}");
                                 } else {
                                     eprintln!("POC_SAVE_FAILED {}", app.status);
+                                }
+                                if let Some(second) = app.second_editor.clone() {
+                                    let first_text = app
+                                        .editor
+                                        .read(cx)
+                                        .buffer()
+                                        .read(cx)
+                                        .snapshot(cx)
+                                        .text();
+                                    let second_text = second
+                                        .read(cx)
+                                        .buffer()
+                                        .read(cx)
+                                        .snapshot(cx)
+                                        .text();
+                                    eprintln!(
+                                        "POC_MULTIVIEW equal={} first_len={} second_len={}",
+                                        first_text == second_text,
+                                        first_text.len(),
+                                        second_text.len()
+                                    );
                                 }
                                 cx.quit();
                             })

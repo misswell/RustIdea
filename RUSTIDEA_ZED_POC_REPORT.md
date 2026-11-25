@@ -34,6 +34,9 @@ The POC binary is `rustidea-zed-poc`. It builds and runs with:
   semantic tokens are explicit empty stubs in this POC.
 - An OpenIdea event pump that converts `IdeEvent::Diagnostics` into a Zed
   `DiagnosticSet` and calls `Buffer::update_diagnostics`.
+- Two `Editor` views can be constructed over the same `language::Buffer`
+  (`Editor::for_buffer`), so the same-file multi-view requirement is structurally
+  satisfied.
 
 It does **not** create a Zed Project, does not start Zed LSP/index services, and
 does not contain a WebView.
@@ -161,6 +164,16 @@ source to one synthetic language-server id, so multiple diagnostic producers
 will overwrite rather than merge until the final DiagnosticsBridge keeps a
 source-to-id map.
 
+Multi-view test with two Zed editors over one Buffer:
+
+```text
+POC_SAVE_OK // multiview marker
+POC_MULTIVIEW equal=true first_len=2746 second_len=2746
+```
+
+Both views held the same post-edit text. Interactive simultaneous editing and
+scroll synchronization still need an unlocked GUI session.
+
 ## Not yet done
 
 - License confirmation and the repository license change to
@@ -175,6 +188,8 @@ source-to-id map.
   the Zed entity across tabs and splits.
 - Real window keyboard, Chinese IME, clipboard and visual verification on an
   unlocked macOS session.
+- External-change reload/conflict handling in the Zed Buffer path (the POC only
+  ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
 
 This document is a POC report, not a claim of OpenIdea parity.
