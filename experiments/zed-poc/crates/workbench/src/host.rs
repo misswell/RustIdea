@@ -202,6 +202,8 @@ pub struct NativeHost {
     host: Arc<Host>,
     events: Mutex<Option<Receiver<IdeEvent>>>,
     overflow: Arc<EventOverflow>,
+    plugins_dir: PathBuf,
+    plugin_host: OnceLock<Result<Arc<ide_host::plugins::PluginHost>, String>>,
 }
 
 impl NativeHost {
@@ -249,6 +251,7 @@ impl NativeHost {
         let sink_sender = sender.clone();
         let overflow = Arc::new(EventOverflow::new());
         let sink_overflow = overflow.clone();
+        let plugins_dir = data_dir.join("plugins");
         let host = Arc::new(Host::new(HostConfig {
             config_dir,
             data_dir,
@@ -271,6 +274,8 @@ impl NativeHost {
             host,
             events: Mutex::new(Some(receiver)),
             overflow,
+            plugins_dir,
+            plugin_host: OnceLock::new(),
         }))
     }
 
@@ -578,6 +583,27 @@ impl NativeHost {
         self.host.ssh.configs()
     }
 
+    pub fn plugins_snapshot(&self) -> IdeResult<ide_host::plugins::PluginsSnapshot> {
+        let host = self
+            .plugin_host
+            .get_or_init(|| {
+                let sink: Arc<dyn ide_host::plugins::PluginEventSink> =
+                    Arc::new(|_: Option<&str>, _: ide_host::plugins::PluginEvent| {});
+                ide_host::plugins::PluginHost::new(
+                    self.plugins_dir.clone(),
+                    sink,
+                    Default::default(),
+                )
+                .map(Arc::new)
+                .map_err(|error| error.message)
+            })
+            .as_ref()
+            .map_err(|message| ide_core::IdeError::internal(message.clone()))?
+            .clone();
+        host.load_all();
+        Ok(host.list(None))
+    }
+
     pub fn agent_providers(&self) -> IdeResult<Vec<ide_agent::AgentProvider>> {
         ide_host::ops::agent::providers(&self.host, MAIN_WINDOW)
     }
@@ -632,6 +658,13 @@ impl NativeHost {
                 channel,
             )
             .await
+        })
+        .await
+    }
+
+    pub async fn debug_attachables(&self) -> IdeResult<Vec<ide_dap::attach::AttachableProcess>> {
+        self.run(move |host| async move {
+            ide_host::ops::debug::debug_attachable_processes(&host, MAIN_WINDOW).await
         })
         .await
     }

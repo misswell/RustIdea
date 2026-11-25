@@ -46,6 +46,7 @@ enum BottomMode {
     Run,
     Terminal,
     Build,
+    Debug,
 }
 
 fn refresh_window(handle: Option<gpui::WindowHandle<Workbench>>, cx: &mut gpui::AsyncApp) {
@@ -152,6 +153,11 @@ pub struct Workbench {
     build_status: gpui::SharedString,
     build_output: String,
     build_running: bool,
+    plugins: Vec<ide_host::plugins::PluginInfo>,
+    plugins_status: gpui::SharedString,
+    debug_attachables: Vec<ide_dap::attach::AttachableProcess>,
+    debug_selected: usize,
+    debug_status: gpui::SharedString,
 }
 
 impl Workbench {
@@ -287,6 +293,11 @@ impl Workbench {
             build_status: "Builds have not been loaded".into(),
             build_output: String::new(),
             build_running: false,
+            plugins: Vec::new(),
+            plugins_status: "Select PLUGINS to load installed plugins".into(),
+            debug_attachables: Vec::new(),
+            debug_selected: 0,
+            debug_status: "Select DEBUG to scan attachable processes".into(),
         };
         if let Some(document) = document {
             app.insert_document(document, &registry_for_initial, cx);
@@ -383,6 +394,7 @@ impl Workbench {
             SidebarMode::Remote => self.refresh_remote(cx),
             SidebarMode::Agents => self.refresh_agents(cx),
             SidebarMode::Tools => self.refresh_tools(cx),
+            SidebarMode::Plugins => self.refresh_plugins(cx),
             _ => {}
         }
         cx.notify();
@@ -832,6 +844,44 @@ impl Workbench {
         cx.notify();
     }
 
+    fn refresh_plugins(&mut self, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        let runtime = host.runtime().clone();
+        self.plugins_status = "Loading plugins…".into();
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn_blocking(move || host.plugins_snapshot())
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.to_string()));
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => Err(error),
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(snapshot) => {
+                            app.plugins_status =
+                                format!("{} installed plugins", snapshot.plugins.len()).into();
+                            app.plugins = snapshot.plugins;
+                        }
+                        Err(error) => {
+                            app.plugins.clear();
+                            app.plugins_status =
+                                format!("Plugins failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn refresh_build(&mut self, cx: &mut Context<Self>) {
         let host = self.host.clone();
         self.build_status = "Loading build model…".into();
@@ -939,6 +989,46 @@ impl Workbench {
                         }
                         Err(error) => {
                             app.build_status = format!("Build failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_debug(&mut self, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        self.debug_status = "Scanning attachable processes…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.debug_attachables().await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(processes) => {
+                            app.debug_status = format!(
+                                "{} attachable processes · {} debuggable run configs",
+                                processes.len(),
+                                app.run_configs
+                                    .iter()
+                                    .filter(|config| config.debug_adapter.is_some())
+                                    .count()
+                            )
+                            .into();
+                            app.debug_attachables = processes;
+                            app.debug_selected = app
+                                .debug_selected
+                                .min(app.debug_attachables.len().saturating_sub(1));
+                        }
+                        Err(error) => {
+                            app.debug_attachables.clear();
+                            app.debug_status =
+                                format!("Debug scan failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -1808,6 +1898,23 @@ impl Workbench {
 
     pub fn build_output(&self) -> &str {
         &self.build_output
+    }
+
+    pub fn smoke_plugins(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Plugins, cx);
+    }
+
+    pub fn plugins_count(&self) -> usize {
+        self.plugins.len()
+    }
+
+    pub fn smoke_debug(&mut self, cx: &mut Context<Self>) {
+        self.bottom_mode = BottomMode::Debug;
+        self.refresh_debug(cx);
+    }
+
+    pub fn debug_attachable_count(&self) -> usize {
+        self.debug_attachables.len()
     }
 
     pub fn smoke_run_status(&self) -> String {
@@ -2880,6 +2987,102 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_plugins(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut rows = div()
+            .id("plugin-list")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, plugin) in self.plugins.iter().take(200).enumerate() {
+            let color = if plugin.error.is_some() {
+                theme.error
+            } else if plugin.enabled {
+                theme.text
+            } else {
+                theme.muted
+            };
+            rows =
+                rows.child(
+                    div()
+                        .id(("plugin", index))
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(10.5))
+                        .text_color(color)
+                        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(
+                            if plugin.error.is_some() {
+                                theme.error
+                            } else if plugin.enabled {
+                                theme.accent
+                            } else {
+                                theme.faint
+                            },
+                        ))
+                        .child(div().flex_1().truncate().child(plugin.name.clone()))
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(theme.faint)
+                                .child(plugin.version.clone()),
+                        ),
+                );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("plugins-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.refresh_plugins(cx);
+                            }))
+                            .child("Refresh"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(theme.faint)
+                            .truncate()
+                            .child(self.plugins_status.clone()),
+                    ),
+            )
+            .child(rows)
+            .when(self.plugins.is_empty(), |view| {
+                view.child(
+                    div()
+                        .p_3()
+                        .text_size(px(10.5))
+                        .text_color(theme.faint)
+                        .child("Installed OpenIDEA plugins will appear here."),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_placeholder(&self, title: &'static str) -> gpui::AnyElement {
         let theme = self.theme;
         div()
@@ -3229,14 +3432,65 @@ impl Workbench {
                     .children(build_lines.into_iter().map(|line| div().child(line))),
             )
             .into_any_element();
+        let mut debug_rows = div()
+            .id("debug-attachables")
+            .size_full()
+            .overflow_scroll()
+            .p_2()
+            .flex()
+            .flex_col();
+        for (index, process) in self.debug_attachables.iter().take(200).enumerate() {
+            let selected = index == self.debug_selected;
+            let label = format!(
+                "{} · {} · pid {}",
+                process.name, process.adapter, process.pid
+            );
+            debug_rows = debug_rows.child(
+                div()
+                    .id(("debug-process", index))
+                    .h(px(22.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .text_size(px(10.5))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.debug_selected = index;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+        let debug_body = if self.debug_attachables.is_empty() {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.5))
+                .text_color(theme.faint)
+                .child(self.debug_status.clone())
+                .into_any_element()
+        } else {
+            debug_rows.into_any_element()
+        };
         let body = match self.bottom_mode {
             BottomMode::Run => run_body.into_any_element(),
             BottomMode::Terminal => terminal_body,
             BottomMode::Build => build_body,
+            BottomMode::Debug => debug_body,
         };
         let run_tab_active = self.bottom_mode == BottomMode::Run;
         let terminal_tab_active = self.bottom_mode == BottomMode::Terminal;
         let build_tab_active = self.bottom_mode == BottomMode::Build;
+        let debug_tab_active = self.bottom_mode == BottomMode::Debug;
         div()
             .h(px(240.))
             .flex_none()
@@ -3330,6 +3584,33 @@ impl Workbench {
                             }))
                             .child("BUILD"),
                     )
+                    .child(
+                        div()
+                            .id("bottom-debug")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.5))
+                            .text_color(if debug_tab_active {
+                                theme.text
+                            } else {
+                                theme.muted
+                            })
+                            .bg(if debug_tab_active {
+                                theme.panel_alt
+                            } else {
+                                theme.panel
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.bottom_mode = BottomMode::Debug;
+                                if this.debug_attachables.is_empty() {
+                                    this.refresh_debug(cx);
+                                }
+                                cx.notify();
+                            }))
+                            .child("DEBUG"),
+                    )
                     .children(if run_tab_active { configs } else { Vec::new() })
                     .child(div().flex_1())
                     .when(run_tab_active, |row| {
@@ -3396,6 +3677,22 @@ impl Workbench {
                                 .child("Rebuild"),
                         )
                     })
+                    .when(debug_tab_active, |row| {
+                        row.child(
+                            div()
+                                .id("debug-refresh")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.muted)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.refresh_debug(cx);
+                                }))
+                                .child("Refresh"),
+                        )
+                    })
                     .child(
                         div()
                             .px_2()
@@ -3405,8 +3702,10 @@ impl Workbench {
                                 self.run_status.clone()
                             } else if terminal_tab_active {
                                 self.terminal_status.clone()
-                            } else {
+                            } else if build_tab_active {
                                 self.build_status.clone()
+                            } else {
+                                self.debug_status.clone()
                             }),
                     ),
             )
@@ -3491,7 +3790,7 @@ impl Render for Workbench {
             SidebarMode::Http => self.render_http(cx),
             SidebarMode::Remote => self.render_remote(cx),
             SidebarMode::Agents => self.render_agents(cx),
-            SidebarMode::Plugins => self.render_placeholder("Plugins"),
+            SidebarMode::Plugins => self.render_plugins(cx),
             SidebarMode::Tools => self.render_tools(cx),
         };
         let sidebar_tabs = [

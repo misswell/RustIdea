@@ -351,6 +351,11 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   `ops::build::build_model` / `ops::build::build_run`: it streams build
   `Started`, `Step`, `Output`, `Message` and `Progress` events and shows the
   final error/warning counts and duration;
+- Plugins loads the installed plugin host in a blocking task and lists installed
+  `PluginInfo` rows (the current RustIdea identifier has none installed);
+- Debug scans `ops::debug::debug_attachable_processes` and lists debug-capable
+  run configurations. The panel is a process/browse surface; starting a session
+  and the variables/stack/frames UI are still pending;
 - buffer edits are sent incrementally to
   `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
   `DocPatched` events and diagnostics are applied back to Zed buffers;
@@ -462,9 +467,9 @@ documents/project/sync/host: 24 passed; 0 failed
 - External-change reload/conflict handling in the Zed Buffer path (the POC only
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
-- Plugins (full PluginHost loading and UI contributions), debugger UI, notebook,
-  remote filesystem (as opposed to the SSH terminal), MCP management and agent
-  task creation/prompt UI are not yet integrated. Database/HTTP have working
+- Plugin UI contributions/marketplace install flow, full debugger session UI,
+  notebook, remote filesystem (as opposed to the SSH terminal), MCP management
+  and agent task creation/prompt UI are not yet integrated. Database/HTTP have working
   execution paths but no source/request editors of their own. The Terminal now
   has a real VT screen and OpenIDEA PTY, but its mouse selection, hyperlinks,
   IME and resize path are not yet verified or complete.
