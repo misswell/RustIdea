@@ -423,6 +423,16 @@ fn main() {
             }
             Err(error) => eprintln!("POC_LSP_DEFINITION_ERROR {}", error.message),
         }
+        match backend.prepare_rename_blocking(line, 0) {
+            Ok(range) => eprintln!("POC_LSP_PREPARE_RENAME {:?}", range),
+            Err(error) => eprintln!("POC_LSP_PREPARE_RENAME_ERROR {}", error.message),
+        }
+        if let Ok(new_name) = std::env::var("RUSTIDEA_POC_RENAME_TO") {
+            match backend.rename_blocking(line, 0, new_name.clone()) {
+                Ok(()) => eprintln!("POC_LSP_RENAME_OK {new_name}"),
+                Err(error) => eprintln!("POC_LSP_RENAME_ERROR {}", error.message),
+            }
+        }
         for _ in 0..30 {
             match backend.completion_blocking(line, column, Some(".".into())) {
                 Ok(list) if !list.items.is_empty() => {

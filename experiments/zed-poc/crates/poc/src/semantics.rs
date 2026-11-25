@@ -182,21 +182,48 @@ impl SemanticsProvider for OpenIdeaSemanticsProvider {
 
     fn range_for_rename(
         &self,
-        _buffer: &Entity<Buffer>,
-        _position: Anchor,
-        _cx: &mut App,
+        buffer: &Entity<Buffer>,
+        position: Anchor,
+        cx: &mut App,
     ) -> Task<anyhow::Result<Option<RenameTarget>>> {
-        Task::ready(Ok(None))
+        let (line, column) = self.position(buffer, position, cx);
+        let snapshot = buffer.read(cx).snapshot();
+        let backend = self.backend.clone();
+        cx.spawn(async move |_cx| {
+            let range = backend
+                .prepare_rename(line, column)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            Ok(range.map(|range| {
+                let start = snapshot.anchor_before(text::PointUtf16::new(
+                    range.start.line,
+                    range.start.col,
+                ));
+                let end = snapshot.anchor_before(text::PointUtf16::new(
+                    range.end.line,
+                    range.end.col,
+                ));
+                RenameTarget::new(start..end, None)
+            }))
+        })
     }
 
     fn perform_rename(
         &self,
-        _buffer: &Entity<Buffer>,
-        _position: Anchor,
-        _new_name: String,
+        buffer: &Entity<Buffer>,
+        position: Anchor,
+        new_name: String,
         _language_server_id: Option<lsp::LanguageServerId>,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Option<Task<anyhow::Result<ProjectTransaction>>> {
-        None
+        let (line, column) = self.position(buffer, position, cx);
+        let backend = self.backend.clone();
+        Some(cx.spawn(async move |_cx| {
+            backend
+                .rename(line, column, new_name)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            Ok(ProjectTransaction::default())
+        }))
     }
 }

@@ -30,8 +30,9 @@ The POC binary is `rustidea-zed-poc`. It builds and runs with:
 - `OpenIdeaSemanticsProvider`, installed with
   `Editor::set_semantics_provider`, which maps `ide_host::ops::lsp::lsp_hover`
   results into Zed's hover blocks and same-file `lsp_goto` results into Zed
-  `LocationLink`s. Cross-file definitions, highlights, rename, inlay hints and
-  semantic tokens are explicit empty stubs in this POC.
+  `LocationLink`s. Rename uses OpenIdea `lsp_prepare_rename` plus
+  `lsp_rename`/`apply_workspace_edit`. Cross-file definitions, highlights,
+  inlay hints and semantic tokens are explicit empty stubs in this POC.
 - An OpenIdea event pump that converts `IdeEvent::Diagnostics` into a Zed
   `DiagnosticSet` and calls `Buffer::update_diagnostics`.
 - Two `Editor` views can be constructed over the same `language::Buffer`
@@ -152,6 +153,25 @@ POC_LSP_DEFINITION /private/tmp/zed-poc-lsp-ts/test.ts 1:6
 Cross-file definitions are currently dropped because the POC only owns one
 Zed buffer.
 
+Rename test on a TypeScript copy:
+
+```text
+POC_LSP_PREPARE_RENAME Some(Range { start: Pos { line: 1, col: 0 }, end: Pos { line: 1, col: 4 } })
+POC_LSP_RENAME_OK renamed
+```
+
+The file became:
+
+```typescript
+const renamed = "hello";
+renamed.
+```
+
+`perform_rename` returns an empty Zed `ProjectTransaction`; the actual edits
+come back through OpenIdea `DocPatched` events and are applied to the Zed buffer
+by the bridge. Multi-file rename therefore depends on the final DocumentStore
+keeping every affected file open/synchronized.
+
 Diagnostics bridge test with an intentional TypeScript type error:
 
 ```text
@@ -191,9 +211,9 @@ outside the project root are not watched by this POC.
 
 - License confirmation and the repository license change to
   GPL-3.0-or-later. No GPL release is produced from this branch.
-- Definition/highlights/rename provider wiring and the diagnostics bridge.
-  Cross-file definitions and rename are still stubs; hover, same-file
-  definitions and completion are wired.
+- Cross-file definition/highlights provider wiring and multi-source diagnostics.
+  Hover, same-file definitions, rename and completion are wired; diagnostics
+  already update the Zed buffer for one source.
 - Completion documentation, `additionalTextEdits`, commit characters and
   completion resolve are not mapped yet.
 - Multi-source diagnostic merging (the POC uses one synthetic server id).

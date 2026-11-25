@@ -234,6 +234,69 @@ impl OpenIdeaBridge {
         self.runtime.block_on(self.definition(line, column, kind))
     }
 
+    pub async fn prepare_rename(
+        &self,
+        line: u32,
+        column: u32,
+    ) -> IdeResult<Option<ide_core::Range>> {
+        let host = self.host.clone();
+        let doc = self.doc;
+        self.runtime
+            .spawn(async move {
+                ide_host::ops::lsp::lsp_prepare_rename(
+                    &host,
+                    WINDOW,
+                    doc,
+                    ide_core::Pos::new(line, column),
+                )
+                .await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn prepare_rename_blocking(
+        &self,
+        line: u32,
+        column: u32,
+    ) -> IdeResult<Option<ide_core::Range>> {
+        self.runtime.block_on(self.prepare_rename(line, column))
+    }
+
+    pub async fn rename(
+        &self,
+        line: u32,
+        column: u32,
+        new_name: String,
+    ) -> IdeResult<()> {
+        let host = self.host.clone();
+        let doc = self.doc;
+        self.runtime
+            .spawn(async move {
+                let renamed = ide_host::ops::lsp::lsp_rename(
+                    &host,
+                    WINDOW,
+                    ide_core::RequestId::next(),
+                    doc,
+                    ide_core::Pos::new(line, column),
+                    new_name,
+                )
+                .await?;
+                ide_host::ops::lsp::apply_workspace_edit(&host, WINDOW, renamed.edit).await
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn rename_blocking(
+        &self,
+        line: u32,
+        column: u32,
+        new_name: String,
+    ) -> IdeResult<()> {
+        self.runtime.block_on(self.rename(line, column, new_name))
+    }
+
     pub fn reopen_blocking(&mut self) -> IdeResult<DocumentInfo> {
         let host = self.host.clone();
         let path = self.path.clone();

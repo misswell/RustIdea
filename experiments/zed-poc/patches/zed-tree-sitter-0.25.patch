@@ -40,6 +40,27 @@ index bfed8e4..53d0b30 100644
      pub fn confirm_completion(
          &mut self,
          action: &ConfirmCompletion,
+diff --git a/crates/editor/src/editor.rs b/crates/editor/src/editor.rs
+index afaa963..1b218b7 100644
+--- a/crates/editor/src/editor.rs
++++ b/crates/editor/src/editor.rs
+@@ -1616,6 +1616,16 @@ pub struct RenameTarget {
+     language_server_id: Option<LanguageServerId>,
+ }
+ 
++impl RenameTarget {
++    /// Integration constructor for hosts that provide rename metadata.
++    pub fn new(range: Range<text::Anchor>, language_server_id: Option<LanguageServerId>) -> Self {
++        Self {
++            range,
++            language_server_id,
++        }
++    }
++}
++
+ #[doc(hidden)]
+ pub struct RenameState {
+     pub range: Range<Anchor>,
 diff --git a/crates/editor/src/jsx_tag_auto_close.rs b/crates/editor/src/jsx_tag_auto_close.rs
 index b6f79cc..8866fe6 100644
 --- a/crates/editor/src/jsx_tag_auto_close.rs
