@@ -12023,6 +12023,7 @@ dependencies = [
  "ide-lsp",
  "ide-run",
  "ide-sdk",
+ "ide-search",
  "ide-text",
  "ide-tools",
  "ide-vfs",
@@ -12047,6 +12048,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tree-sitter-java",
+ "unicode-segmentation",
  "util",
 ]
 

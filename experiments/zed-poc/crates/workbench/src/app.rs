@@ -20,7 +20,14 @@ use crate::host::NativeHost;
 use crate::lsp::DocumentLsp;
 use crate::project::{ProjectTree, Toggle};
 use crate::semantics::OpenIdeaSemanticsProvider;
+use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{Theme, ThemeMode};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarMode {
+    Project,
+    Search,
+}
 
 fn refresh_window(handle: Option<gpui::WindowHandle<Workbench>>, cx: &mut gpui::AsyncApp) {
     if let Some(handle) = handle
@@ -60,6 +67,12 @@ pub struct Workbench {
     running_run: Option<ide_run::RunInfo>,
     run_output: String,
     run_status: gpui::SharedString,
+    sidebar_mode: SidebarMode,
+    search_input: Entity<TextInput>,
+    search_pattern: String,
+    search_results: Vec<ide_search::FileMatches>,
+    search_status: gpui::SharedString,
+    _search_subscription: Subscription,
 }
 
 impl Workbench {
@@ -85,6 +98,30 @@ impl Workbench {
         let status = format!("{} · {}", project.name, root.display());
         let run_configs = host.run_configs().unwrap_or_default();
         let run_status = format!("{} run configurations", run_configs.len()).into();
+        let theme = Theme::for_mode(ThemeMode::Dark);
+        let search_input = cx.new(|cx| {
+            TextInput::new(
+                "Search project files…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let search_subscription = cx.subscribe(&search_input, |app, _, event, cx| match event {
+            TextInputEvent::Submit(pattern) => {
+                app.start_search(pattern.clone(), cx);
+            }
+            TextInputEvent::Change(pattern) => {
+                app.search_pattern = pattern.clone();
+            }
+            TextInputEvent::Cancel => {
+                app.sidebar_mode = SidebarMode::Project;
+                cx.notify();
+            }
+            TextInputEvent::MoveSelection(_) => {}
+        });
         let mut app = Self {
             host,
             language_registry,
@@ -100,7 +137,7 @@ impl Workbench {
             subscriptions: HashMap::default(),
             diagnostic_servers: HashMap::default(),
             next_diagnostic_server: 1,
-            theme: Theme::for_mode(ThemeMode::Dark),
+            theme,
             status: status.into(),
             diagnostics: HashMap::default(),
             window_handle,
@@ -109,6 +146,12 @@ impl Workbench {
             running_run: None,
             run_output: String::new(),
             run_status,
+            sidebar_mode: SidebarMode::Project,
+            search_input,
+            search_pattern: String::new(),
+            search_results: Vec::new(),
+            search_status: "Type a pattern and press Enter".into(),
+            _search_subscription: search_subscription,
         };
         if let Some(document) = document {
             app.insert_document(document, &registry_for_initial, cx);
@@ -495,6 +538,89 @@ impl Workbench {
         cx.notify();
     }
 
+    fn start_search(&mut self, pattern: String, cx: &mut Context<Self>) {
+        let pattern = pattern.trim().to_owned();
+        if pattern.is_empty() {
+            self.search_results.clear();
+            self.search_status = "Type a pattern and press Enter".into();
+            cx.notify();
+            return;
+        }
+        self.search_results.clear();
+        self.search_status = format!("Searching for {pattern}…").into();
+        let query = ide_search::SearchQuery {
+            pattern,
+            is_regex: false,
+            case_sensitive: false,
+            whole_word: false,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            scope: ide_search::SearchScope::Project,
+            max_matches: 10_000,
+            context: ide_search::SearchContext::Any,
+        };
+        let host = self.host.clone();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let emit: ide_host::ops::Emit<ide_host::ops::search::SearchEvent> =
+            Arc::new(move |event| {
+                let _ = event_tx.send(event);
+            });
+        cx.spawn(async move |this, cx| {
+            let result = host.start_search(query, emit).await;
+            if let Err(error) = &result {
+                let handle = this
+                    .update(cx, |app, cx| {
+                        app.search_status = format!("Search failed: {}", error.message).into();
+                        cx.notify();
+                        app.window_handle
+                    })
+                    .ok()
+                    .flatten();
+                refresh_window(handle, cx);
+                return;
+            }
+            while let Some(event) = event_rx.recv().await {
+                let handle = this
+                    .update(cx, |app, cx| {
+                        match event {
+                            ide_host::ops::search::SearchEvent::File { file } => {
+                                app.search_results.push(file);
+                                app.search_status = format!(
+                                    "{} files, {} matches",
+                                    app.search_results.len(),
+                                    app.search_results
+                                        .iter()
+                                        .map(|file| file.matches.len())
+                                        .sum::<usize>()
+                                )
+                                .into();
+                            }
+                            ide_host::ops::search::SearchEvent::Done { summary } => {
+                                app.search_status = format!(
+                                    "{} files, {} matches{}",
+                                    summary.files,
+                                    summary.matches,
+                                    if summary.limit_hit {
+                                        " (limit reached)"
+                                    } else {
+                                        ""
+                                    }
+                                )
+                                .into();
+                            }
+                        }
+                        cx.notify();
+                        app.window_handle
+                    })
+                    .ok()
+                    .flatten();
+                refresh_window(handle, cx);
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub fn smoke_insert_marker(&mut self, marker: &str, cx: &mut Context<Self>) -> bool {
         let Some(doc) = self.active else {
             return false;
@@ -584,6 +710,19 @@ impl Workbench {
 
     pub fn smoke_run_output(&self) -> &str {
         &self.run_output
+    }
+
+    pub fn smoke_search(&mut self, pattern: &str, cx: &mut Context<Self>) {
+        self.sidebar_mode = SidebarMode::Search;
+        self.start_search(pattern.to_owned(), cx);
+    }
+
+    pub fn smoke_search_status(&self) -> String {
+        self.search_status.to_string()
+    }
+
+    pub fn smoke_search_files(&self) -> usize {
+        self.search_results.len()
     }
 
     pub fn smoke_has_language(&self, cx: &gpui::App) -> bool {
@@ -834,6 +973,100 @@ impl Workbench {
         .track_scroll(&self.tree_scroll)
     }
 
+    fn render_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let mut results = div()
+            .id("search-results")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (file_index, file) in self.search_results.iter().take(80).enumerate() {
+            let path = file.path.0.clone();
+            let open_app = cx.entity();
+            results = results.child(
+                div()
+                    .id(("search-file", file_index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(11.5))
+                    .text_color(theme.muted)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt).text_color(theme.text))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        open_app.update(cx, |app, cx| {
+                            app.open_path(path.clone(), cx);
+                        });
+                    })
+                    .child(div().flex_1().truncate().child(file.rel_path.clone()))
+                    .child(
+                        div()
+                            .text_color(theme.faint)
+                            .child(file.matches.len().to_string()),
+                    ),
+            );
+            for (match_index, line) in file.matches.iter().take(20).enumerate() {
+                let path = file.path.0.clone();
+                let open_app = cx.entity();
+                let line_number = line.line + 1;
+                results = results.child(
+                    div()
+                        .id(("search-match", file_index * 100 + match_index))
+                        .h(px(22.))
+                        .pl_5()
+                        .pr_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(11.5))
+                        .text_color(theme.text)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.panel_alt))
+                        .on_click(move |_: &ClickEvent, _, cx| {
+                            open_app.update(cx, |app, cx| {
+                                app.open_path(path.clone(), cx);
+                            });
+                        })
+                        .child(
+                            div()
+                                .w(px(34.))
+                                .text_color(theme.faint)
+                                .child(line_number.to_string()),
+                        )
+                        .child(div().flex_1().truncate().child(line.text.clone())),
+                );
+            }
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(34.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.search_input.clone()),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(10.5))
+                    .text_color(theme.faint)
+                    .child(self.search_status.clone()),
+            )
+            .child(results)
+            .into_any_element()
+    }
+
     fn render_run_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         if self.run_configs.is_empty() {
@@ -1009,6 +1242,11 @@ impl Render for Workbench {
             .filter(|_| self.split)
             .and_then(|doc| self.editors.get(&(doc, true)).cloned());
         let project = self.render_project(cx).into_any_element();
+        let search = self.render_search_panel(cx);
+        let sidebar_body = match self.sidebar_mode {
+            SidebarMode::Project => project,
+            SidebarMode::Search => search,
+        };
         let tabs = self.render_tabs(cx).into_any_element();
         let run_panel = self.render_run_panel(cx);
         div()
@@ -1048,14 +1286,63 @@ impl Render for Workbench {
                             .child(
                                 div()
                                     .h(px(30.))
-                                    .px_3()
+                                    .px_2()
                                     .flex()
                                     .items_center()
+                                    .gap_1()
                                     .text_size(px(11.))
-                                    .text_color(theme.muted)
-                                    .child("PROJECT"),
+                                    .child(
+                                        div()
+                                            .id("sidebar-project")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .text_color(
+                                                if self.sidebar_mode == SidebarMode::Project {
+                                                    theme.text
+                                                } else {
+                                                    theme.muted
+                                                },
+                                            )
+                                            .bg(if self.sidebar_mode == SidebarMode::Project {
+                                                theme.panel_alt
+                                            } else {
+                                                theme.panel
+                                            })
+                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                                this.sidebar_mode = SidebarMode::Project;
+                                                cx.notify();
+                                            }))
+                                            .child("PROJECT"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("sidebar-search")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .text_color(
+                                                if self.sidebar_mode == SidebarMode::Search {
+                                                    theme.text
+                                                } else {
+                                                    theme.muted
+                                                },
+                                            )
+                                            .bg(if self.sidebar_mode == SidebarMode::Search {
+                                                theme.panel_alt
+                                            } else {
+                                                theme.panel
+                                            })
+                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                                this.sidebar_mode = SidebarMode::Search;
+                                                cx.notify();
+                                            }))
+                                            .child("SEARCH"),
+                                    ),
                             )
-                            .child(div().flex_1().min_h(px(0.)).child(project)),
+                            .child(div().flex_1().min_h(px(0.)).child(sidebar_body)),
                     )
                     .child(
                         div()

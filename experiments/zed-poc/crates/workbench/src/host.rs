@@ -466,6 +466,24 @@ impl NativeHost {
     pub fn stop_run(&self, run: ide_core::RunId) -> IdeResult<()> {
         ide_host::ops::run::stop(&self.host, MAIN_WINDOW, run)
     }
+
+    pub async fn start_search(
+        &self,
+        query: ide_search::SearchQuery,
+        on_event: ide_host::ops::Emit<ide_host::ops::search::SearchEvent>,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::search::start(
+                &host,
+                MAIN_WINDOW,
+                ide_core::RequestId::next(),
+                query,
+                on_event,
+            )
+            .await
+        })
+        .await
+    }
 }
 
 impl Drop for NativeHost {

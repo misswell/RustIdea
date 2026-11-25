@@ -319,6 +319,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - a split view opens a second Zed `Editor` over the same `language::Buffer`;
 - a native Run tool window lists OpenIDEA run configurations, starts/stops a
   run, streams stdout/stderr/system output and shows the exit status;
+- a native Find in Files panel uses the shared GPUI `TextInput` and the
+  OpenIDEA `ops::search` streaming engine, with clickable file/line results;
 - buffer edits are sent incrementally to
   `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
   `DocPatched` events and diagnostics are applied back to Zed buffers;
@@ -326,22 +328,32 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   and the OpenIDEA Java outline query, because Zed's built-in language set does
   not include Java.
 
-Headless smoke test (real native window, real OpenIDEA host, Java file):
+Headless split/search smoke (real native window, real OpenIDEA host, Java file):
 
 ```text
 WORKBENCH_PROJECT_OPEN name=rustidea-java-workbench-completion trusted=true tree_rows=3 initial_doc=true
 WORKBENCH_DOC_OPEN doc=1 path=.../App.java language=java tabs=1
-WORKBENCH_COMPLETION count=1
+WORKBENCH_SMOKE status=jdtls: Ready language=true editors=2 run_status=2 run configurations run_output="" search_status=1 files, 6 matches search_files=1 text_prefix="// rustidea search smoke"
+```
+
+Run smoke on the same Java project:
+
+```text
+WORKBENCH_PROJECT_OPEN name=rustidea-java-workbench-smoke trusted=true tree_rows=3 initial_doc=true
+WORKBENCH_DOC_OPEN doc=1 path=.../App.java language=java tabs=1
 WORKBENCH_SMOKE status=jdtls: Ready language=true editors=2 run_status=Exited with Some(0) run_output="Process finished with exit code 0" text_prefix="// rustidea run smoke"
 ```
 
-`WORKBENCH_COMPLETION` is a real OpenIDEA jdtls completion request made through
+The workbench completion smoke produced `WORKBENCH_COMPLETION count=1` in a
+separate run. It is a real OpenIDEA jdtls completion request made through
 the workbench's `DocumentLsp`; it is not yet an onscreen menu acceptance test.
 `language=true` proves the buffer has an attached Zed tree-sitter language
 (including the custom Java registration), not merely an OpenIDEA language id.
 `editors=2` is the split view: two Zed editors over the same document buffer.
-`run_status=Exited with Some(0)` and the streamed final Maven line prove the
-workbench Run panel used the OpenIDEA Run service rather than a text-only stub.
+The search line proves the workbench Find in Files panel streamed results from
+the OpenIDEA search engine. A separate run smoke produced
+`run_status=Exited with Some(0)` and the final Maven output line, proving the
+Run panel used the OpenIDEA Run service rather than a text-only stub.
 
 The first line of the Java file on disk was the inserted marker after the
 process exited, so the multi-document workbench path exercised:

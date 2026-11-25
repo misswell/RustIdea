@@ -11,6 +11,7 @@ mod lsp;
 mod project;
 mod semantics;
 mod sync;
+mod text_input;
 mod theme;
 
 use std::path::PathBuf;
@@ -107,6 +108,34 @@ fn main() {
                 KeyBinding::new("cmd-w", CloseTab, None),
                 KeyBinding::new("cmd-\\", ToggleSplit, None),
             ]);
+            {
+                use text_input::{
+                    Backspace as InputBackspace, Cancel as InputCancel, Copy as InputCopy,
+                    Cut as InputCut, Delete as InputDelete, Down as InputDown, End as InputEnd,
+                    Home as InputHome, Left as InputLeft, Paste as InputPaste,
+                    Right as InputRight, SelectAll as InputSelectAll,
+                    SelectLeft as InputSelectLeft, SelectRight as InputSelectRight,
+                    Submit as InputSubmit, Up as InputUp,
+                };
+                cx.bind_keys([
+                    KeyBinding::new("backspace", InputBackspace, Some("TextInput")),
+                    KeyBinding::new("delete", InputDelete, Some("TextInput")),
+                    KeyBinding::new("left", InputLeft, Some("TextInput")),
+                    KeyBinding::new("right", InputRight, Some("TextInput")),
+                    KeyBinding::new("shift-left", InputSelectLeft, Some("TextInput")),
+                    KeyBinding::new("shift-right", InputSelectRight, Some("TextInput")),
+                    KeyBinding::new("home", InputHome, Some("TextInput")),
+                    KeyBinding::new("end", InputEnd, Some("TextInput")),
+                    KeyBinding::new("up", InputUp, Some("TextInput")),
+                    KeyBinding::new("down", InputDown, Some("TextInput")),
+                    KeyBinding::new("cmd-a", InputSelectAll, Some("TextInput")),
+                    KeyBinding::new("cmd-c", InputCopy, Some("TextInput")),
+                    KeyBinding::new("cmd-x", InputCut, Some("TextInput")),
+                    KeyBinding::new("cmd-v", InputPaste, Some("TextInput")),
+                    KeyBinding::new("enter", InputSubmit, Some("TextInput")),
+                    KeyBinding::new("escape", InputCancel, Some("TextInput")),
+                ]);
+            }
 
             let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
             let host = host.clone();
@@ -158,6 +187,7 @@ fn main() {
                 cx.activate(true);
                 let smoke_split = std::env::var_os("RUSTIDEA_ZED_SMOKE_SPLIT").is_some();
                 let smoke_run = std::env::var_os("RUSTIDEA_ZED_SMOKE_RUN").is_some();
+                let smoke_search = std::env::var("RUSTIDEA_ZED_SMOKE_SEARCH").ok();
                 let completion_position = std::env::var("RUSTIDEA_ZED_SMOKE_COMPLETION_POS")
                     .ok()
                     .and_then(|position| {
@@ -177,6 +207,9 @@ fn main() {
                                 if smoke_run {
                                     app.smoke_start_run(cx);
                                 }
+                                if let Some(pattern) = &smoke_search {
+                                    app.smoke_search(pattern, cx);
+                                }
                                 if let Some((line, column)) = completion_position {
                                     app.smoke_request_completion(line, column, cx);
                                 }
@@ -195,12 +228,14 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} text_prefix={:?}",
+                                    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
                                     app.smoke_run_status(),
                                     app.smoke_run_output().lines().last().unwrap_or_default(),
+                                    app.smoke_search_status(),
+                                    app.smoke_search_files(),
                                     app.smoke_active_text(cx).lines().next().unwrap_or_default()
                                 );
                                 cx.quit();
