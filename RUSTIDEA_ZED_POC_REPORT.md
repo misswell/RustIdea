@@ -436,7 +436,7 @@ Panel coverage at this commit:
 | TODO | working (comment scan/navigation/filters) | `ops::search` regex + comment context |
 | Dependencies | Maven/Gradle/sbt modules and libraries with filter | `ops::build::build_model` + `ide-build` |
 | Coverage | import lcov/JaCoCo/Go/SimpleCov reports, sort, file/directory percentages, project-tree badges, editor gutter highlights, file navigation | `ops::coverage::coverage_import`, Zed gutter highlights |
-| Bookmarks | F3 toggle at caret, navigable list, remove, per-project JSON persistence | local store + navigation |
+| Bookmarks | F3 toggle at caret, editor gutter marker, navigable list, remove, per-project JSON persistence | local store + navigation, Zed gutter highlights |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers | `ide-docker` |
 | GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, conversation comment, open in browser | `ide-github`, `ide-vcs` |
@@ -650,7 +650,7 @@ coverage_first="src/main/java/com/example/App.java" coverage_badges=7 coverage_g
 Bookmark smoke (F3 on line 1, then a fresh process reloading the same config):
 
 ```text
-bookmarks=1 bookmark_first="/private/tmp/rustidea-bookmark-smoke/src/main.rs:1"
+bookmarks=1 bookmark_first="/private/tmp/rustidea-bookmark-smoke/src/main.rs:1" bookmark_gutter=1
 bookmarks.json text="fn main() {"
 ```
 
@@ -829,8 +829,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   coverage, and the editor applies covered/partial/uncovered gutter highlights.
   Launching a configuration under coverage is still missing, and the gutter
   colors are smoke-verified through the Zed highlight API rather than a visual
-  screenshot. Bookmarks have a navigable
-  panel but no editor gutter marker yet. Services lists Docker objects and can
+  screenshot. Bookmarks have a navigable panel and an editor gutter marker
+  (also API-smoke-verified, not visually captured). Services lists Docker objects and can
   start/stop/restart containers, but logs, pull/prune, custom connections and
   Compose lifecycle controls are missing. GitHub lists and filters pull
   requests and shows details/checks/review comments/timeline and a unified

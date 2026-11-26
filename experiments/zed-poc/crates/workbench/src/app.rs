@@ -37,6 +37,7 @@ enum CoverageState {
 struct CoverageCovered;
 struct CoveragePartial;
 struct CoverageUncovered;
+struct BookmarkGutter;
 
 fn coverage_covered_color(_: &gpui::App) -> gpui::Hsla {
     gpui::hsla(0.36, 0.62, 0.46, 0.55)
@@ -48,6 +49,10 @@ fn coverage_partial_color(_: &gpui::App) -> gpui::Hsla {
 
 fn coverage_uncovered_color(_: &gpui::App) -> gpui::Hsla {
     gpui::hsla(0.0, 0.75, 0.52, 0.62)
+}
+
+fn bookmark_gutter_color(_: &gpui::App) -> gpui::Hsla {
+    gpui::hsla(0.58, 0.78, 0.58, 0.8)
 }
 
 fn coverage_runs(lines: &[ide_coverage::LineCoverage]) -> Vec<(CoverageState, (u32, u32))> {
@@ -739,6 +744,7 @@ pub struct Workbench {
     coverage_lookup: std::collections::HashMap<PathBuf, (u32, u32)>,
     coverage_line_files: std::collections::HashMap<PathBuf, Vec<ide_coverage::LineCoverage>>,
     coverage_gutter_runs: usize,
+    bookmark_gutter_runs: usize,
     coverage_status: gpui::SharedString,
     coverage_path_input: Entity<TextInput>,
     coverage_sort_lines: bool,
@@ -1551,6 +1557,7 @@ impl Workbench {
             coverage_lookup: std::collections::HashMap::new(),
             coverage_line_files: std::collections::HashMap::new(),
             coverage_gutter_runs: 0,
+            bookmark_gutter_runs: 0,
             coverage_status: "Import a coverage report to inspect it".into(),
             coverage_path_input,
             coverage_sort_lines: true,
@@ -3511,7 +3518,7 @@ impl Workbench {
                             app.coverage_lookup = lookup;
                             app.coverage_line_files = line_files;
                             app.coverage_suite = Some(suite);
-                            app.apply_coverage_to_open_editors(cx);
+                            app.apply_gutter_markers_to_open_editors(cx);
                         }
                         Err(error) => {
                             app.coverage_rows.clear();
@@ -3520,7 +3527,7 @@ impl Workbench {
                             app.coverage_suite = None;
                             app.coverage_status =
                                 format!("Coverage import failed: {}", error.message).into();
-                            app.apply_coverage_to_open_editors(cx);
+                            app.apply_gutter_markers_to_open_editors(cx);
                         }
                     }
                     cx.notify();
@@ -3534,16 +3541,44 @@ impl Workbench {
         cx.notify();
     }
 
-    fn apply_coverage_to_open_editors(&mut self, cx: &mut Context<Self>) {
+    fn apply_gutter_markers_to_open_editors(&mut self, cx: &mut Context<Self>) {
         let mut runs = 0;
+        let mut bookmark_runs = 0;
         for ((doc, _), editor) in &self.editors {
             let Some(document) = self.documents.get(doc) else {
                 continue;
             };
             runs +=
                 Self::apply_coverage_gutter(editor, &document.path, &self.coverage_line_files, cx);
+            bookmark_runs +=
+                Self::apply_bookmark_gutter(editor, &document.path, &self.bookmarks, cx);
         }
         self.coverage_gutter_runs = runs;
+        self.bookmark_gutter_runs = bookmark_runs;
+    }
+
+    fn apply_bookmark_gutter(
+        editor: &Entity<Editor>,
+        path: &std::path::Path,
+        bookmarks: &[crate::bookmarks::Bookmark],
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = path.to_string_lossy();
+        let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
+        let ranges = bookmarks
+            .iter()
+            .filter(|bookmark| bookmark.path == path)
+            .map(|bookmark| {
+                let anchor = snapshot.anchor_before(TextPoint::new(bookmark.line, 0));
+                anchor..anchor
+            })
+            .collect::<Vec<_>>();
+        let count = ranges.len();
+        editor.update(cx, |editor, cx| {
+            editor.highlight_gutter::<BookmarkGutter>(ranges, bookmark_gutter_color, cx);
+        });
+        count
     }
 
     fn apply_coverage_gutter(
@@ -4182,7 +4217,7 @@ impl Workbench {
             editor.set_code_action_provider(Some(Rc::new(OpenIdeaCodeActionProvider::new(lsp))));
         });
         self.editors.insert((doc, secondary), editor.clone());
-        self.apply_coverage_to_open_editors(cx);
+        self.apply_gutter_markers_to_open_editors(cx);
         Some(editor)
     }
 
@@ -4498,6 +4533,7 @@ impl Workbench {
         if self.sidebar_mode == SidebarMode::Bookmarks {
             self.bookmarks_status = format!("{} bookmarks", self.bookmarks.len()).into();
         }
+        self.apply_gutter_markers_to_open_editors(cx);
         cx.notify();
     }
 
@@ -4512,6 +4548,7 @@ impl Workbench {
             Ok(()) => format!("{} bookmarks", self.bookmarks.len()).into(),
             Err(error) => format!("Bookmark save failed: {error}").into(),
         };
+        self.apply_gutter_markers_to_open_editors(cx);
         cx.notify();
     }
 
@@ -7310,7 +7347,7 @@ impl Workbench {
     pub fn smoke_open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(doc) = self.active {
             self.ensure_editor(doc, false, window, cx);
-            self.apply_coverage_to_open_editors(cx);
+            self.apply_gutter_markers_to_open_editors(cx);
         }
     }
 
@@ -7335,6 +7372,10 @@ impl Workbench {
 
     pub fn coverage_gutter_run_count(&self) -> usize {
         self.coverage_gutter_runs
+    }
+
+    pub fn bookmark_gutter_run_count(&self) -> usize {
+        self.bookmark_gutter_runs
     }
 
     pub fn smoke_bookmark(&mut self, cx: &mut Context<Self>) {
