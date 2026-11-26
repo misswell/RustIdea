@@ -358,9 +358,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   `ops::db::save_sources`, connects them, browses schemas and tables from
   `ops::db::schemas`/`tables`, opens DataGrip-style query console files through
   `ops::db::console_path`/`consoles`, creates a `SELECT` console for a table,
-  shows table columns/indexes/foreign keys and DDL through
-  `ops::db::table_details`/`ddl`, and runs the statement at the caret from the
-  active SQL console through `ops::db::execute`;
+  lists saved consoles, shows table columns/indexes/foreign keys and DDL
+  through `ops::db::table_details`/`ddl`, and runs the statement at the caret
+  from the active SQL console through `ops::db::execute`;
 - HTTP parses the active `.http` file, lists requests, selects a named
   environment from `http-client(.private).env.json`, executes the selected
   request through `ide_http::run` with its variables resolved, shows status,
@@ -465,7 +465,7 @@ Panel coverage at this commit:
 | Git / VCS | working | `ide-vcs` + `ops::vcs` |
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
-| Database | source/connect/schema/table/console/query plus table details and DDL | `ops::db` |
+| Database | source/connect/schema/table/console list/query plus table details and DDL | `ops::db` |
 | HTTP Client | project `.http`/`.rest` collection list, file parse/run/response, environment selector, persisted response history with reopen/clear, plus unsaved multiline request editor with Send | `ide_http::run`, `ide_http::env`, `Project::http_history` |
 | Remote Host | SSH terminal, SFTP browse/preview/edit | `ops::term::spawn_ssh`, `SshManager` |
 | Notebook | viewer + cell edit/insert/delete/type + output JSON edit/clear + save/run all | `ops::notebook` |
@@ -1031,6 +1031,12 @@ db_status=main.active_users: 2 columns · 0 indexes · 0 foreign keys
 db_output starts with the pretty-printed TableDetails JSON followed by -- DDL
 ```
 
+Saved-console list smoke:
+
+```text
+WORKBENCH_DB_UI consoles=1 consoles_status="1 saved consoles"
+```
+
 Build smoke on the Maven project:
 
 ```text
@@ -1083,7 +1089,8 @@ ide-github: 12 passed; 0 failed
   metadata, auth helpers and multi-request tabs are missing. Database now
   creates SQLite sources and has schema/table browsing
   and console-file source editing, but typed connection editors for other
-  drivers, result grids and saved console history are missing. Coverage imports
+  drivers and result grids are missing, and query history is not browsable.
+  Coverage imports
   existing lcov, JaCoCo,
   Go and SimpleCov reports; project-tree badges show file and directory
   coverage, and the editor applies covered/partial/uncovered gutter highlights.

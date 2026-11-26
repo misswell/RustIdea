@@ -1042,6 +1042,8 @@ pub struct Workbench {
     db_tables: Vec<ide_db::TableInfo>,
     db_tables_status: gpui::SharedString,
     db_table_selected: usize,
+    db_console_files: Vec<PathBuf>,
+    db_consoles_status: gpui::SharedString,
     db_console_path: Option<PathBuf>,
     db_busy: bool,
     db_source_editor_open: bool,
@@ -2043,6 +2045,8 @@ impl Workbench {
             db_tables: Vec::new(),
             db_tables_status: "Select a data source to browse schemas".into(),
             db_table_selected: 0,
+            db_console_files: Vec::new(),
+            db_consoles_status: "Connect to load saved consoles".into(),
             db_console_path: None,
             db_busy: false,
             db_source_editor_open: false,
@@ -2754,6 +2758,8 @@ impl Workbench {
         self.db_tables.clear();
         self.db_schema_selected = 0;
         self.db_table_selected = 0;
+        self.db_console_files.clear();
+        self.db_consoles_status = "Connect to load saved consoles".into();
         self.db_console_path = None;
         self.refresh_db_browser(cx);
     }
@@ -2762,6 +2768,8 @@ impl Workbench {
         let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
             self.db_schemas.clear();
             self.db_tables.clear();
+            self.db_console_files.clear();
+            self.db_consoles_status = "Select a data source to load consoles".into();
             self.db_tables_status = "Select a data source to browse schemas".into();
             self.db_busy = false;
             cx.notify();
@@ -2770,6 +2778,8 @@ impl Workbench {
         if !self.db_connected.contains(&source.id) {
             self.db_schemas.clear();
             self.db_tables.clear();
+            self.db_console_files.clear();
+            self.db_consoles_status = "Connect to load saved consoles".into();
             self.db_tables_status = "Connect to browse schemas and tables".into();
             self.db_busy = false;
             cx.notify();
@@ -2777,6 +2787,7 @@ impl Workbench {
         }
         let id = source.id.clone();
         let host = self.host.clone();
+        self.load_db_consoles(id.clone(), cx);
         self.db_busy = true;
         self.db_tables_status = format!("Loading schemas of {}…", source.name).into();
         cx.spawn(async move |this, cx| {
@@ -2865,6 +2876,36 @@ impl Workbench {
         cx.notify();
     }
 
+    fn load_db_consoles(&mut self, id: String, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_consoles(id, false).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(consoles) => {
+                            app.db_console_files =
+                                consoles.into_iter().map(|path| path.0).collect();
+                            app.db_consoles_status =
+                                format!("{} saved consoles", app.db_console_files.len()).into();
+                        }
+                        Err(error) => {
+                            app.db_console_files.clear();
+                            app.db_consoles_status =
+                                format!("Console list failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn open_db_console(&mut self, create: bool, cx: &mut Context<Self>) {
         let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
             self.db_status = "No data source selected".into();
@@ -2872,6 +2913,7 @@ impl Workbench {
             return;
         };
         let id = source.id.clone();
+        let id_for_app = id.clone();
         let host = self.host.clone();
         self.db_busy = true;
         self.db_status = if create {
@@ -2894,6 +2936,7 @@ impl Workbench {
                         Ok(Some(path)) => {
                             app.db_console_path = Some(path.0.clone());
                             app.db_status = format!("Console: {}", path.0.display()).into();
+                            app.load_db_consoles(id_for_app.clone(), cx);
                             app.open_path(path.0.clone(), cx);
                         }
                         Ok(None) => {
@@ -2937,6 +2980,7 @@ impl Workbench {
             format!("{schema}.{}", table.name)
         };
         let id = source.id.clone();
+        let id_for_app = id.clone();
         let host = self.host.clone();
         self.db_busy = true;
         self.db_status = format!("Creating a query for {qualified}…").into();
@@ -2954,6 +2998,7 @@ impl Workbench {
                                     app.db_console_path = Some(path.0.clone());
                                     app.db_status =
                                         format!("Query console: {}", path.0.display()).into();
+                                    app.load_db_consoles(id_for_app.clone(), cx);
                                     app.open_path(path.0.clone(), cx);
                                 }
                             }
@@ -9178,6 +9223,14 @@ impl Workbench {
             .unwrap_or_default()
     }
 
+    pub fn db_console_count(&self) -> usize {
+        self.db_console_files.len()
+    }
+
+    pub fn db_consoles_status_text(&self) -> String {
+        self.db_consoles_status.to_string()
+    }
+
     pub fn db_output_first(&self) -> String {
         self.db_output.lines().next().unwrap_or_default().to_owned()
     }
@@ -12385,6 +12438,34 @@ impl Workbench {
                     .child(div().text_size(px(8.5)).text_color(theme.faint).child(kind)),
             );
         }
+        let mut console_rows = div()
+            .id("db-console-files")
+            .flex_none()
+            .max_h(px(88.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, path) in self.db_console_files.iter().take(100).enumerate() {
+            let path_for_app = path.clone();
+            let label = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            console_rows = console_rows.child(
+                div()
+                    .id(("db-console-file", index))
+                    .px_2()
+                    .py(px(1.))
+                    .text_size(px(9.5))
+                    .text_color(theme.muted)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_path(path_for_app.clone(), cx);
+                    }))
+                    .child(label),
+            );
+        }
         let mut lines: Vec<String> = self.db_output.lines().map(str::to_owned).collect();
         if lines.len() > 400 {
             lines.drain(..lines.len() - 400);
@@ -12637,6 +12718,19 @@ impl Workbench {
             )
             .child(schema_rows)
             .child(table_rows)
+            .child(
+                div()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(9.))
+                    .text_color(theme.faint)
+                    .child("CONSOLES")
+                    .child(div().flex_1())
+                    .child(self.db_consoles_status.clone()),
+            )
+            .child(console_rows)
             .child(output)
             .into_any_element()
     }

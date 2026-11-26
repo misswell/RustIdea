@@ -903,10 +903,12 @@ fn main() {
                                     app.smoke_active_text(cx).lines().next().unwrap_or_default()
                                 );
                                 eprintln!(
-                                    "WORKBENCH_DB_UI sources={} schemas={} tables={} status={:?} console={:?} output={:?}",
+                                    "WORKBENCH_DB_UI sources={} schemas={} tables={} consoles={} consoles_status={:?} status={:?} console={:?} output={:?}",
                                     app.db_source_count(),
                                     app.db_schema_count(),
                                     app.db_table_count(),
+                                    app.db_console_count(),
+                                    app.db_consoles_status_text(),
                                     app.db_tables_status_text(),
                                     app.db_console_path_text(),
                                     app.db_output_first()
