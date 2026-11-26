@@ -299,6 +299,11 @@ fn main() {
                 let smoke_http_editor_run =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_HTTP_EDITOR_RUN").is_some();
                 let smoke_db = std::env::var_os("RUSTIDEA_ZED_SMOKE_DB").is_some();
+                let smoke_db_browser =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_DB_BROWSER").is_some();
+                let smoke_db_console =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_DB_CONSOLE").is_some();
+                let smoke_db_query = std::env::var("RUSTIDEA_ZED_SMOKE_DB_QUERY").ok();
                 let smoke_remote = std::env::var_os("RUSTIDEA_ZED_SMOKE_REMOTE").is_some();
                 let smoke_agents = std::env::var_os("RUSTIDEA_ZED_SMOKE_AGENTS").is_some();
                 let smoke_tools = std::env::var_os("RUSTIDEA_ZED_SMOKE_TOOLS").is_some();
@@ -446,6 +451,15 @@ fn main() {
                                 }
                                 if smoke_db {
                                     app.smoke_db(cx);
+                                }
+                                if smoke_db_browser {
+                                    app.smoke_db_browser(cx);
+                                }
+                                if smoke_db_console {
+                                    app.smoke_db_console(cx);
+                                }
+                                if let Some(sql) = &smoke_db_query {
+                                    app.smoke_prepare_db_query(sql.clone(), cx);
                                 }
                                 if smoke_remote {
                                     app.smoke_remote(cx);
@@ -620,6 +634,9 @@ fn main() {
                             this.update_in(cx, |app, window, cx| {
                                 if !smoke_notebook_edit && smoke_usages.is_none() {
                                     app.smoke_save_active(cx);
+                                }
+                                if smoke_db_query.is_some() {
+                                    app.smoke_run_db_query(cx);
                                 }
                                 if smoke_notebook_edit {
                                     app.smoke_notebook_edit(window, cx);
@@ -831,6 +848,14 @@ fn main() {
                                     app.build_status(),
                                     app.build_output().lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default(),
                                     app.smoke_active_text(cx).lines().next().unwrap_or_default()
+                                );
+                                eprintln!(
+                                    "WORKBENCH_DB_UI schemas={} tables={} status={:?} console={:?} output={:?}",
+                                    app.db_schema_count(),
+                                    app.db_table_count(),
+                                    app.db_tables_status_text(),
+                                    app.db_console_path_text(),
+                                    app.db_output_first()
                                 );
                                 cx.quit();
                             })

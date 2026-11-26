@@ -55,6 +55,15 @@ fn bookmark_gutter_color(_: &gpui::App) -> gpui::Hsla {
     gpui::hsla(0.58, 0.78, 0.58, 0.8)
 }
 
+fn table_query(schema: &str, table: &str) -> String {
+    let qualified = if schema.is_empty() {
+        table.to_owned()
+    } else {
+        format!("{schema}.{table}")
+    };
+    format!("SELECT * FROM {qualified} LIMIT 200;\n")
+}
+
 fn coverage_runs(lines: &[ide_coverage::LineCoverage]) -> Vec<(CoverageState, (u32, u32))> {
     let mut runs = Vec::new();
     let mut current: Option<(CoverageState, u32, u32)> = None;
@@ -965,6 +974,13 @@ pub struct Workbench {
     db_sources: Vec<ide_db::DataSource>,
     db_connected: Vec<String>,
     db_selected: usize,
+    db_schemas: Vec<String>,
+    db_schema_selected: usize,
+    db_tables: Vec<ide_db::TableInfo>,
+    db_tables_status: gpui::SharedString,
+    db_table_selected: usize,
+    db_console_path: Option<PathBuf>,
+    db_busy: bool,
     db_status: gpui::SharedString,
     db_output: String,
     ssh_configs: Vec<ide_core::remote_settings::SshConfiguration>,
@@ -1886,6 +1902,13 @@ impl Workbench {
             db_sources: Vec::new(),
             db_connected: Vec::new(),
             db_selected: 0,
+            db_schemas: Vec::new(),
+            db_schema_selected: 0,
+            db_tables: Vec::new(),
+            db_tables_status: "Select a data source to browse schemas".into(),
+            db_table_selected: 0,
+            db_console_path: None,
+            db_busy: false,
             db_status: "Select DATABASE to load data sources".into(),
             db_output: String::new(),
             ssh_configs: Vec::new(),
@@ -2484,6 +2507,7 @@ impl Workbench {
             }
         }
         self.db_connected = connected.unwrap_or_default();
+        self.refresh_db_browser(cx);
         cx.notify();
     }
 
@@ -2495,6 +2519,7 @@ impl Workbench {
         };
         let host = self.host.clone();
         let id = source.id.clone();
+        let id_for_app = id.clone();
         self.db_status = format!("Connecting to {}…", source.name).into();
         cx.spawn(async move |this, cx| {
             let result = host.db_connect(id).await;
@@ -2505,6 +2530,237 @@ impl Workbench {
                         Err(error) => format!("Connect failed: {}", error.message).into(),
                     };
                     app.db_connected = app.host.db_connected().unwrap_or_default();
+                    if app.db_connected.contains(&id_for_app) {
+                        app.refresh_db_browser(cx);
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn select_db_source(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.db_selected = index;
+        self.db_schemas.clear();
+        self.db_tables.clear();
+        self.db_schema_selected = 0;
+        self.db_table_selected = 0;
+        self.db_console_path = None;
+        self.refresh_db_browser(cx);
+    }
+
+    fn refresh_db_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
+            self.db_schemas.clear();
+            self.db_tables.clear();
+            self.db_tables_status = "Select a data source to browse schemas".into();
+            self.db_busy = false;
+            cx.notify();
+            return;
+        };
+        if !self.db_connected.contains(&source.id) {
+            self.db_schemas.clear();
+            self.db_tables.clear();
+            self.db_tables_status = "Connect to browse schemas and tables".into();
+            self.db_busy = false;
+            cx.notify();
+            return;
+        }
+        let id = source.id.clone();
+        let host = self.host.clone();
+        self.db_busy = true;
+        self.db_tables_status = format!("Loading schemas of {}…", source.name).into();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_schemas(id.clone()).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(schemas) => {
+                            app.db_schemas = schemas;
+                            app.db_schema_selected = app
+                                .db_schema_selected
+                                .min(app.db_schemas.len().saturating_sub(1));
+                            if let Some(schema) =
+                                app.db_schemas.get(app.db_schema_selected).cloned()
+                            {
+                                app.load_db_tables(id.clone(), schema, cx);
+                            } else {
+                                app.db_tables.clear();
+                                app.db_tables_status = "No schemas".into();
+                                app.db_busy = false;
+                            }
+                        }
+                        Err(error) => {
+                            app.db_schemas.clear();
+                            app.db_tables.clear();
+                            app.db_tables_status =
+                                format!("Schema load failed: {}", error.message).into();
+                            app.db_busy = false;
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn select_db_schema(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
+            return;
+        };
+        let Some(schema) = self.db_schemas.get(index).cloned() else {
+            return;
+        };
+        self.db_schema_selected = index;
+        self.db_tables.clear();
+        self.db_table_selected = 0;
+        self.load_db_tables(source.id, schema, cx);
+    }
+
+    fn load_db_tables(&mut self, id: String, schema: String, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        self.db_busy = true;
+        self.db_tables_status = format!("Loading tables of {schema}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_tables(id, schema).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.db_busy = false;
+                    match result {
+                        Ok(tables) => {
+                            app.db_table_selected =
+                                app.db_table_selected.min(tables.len().saturating_sub(1));
+                            app.db_tables_status =
+                                format!("{} tables and views", tables.len()).into();
+                            app.db_tables = tables;
+                        }
+                        Err(error) => {
+                            app.db_tables.clear();
+                            app.db_tables_status =
+                                format!("Table load failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_db_console(&mut self, create: bool, cx: &mut Context<Self>) {
+        let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
+            self.db_status = "No data source selected".into();
+            cx.notify();
+            return;
+        };
+        let id = source.id.clone();
+        let host = self.host.clone();
+        self.db_busy = true;
+        self.db_status = if create {
+            format!("Creating a console for {}…", source.name).into()
+        } else {
+            format!("Opening the console of {}…", source.name).into()
+        };
+        cx.spawn(async move |this, cx| {
+            let result = if create {
+                host.db_consoles(id, true)
+                    .await
+                    .map(|consoles| consoles.into_iter().last())
+            } else {
+                host.db_console_path(id).await.map(Some)
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.db_busy = false;
+                    match result {
+                        Ok(Some(path)) => {
+                            app.db_console_path = Some(path.0.clone());
+                            app.db_status = format!("Console: {}", path.0.display()).into();
+                            app.open_path(path.0.clone(), cx);
+                        }
+                        Ok(None) => {
+                            app.db_status = "No query console was created".into();
+                        }
+                        Err(error) => {
+                            app.db_status = format!("Console failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn query_db_table(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
+            self.db_status = "No data source selected".into();
+            cx.notify();
+            return;
+        };
+        let Some(table) = self.db_tables.get(index).cloned() else {
+            self.db_status = "No table selected".into();
+            cx.notify();
+            return;
+        };
+        let schema = self
+            .db_schemas
+            .get(self.db_schema_selected)
+            .cloned()
+            .unwrap_or_default();
+        let sql = table_query(&schema, &table.name);
+        let qualified = if schema.is_empty() {
+            table.name.clone()
+        } else {
+            format!("{schema}.{}", table.name)
+        };
+        let id = source.id.clone();
+        let host = self.host.clone();
+        self.db_busy = true;
+        self.db_status = format!("Creating a query for {qualified}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_consoles(id, true).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.db_busy = false;
+                    match result {
+                        Ok(consoles) => match consoles.last() {
+                            Some(path) => {
+                                if let Err(error) = std::fs::write(&path.0, sql) {
+                                    app.db_status = format!("Console write failed: {error}").into();
+                                } else {
+                                    app.db_console_path = Some(path.0.clone());
+                                    app.db_status =
+                                        format!("Query console: {}", path.0.display()).into();
+                                    app.open_path(path.0.clone(), cx);
+                                }
+                            }
+                            None => {
+                                app.db_status = "No query console was created".into();
+                            }
+                        },
+                        Err(error) => {
+                            app.db_status = format!("Console failed: {}", error.message).into();
+                        }
+                    }
                     cx.notify();
                     app.window_handle
                 })
@@ -8181,6 +8437,85 @@ impl Workbench {
         self.select_sidebar(SidebarMode::Database, cx);
     }
 
+    pub fn smoke_db_browser(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Database, cx);
+        self.refresh_db(cx);
+        self.connect_selected_db(cx);
+    }
+
+    pub fn smoke_db_console(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Database, cx);
+        self.open_db_console(false, cx);
+    }
+
+    pub fn smoke_prepare_db_query(&mut self, sql: String, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Database, cx);
+        self.refresh_db(cx);
+        let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
+            self.db_status = "No data source selected".into();
+            cx.notify();
+            return;
+        };
+        let id = source.id.clone();
+        let host = self.host.clone();
+        self.db_status = "Creating a smoke query console…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_console_path(id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(path) => match std::fs::write(&path.0, sql) {
+                            Ok(()) => {
+                                app.db_console_path = Some(path.0.clone());
+                                app.db_status = format!("Smoke query: {}", path.0.display()).into();
+                                app.open_path(path.0.clone(), cx);
+                            }
+                            Err(error) => {
+                                app.db_status = format!("Console write failed: {error}").into();
+                            }
+                        },
+                        Err(error) => {
+                            app.db_status = format!("Console failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn smoke_run_db_query(&mut self, cx: &mut Context<Self>) {
+        self.run_selected_db_sql(cx);
+    }
+
+    pub fn db_schema_count(&self) -> usize {
+        self.db_schemas.len()
+    }
+
+    pub fn db_table_count(&self) -> usize {
+        self.db_tables.len()
+    }
+
+    pub fn db_tables_status_text(&self) -> String {
+        self.db_tables_status.to_string()
+    }
+
+    pub fn db_console_path_text(&self) -> String {
+        self.db_console_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn db_output_first(&self) -> String {
+        self.db_output.lines().next().unwrap_or_default().to_owned()
+    }
+
     pub fn smoke_remote(&mut self, cx: &mut Context<Self>) {
         self.select_sidebar(SidebarMode::Remote, cx);
     }
@@ -11072,8 +11407,7 @@ impl Workbench {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.panel_alt))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.db_selected = index;
-                        cx.notify();
+                        this.select_db_source(index, cx);
                     }))
                     .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if connected {
                         theme.accent
@@ -11087,6 +11421,73 @@ impl Workbench {
                             .text_color(theme.faint)
                             .child(format!("{:?}", source.driver).to_lowercase()),
                     ),
+            );
+        }
+        let mut schema_rows = div()
+            .id("db-schemas")
+            .flex_none()
+            .max_h(px(64.))
+            .overflow_y_scroll()
+            .px_2()
+            .py_1()
+            .flex()
+            .flex_wrap()
+            .gap_1();
+        for (index, schema) in self.db_schemas.iter().take(80).enumerate() {
+            let selected = index == self.db_schema_selected;
+            schema_rows = schema_rows.child(
+                div()
+                    .id(("db-schema", index))
+                    .px_1()
+                    .py(px(1.))
+                    .rounded_sm()
+                    .text_size(px(9.5))
+                    .text_color(if selected { theme.text } else { theme.faint })
+                    .bg(if selected {
+                        theme.accent_muted
+                    } else {
+                        theme.panel_alt
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.select_db_schema(index, cx);
+                    }))
+                    .child(schema.clone()),
+            );
+        }
+        let mut table_rows = div()
+            .id("db-tables")
+            .flex_none()
+            .max_h(px(150.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, table) in self.db_tables.iter().take(200).enumerate() {
+            let selected = index == self.db_table_selected;
+            let kind = format!("{:?}", table.kind).to_lowercase();
+            table_rows = table_rows.child(
+                div()
+                    .id(("db-table", index))
+                    .px_2()
+                    .py(px(1.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(10.))
+                    .text_color(if selected { theme.text } else { theme.muted })
+                    .bg(if selected {
+                        theme.panel_alt
+                    } else {
+                        theme.panel
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.db_table_selected = index;
+                        cx.notify();
+                    }))
+                    .child(div().flex_1().truncate().child(table.name.clone()))
+                    .child(div().text_size(px(8.5)).text_color(theme.faint).child(kind)),
             );
         }
         let mut lines: Vec<String> = self.db_output.lines().map(str::to_owned).collect();
@@ -11157,6 +11558,34 @@ impl Workbench {
                     )
                     .child(
                         div()
+                            .id("db-console")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.open_db_console(false, cx);
+                            }))
+                            .child("Console"),
+                    )
+                    .child(
+                        div()
+                            .id("db-new-console")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.open_db_console(true, cx);
+                            }))
+                            .child("New"),
+                    )
+                    .child(
+                        div()
                             .id("db-run")
                             .px_2()
                             .py_1()
@@ -11169,6 +11598,22 @@ impl Workbench {
                             }))
                             .child("Run SQL"),
                     )
+                    .child(
+                        div()
+                            .id("db-query-table")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                let index = this.db_table_selected;
+                                this.query_db_table(index, cx);
+                            }))
+                            .child("Query Table"),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
@@ -11179,6 +11624,20 @@ impl Workbench {
                     ),
             )
             .child(sources)
+            .child(
+                div()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(9.))
+                    .text_color(theme.faint)
+                    .child("SCHEMAS")
+                    .child(div().flex_1())
+                    .child(self.db_tables_status.clone()),
+            )
+            .child(schema_rows)
+            .child(table_rows)
             .child(output)
             .into_any_element()
     }
@@ -18148,6 +18607,15 @@ mod tests {
         assert_eq!(utf16_prefix("a😀b", 1), "a");
         assert_eq!(utf16_prefix("a😀b", 3), "a😀");
         assert_eq!(utf16_prefix("a😀b", 4), "a😀b");
+    }
+
+    #[test]
+    fn table_query_qualifies_only_a_non_empty_schema() {
+        assert_eq!(
+            table_query("main", "users"),
+            "SELECT * FROM main.users LIMIT 200;\n"
+        );
+        assert_eq!(table_query("", "users"), "SELECT * FROM users LIMIT 200;\n");
     }
 
     #[test]

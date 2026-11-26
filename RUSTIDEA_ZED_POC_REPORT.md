@@ -352,8 +352,11 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - Outline calls OpenIDEA's LSP/tree-sitter `doc_outline` and navigates
   selection; Problems aggregates real backend diagnostics and navigates to
   file/line;
-- Database lists OpenIDEA data sources, connects them, and runs the statement
-  at the caret from the active SQL document through `ops::db::execute`;
+- Database lists OpenIDEA data sources, connects them, browses schemas and
+  tables from `ops::db::schemas`/`tables`, opens DataGrip-style query console
+  files through `ops::db::console_path`/`consoles`, creates a `SELECT` console
+  for a table, and runs the statement at the caret from the active SQL console
+  through `ops::db::execute`;
 - HTTP parses the active `.http` file, lists requests, and executes the
   selected request through `ide_http::run`, showing status, headers and body;
 - Remote lists OpenIDEA SSH configurations, opens a real SSH PTY-backed
@@ -914,6 +917,21 @@ event/summary path, not a diagnostic result):
 inspect_problems=0 inspect_status=0 files · 0 problems · 2 skipped · 0 failed · 8 ms · scanned 0
 ```
 
+Database browser and console smoke on a SQLite fixture with `users` (3 rows)
+and `active_users`:
+
+```text
+WORKBENCH_DB_UI schemas=1 tables=2 status="2 tables and views"
+console="…/consoles/db/smoke-sqlite/console.sql" output="["
+db_status=3 row(s), 0.27 ms
+```
+
+The console file was opened in the Zed Editor and contained
+`SELECT name FROM users ORDER BY id;`; the active path in the smoke report was
+that console file. The query returned three rows through
+`ops::db::execute`. This verifies the schema/table lists, console creation and
+query path, not a visual result-grid acceptance.
+
 Build smoke on the Maven project:
 
 ```text
@@ -937,7 +955,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 61 passed; 0 failed
+documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 62 passed; 0 failed
 ```
 
 ## Not yet done
@@ -959,8 +977,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   are not yet integrated. MCP add/update/remove is wired for stdio, HTTP and
   SSE transports. Settings edits booleans and JSON scalars/lists/maps through a
   multiline editor; dedicated widgets for complex schemas are missing. HTTP has
-  an unsaved request editor with Send; Database has a query execution path but
-  no source editor. Coverage imports existing lcov, JaCoCo,
+  an unsaved request editor with Send; Database now has schema/table browsing
+  and console-file source editing, but typed source creation/editing forms,
+  result grids and saved console history are missing. Coverage imports existing lcov, JaCoCo,
   Go and SimpleCov reports; project-tree badges show file and directory
   coverage, and the editor applies covered/partial/uncovered gutter highlights.
   The coverage panel can launch the selected run configuration with coverage

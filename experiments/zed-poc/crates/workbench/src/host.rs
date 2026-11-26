@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
-use ide_core::{DocId, IdeEvent, IdeResult, SharedSink, TerminalId};
+use ide_core::{DocId, IdeEvent, IdeResult, IpcPath, SharedSink, TerminalId};
 use ide_host::{Host, HostConfig};
 use ide_language::{LanguageRegistry, Syntax};
 use ide_vfs::FileEntry;
@@ -560,6 +560,30 @@ impl NativeHost {
 
     pub fn db_connected(&self) -> IdeResult<Vec<String>> {
         ide_host::ops::db::connected(&self.host, MAIN_WINDOW)
+    }
+
+    pub async fn db_schemas(&self, id: String) -> IdeResult<Vec<String>> {
+        self.run(
+            move |host| async move { ide_host::ops::db::schemas(&host, MAIN_WINDOW, &id).await },
+        )
+        .await
+    }
+
+    pub async fn db_tables(&self, id: String, schema: String) -> IdeResult<Vec<ide_db::TableInfo>> {
+        self.run(move |host| async move {
+            ide_host::ops::db::tables(&host, MAIN_WINDOW, &id, &schema).await
+        })
+        .await
+    }
+
+    pub async fn db_console_path(&self, id: String) -> IdeResult<IpcPath> {
+        self.run(move |host| async move { ide_host::ops::db::console_path(&host, &id) })
+            .await
+    }
+
+    pub async fn db_consoles(&self, id: String, create: bool) -> IdeResult<Vec<IpcPath>> {
+        self.run(move |host| async move { ide_host::ops::db::consoles(&host, &id, create) })
+            .await
     }
 
     pub async fn db_connect(&self, id: String) -> IdeResult<()> {
