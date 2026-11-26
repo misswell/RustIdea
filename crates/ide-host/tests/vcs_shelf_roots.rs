@@ -30,6 +30,7 @@ async fn check_shelves(layout: &str) {
     for (i, root) in roots.iter().enumerate() {
         std::fs::create_dir_all(root.join("src")).unwrap();
         git(root, &["init", "-b", "main"]);
+        git(root, &["config", "core.autocrlf", "false"]);
         git(root, &["config", "user.name", "Test"]);
         git(root, &["config", "user.email", "test@example.com"]);
         std::fs::write(root.join("src/same.txt"), format!("base {i}\n")).unwrap();
