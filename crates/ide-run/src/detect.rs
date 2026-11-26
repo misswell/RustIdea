@@ -1387,7 +1387,12 @@ fn detect_php(root: &Path, out: &mut Vec<RunConfig>) {
         .as_ref()
         .and_then(|c| c.get("scripts"))
         .and_then(Json::as_object);
-    for name in scripts.into_iter().flat_map(|m| m.keys()) {
+    let mut script_names = scripts
+        .into_iter()
+        .flat_map(|scripts| scripts.keys())
+        .collect::<Vec<_>>();
+    script_names.sort();
+    for name in script_names {
         if is_composer_event(name) {
             continue;
         }
