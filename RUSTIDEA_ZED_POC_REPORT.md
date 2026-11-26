@@ -1101,6 +1101,10 @@ The root repository license and the stable `main` product remain Apache-2.0.
 The Preview is not a claim of production parity, is not merged into `main`,
 and does not replace the stable GPUI editor entry.
 
+The hardened runtime signature carries only the JIT and unsigned-executable-
+memory entitlements needed by the pinned tree-sitter/Wasmtime grammar engine.
+Without those entitlements macOS kills the app when a Java buffer is parsed.
+
 ## Not yet done
 
 - Replacing the existing RustIdea `Editor`/`DocumentBuffer` workbench entry with

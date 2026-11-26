@@ -59,6 +59,8 @@ Preview, not as a replacement for the stable GPUI product. The Preview:
   `NOTICE`, third-party notices and the pinned-source instructions;
 - records the exact RustIdea commit and Zed revision in
   `Contents/Resources/SOURCE_CODE.txt`;
+- is hardened-runtime signed with narrowly scoped JIT entitlements required by
+  the tree-sitter/Wasmtime grammar engine;
 - remains arm64-only for this first Preview build;
 - does not change the root `LICENSE`, does not merge the experiment into
   `main`, and does not replace the stable editor entry.

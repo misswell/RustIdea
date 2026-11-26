@@ -12,6 +12,7 @@ archive="$dist_dir/RustIdea-Zed-Preview-$app_version-macos-arm64.zip"
 upload_archive="$dist_dir/RustIdea-Zed-Preview-$app_version-macos-arm64-upload.zip"
 checksum_file="$archive.sha256"
 identity="${DEVELOPER_ID_APPLICATION:-Developer ID Application: Guofeng Liu (U8U443D7ZL)}"
+entitlements="$repo_root/scripts/zed-preview.entitlements"
 
 cd "$repo_root"
 
@@ -24,8 +25,19 @@ if [[ "$(lipo -archs "$app_bundle/Contents/MacOS/rustidea-zed-workbench")" != "a
   exit 1
 fi
 
-codesign --force --options runtime --timestamp --sign "$identity" "$app_bundle"
+codesign --force --options runtime --timestamp \
+  --entitlements "$entitlements" --sign "$identity" "$app_bundle"
 codesign --verify --deep --strict --verbose=2 "$app_bundle"
+
+signature_entitlements="$(codesign -d --entitlements - "$app_bundle" 2>/dev/null)"
+if ! printf '%s\n' "$signature_entitlements" | grep -q 'com.apple.security.cs.allow-jit'; then
+  echo "Signed app is missing the JIT entitlement required by Wasmtime." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$signature_entitlements" | grep -q 'com.apple.security.cs.allow-unsigned-executable-memory'; then
+  echo "Signed app is missing the unsigned executable memory entitlement." >&2
+  exit 1
+fi
 
 linked_libraries="$(otool -L "$app_bundle/Contents/MacOS/rustidea-zed-workbench")"
 if printf '%s\n' "$linked_libraries" | grep -Eiq 'webkit|webview|javascriptcore|tauri|wry'; then

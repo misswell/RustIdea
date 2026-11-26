@@ -44,6 +44,7 @@ cp "$repo_root/RUSTIDEA_ZED_LICENSE_AUDIT.md" "$resources/RUSTIDEA_ZED_LICENSE_A
 cp "$repo_root/RUSTIDEA_ZED_POC_REPORT.md" "$resources/RUSTIDEA_ZED_POC_REPORT.md"
 cp "$repo_root/RUSTIDEA_ZED_INTEGRATION_P0.md" "$resources/RUSTIDEA_ZED_INTEGRATION_P0.md"
 cp "$repo_root/scripts/fetch-zed.sh" "$resources/fetch-zed.sh"
+cp "$repo_root/scripts/zed-preview.entitlements" "$resources/zed-preview.entitlements"
 cp -R "$repo_root/third_party/zed/assets" "$resources/ZedAssets"
 
 cat > "$resources/README.txt" <<TEXT
@@ -66,6 +67,11 @@ Launch with a project directory:
 
 The app uses GPUI and Zed's native editor. It contains no WebView, WebKit,
 Tauri, React, CodeMirror, Monaco, or xterm.js runtime.
+
+The hardened runtime signature includes the Apple JIT entitlements required by
+the pinned tree-sitter/Wasmtime grammar engine. They are limited to
+com.apple.security.cs.allow-jit and
+com.apple.security.cs.allow-unsigned-executable-memory.
 TEXT
 
 cat > "$resources/SOURCE_CODE.txt" <<TEXT
