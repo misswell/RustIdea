@@ -256,7 +256,24 @@ pub(crate) async fn serve(
         }
     }
     if holding {
-        let _ = write.send(call("Fetch.disable", json!({})).1).await;
+        let (id, command) = call("Fetch.disable", json!({}));
+        if write.send(command).await.is_ok() {
+            let _ = tokio::time::timeout(REQUEST_TIMEOUT, async {
+                while let Some(Ok(message)) = read.next().await {
+                    let Some(reply) = message
+                        .to_text()
+                        .ok()
+                        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    else {
+                        continue;
+                    };
+                    if reply.get("id").and_then(Value::as_u64) == Some(id) {
+                        break;
+                    }
+                }
+            })
+            .await;
+        }
     }
     let _ = write.close().await;
 }
