@@ -8,6 +8,48 @@ pub struct ScratchFile {
     pub modified_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScratchTemplate {
+    pub label: &'static str,
+    pub extension: &'static str,
+    pub content: &'static str,
+}
+
+pub const TEMPLATES: &[ScratchTemplate] = &[
+    ScratchTemplate {
+        label: "Java",
+        extension: "java",
+        content: "public class Scratch {\n    public static void main(String[] args) {\n        System.out.println(\"Hello, world!\");\n    }\n}\n",
+    },
+    ScratchTemplate {
+        label: "Python",
+        extension: "py",
+        content: "def main():\n    print(\"Hello, world!\")\n\nif __name__ == \"__main__\":\n    main()\n",
+    },
+    ScratchTemplate {
+        label: "Rust",
+        extension: "rs",
+        content: "fn main() {\n    println!(\"Hello, world!\");\n}\n",
+    },
+    ScratchTemplate {
+        label: "JS",
+        extension: "js",
+        content: "console.log(\"Hello, world!\");\n",
+    },
+    ScratchTemplate {
+        label: "Markdown",
+        extension: "md",
+        content: "# Scratch\n\n",
+    },
+];
+
+pub fn template_for(extension: &str) -> Option<&'static ScratchTemplate> {
+    TEMPLATES.iter().find(|template| {
+        template.extension.eq_ignore_ascii_case(extension)
+            || template.label.eq_ignore_ascii_case(extension)
+    })
+}
+
 pub fn sanitize_file_name(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() || raw == "." || raw == ".." || raw.contains('/') || raw.contains('\\') {
@@ -77,5 +119,24 @@ mod tests {
         let files = list(dir.path());
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].name, "new.md");
+    }
+
+    #[test]
+    fn templates_cover_common_languages_with_unique_extensions() {
+        assert!(template_for("java").is_some());
+        assert!(template_for("RUST").is_some());
+        assert!(template_for("").is_none());
+        let mut extensions: Vec<_> = TEMPLATES
+            .iter()
+            .map(|template| template.extension)
+            .collect();
+        extensions.sort_unstable();
+        extensions.dedup();
+        assert_eq!(extensions.len(), TEMPLATES.len());
+        assert!(
+            TEMPLATES
+                .iter()
+                .all(|template| !template.content.is_empty() && !template.label.is_empty())
+        );
     }
 }

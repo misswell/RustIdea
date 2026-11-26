@@ -6742,7 +6742,24 @@ impl Workbench {
 
     fn create_scratch(&mut self, cx: &mut Context<Self>) {
         let raw = self.scratch_name_input.read(cx).content().trim().to_owned();
-        let Some(name) = crate::scratch::sanitize_file_name(&raw) else {
+        self.create_scratch_with(&raw, "", cx);
+        if self.scratch_status.starts_with("Created") || self.scratch_status.starts_with("Opened") {
+            self.scratch_name_input
+                .update(cx, |input, cx| input.set_content("", cx));
+        }
+    }
+
+    fn create_scratch_template(&mut self, extension: &str, template: &str, cx: &mut Context<Self>) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        let name = format!("scratch-{stamp}.{extension}");
+        self.create_scratch_with(&name, template, cx);
+    }
+
+    fn create_scratch_with(&mut self, raw: &str, template: &str, cx: &mut Context<Self>) {
+        let Some(name) = crate::scratch::sanitize_file_name(raw) else {
             self.scratch_status = "Enter a flat file name without path separators".into();
             cx.notify();
             return;
@@ -6753,7 +6770,16 @@ impl Workbench {
             .create_new(true)
             .open(&path)
         {
-            Ok(_) => true,
+            Ok(mut file) => {
+                if !template.is_empty()
+                    && let Err(error) = std::io::Write::write_all(&mut file, template.as_bytes())
+                {
+                    self.scratch_status = format!("Could not write scratch: {error}").into();
+                    cx.notify();
+                    return;
+                }
+                true
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
             Err(error) => {
                 self.scratch_status = format!("Could not create scratch: {error}").into();
@@ -6766,8 +6792,6 @@ impl Workbench {
         } else {
             format!("Opened existing {name}").into()
         };
-        self.scratch_name_input
-            .update(cx, |input, cx| input.set_content("", cx));
         self.refresh_scratches(cx);
         self.open_path(path, cx);
     }
@@ -7865,6 +7889,15 @@ impl Workbench {
             input.set_content(name, cx);
         });
         self.create_scratch(cx);
+    }
+
+    pub fn smoke_scratch_template(&mut self, extension: String, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Scratch, cx);
+        let template = crate::scratch::template_for(&extension);
+        let (extension, content) = template
+            .map(|template| (template.extension, template.content))
+            .unwrap_or((extension.as_str(), "// scratch template smoke\n"));
+        self.create_scratch_template(extension, content, cx);
     }
 
     pub fn scratch_count(&self) -> usize {
@@ -13279,6 +13312,43 @@ impl Workbench {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(self.scratch_name_input.clone()),
+            )
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child("Templates"),
+                    )
+                    .children(crate::scratch::TEMPLATES.iter().enumerate().map(
+                        |(index, template)| {
+                            div()
+                                .id(("scratch-template", index))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(theme.panel_alt)
+                                .text_size(px(8.5))
+                                .text_color(theme.text)
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.create_scratch_template(
+                                        template.extension,
+                                        template.content,
+                                        cx,
+                                    );
+                                }))
+                                .child(template.label)
+                        },
+                    )),
             )
             .child(rows)
             .child(

@@ -344,6 +344,8 @@ fn main() {
                 let smoke_profile = std::env::var("RUSTIDEA_ZED_SMOKE_PROFILE").ok();
                 let smoke_logcat = std::env::var("RUSTIDEA_ZED_SMOKE_LOGCAT").ok();
                 let smoke_scratch = std::env::var("RUSTIDEA_ZED_SMOKE_SCRATCH").ok();
+                let smoke_scratch_template =
+                    std::env::var("RUSTIDEA_ZED_SMOKE_SCRATCH_TEMPLATE").ok();
                 let smoke_recent = std::env::var_os("RUSTIDEA_ZED_SMOKE_RECENT").is_some();
                 let smoke_save_as = std::env::var("RUSTIDEA_ZED_SMOKE_SAVE_AS").ok();
                 let smoke_analysis =
@@ -493,6 +495,9 @@ fn main() {
                                 }
                                 if let Some(name) = &smoke_scratch {
                                     app.smoke_scratch(name.clone(), cx);
+                                }
+                                if let Some(extension) = &smoke_scratch_template {
+                                    app.smoke_scratch_template(extension.clone(), cx);
                                 }
                                 if smoke_recent {
                                     app.smoke_recent(cx);

@@ -443,7 +443,7 @@ Panel coverage at this commit:
 | Heap | import `.hprof`, class table, class object pages, GC-root path | `ops::heap::debug_heap_open/classes/dominators/path` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, source navigation | `ide-profiler` |
 | Logcat | adb devices, streaming threadtime log, level/text filters | `adb` process |
-| Scratch | list/create/edit scratch files in the app data directory | local workspace + `ops::doc` |
+| Scratch | list/create/edit scratch files and Java/Python/Rust/JS/Markdown templates in the app data directory | local workspace + `ops::doc` |
 | Recent Files | per-project MRU list persisted in app config | local store |
 | Save a Copy | writes the active unsaved buffer text to a chosen path | `save_file_copy` |
 | Analysis | Locate Duplicates + structural search + replace + Inspect Code | `ops::analysis` duplicates/structural/inspect, `Documents` edits |
@@ -741,6 +741,15 @@ scratch_files=1 scratch_status=1 scratch files
 scratch_first="notes.md"
 ```
 
+Scratch template smoke (Java):
+
+```text
+scratch_files=2 scratch_status=2 scratch files
+scratch_first="scratch-1795653375.java"
+```
+
+The new file contained the Java template (`public class Scratch { … }`).
+
 Recent files smoke after opening one file:
 
 ```text
@@ -810,7 +819,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff: 54 passed; 0 failed
+documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff: 55 passed; 0 failed
 ```
 
 ## Not yet done
@@ -851,8 +860,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   recording new profiles, Python/JVM/perf formats and the call-tree view are
   missing. Logcat lists devices, streams and filters threadtime output, but the
   Android Studio query grammar, filter history and log export are missing. The
-  Scratch panel lists and creates files, but the language chooser and template
-  shortcuts are missing. Save As currently saves a copy: the OpenIDEA document
+  Scratch panel lists and creates files with Java/Python/Rust/JS/Markdown
+  template shortcuts; a full language chooser is still missing. Save As currently saves a copy: the OpenIDEA document
   layer only supports re-keying untitled buffers, not renaming an existing file.
   Analysis runs Locate Duplicates, structural search, structural replacement
   and Inspect Code. Replace uses the OpenIDEA document layer and saves files
