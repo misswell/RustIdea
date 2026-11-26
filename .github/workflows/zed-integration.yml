@@ -1,0 +1,41 @@
+name: Zed Integration
+
+on:
+  push:
+    branches: [integration/zed-workbench, experiment/zed-editor]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gpl-poc:
+    name: macOS Zed POC
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      RUSTFLAGS: -C debuginfo=0
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: experiments/zed-poc
+          cache-on-failure: true
+
+      - name: Fetch pinned Zed and apply tree-sitter patch
+        run: scripts/fetch-zed.sh
+
+      - name: Check POC workspace
+        working-directory: experiments/zed-poc
+        run: cargo check --locked -p rustidea-zed-workbench
+
+      - name: Run POC tests
+        working-directory: experiments/zed-poc
+        run: cargo test --locked -p rustidea-zed-workbench
+
+      - name: Run POC Clippy
+        working-directory: experiments/zed-poc
+        run: cargo clippy --locked -p rustidea-zed-workbench --all-targets -- -D warnings
