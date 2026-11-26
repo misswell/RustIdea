@@ -8,7 +8,7 @@
 
 use ide_language::LanguageServerConfig;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Touched each time jdtls starts on a workspace.
 const USED_MARKER: &str = ".openidea-last-used";
@@ -32,8 +32,12 @@ pub fn mark_used(cfg: &LanguageServerConfig) {
         return;
     };
     let dir = Path::new(dir);
-    if let Err(e) =
-        std::fs::create_dir_all(dir).and_then(|()| std::fs::write(dir.join(USED_MARKER), b""))
+    let used_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Err(e) = std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(dir.join(USED_MARKER), used_at.to_string()))
     {
         tracing::debug!("jdtls: cannot mark {} as used: {e}", dir.display());
     }
@@ -43,15 +47,25 @@ pub fn mark_used(cfg: &LanguageServerConfig) {
 /// jdtls itself touches while it runs and when it saves on exit (a server can run for weeks).
 fn last_used(dir: &Path) -> Option<SystemTime> {
     let metadata = dir.join(".metadata");
-    [
-        dir.join(USED_MARKER),
+    let marker = dir.join(USED_MARKER);
+    let marker_used = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
+        .or_else(|| {
+            std::fs::metadata(&marker)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        });
+    let mut times = vec![marker_used];
+    for path in [
         metadata.join(".log"),
         metadata.join(".plugins").join("org.eclipse.core.resources"),
         metadata,
-    ]
-    .into_iter()
-    .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-    .max()
+    ] {
+        times.push(std::fs::metadata(path).and_then(|m| m.modified()).ok());
+    }
+    times.into_iter().flatten().max()
 }
 
 /// Moves the workspaces unused for longer than `max_age` aside, before any server starts, and
@@ -115,6 +129,13 @@ mod tests {
 
     /// Back-dates a file, or (on Unix, where a folder opens as a file) a folder.
     fn age(path: &Path, days: u64) {
+        if path.file_name().is_some_and(|name| name == USED_MARKER) {
+            let used_at = days_ago(days)
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            std::fs::write(path, used_at.to_string()).unwrap();
+        }
         let file = if path.is_dir() {
             std::fs::File::open(path)
         } else {
