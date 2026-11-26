@@ -318,6 +318,10 @@ fn main() {
                 let smoke_dependencies =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_DEPENDENCIES").is_some();
                 let smoke_coverage = std::env::var("RUSTIDEA_ZED_SMOKE_COVERAGE").ok();
+                let smoke_coverage_run =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_COVERAGE_RUN").is_some();
+                let smoke_coverage_run_name = std::env::var("RUSTIDEA_ZED_SMOKE_RUN_NAME")
+                    .unwrap_or_else(|_| "test".into());
                 let smoke_bookmark =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_BOOKMARK").is_some();
                 let smoke_git_log = std::env::var_os("RUSTIDEA_ZED_SMOKE_GIT_LOG").is_some();
@@ -455,6 +459,13 @@ fn main() {
                                     app.smoke_open_editor(window, cx);
                                     app.smoke_coverage(path.clone(), cx);
                                 }
+                                if smoke_coverage_run {
+                                    app.smoke_open_editor(window, cx);
+                                    app.smoke_run_with_coverage_for(
+                                        &smoke_coverage_run_name,
+                                        cx,
+                                    );
+                                }
                                 if smoke_bookmark {
                                     app.smoke_open_editor(window, cx);
                                     app.smoke_bookmark(cx);
@@ -555,7 +566,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} coverage_badges={} coverage_gutter={} bookmarks={} bookmark_status={} bookmark_first={:?} bookmark_gutter={} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} github_prs={} github_status={} github_first={:?} github_detail={} github_comments={} github_timeline={} github_review={} github_diff_files={} github_diff_lines={} github_diff_status={} github_detail_status={} heap_classes={} heap_object_rows={} heap_objects_status={} heap_object_first={:?} heap_status={} heap_first={:?} profile_methods={} profile_status={} profile_first={:?} logcat_lines={} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} duplicate_groups={} duplicate_status={} duplicate_first={:?} structural_matches={} structural_status={} structural_apply={} structural_first={:?} inspect_problems={} inspect_status={} inspect_first={:?} active_path={} status={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
+    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} coverage_badges={} coverage_gutter={} coverage_run_busy={} bookmarks={} bookmark_status={} bookmark_first={:?} bookmark_gutter={} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} github_prs={} github_status={} github_first={:?} github_detail={} github_comments={} github_timeline={} github_review={} github_diff_files={} github_diff_lines={} github_diff_status={} github_detail_status={} heap_classes={} heap_object_rows={} heap_objects_status={} heap_object_first={:?} heap_status={} heap_first={:?} profile_methods={} profile_status={} profile_first={:?} logcat_lines={} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} duplicate_groups={} duplicate_status={} duplicate_first={:?} structural_matches={} structural_status={} structural_apply={} structural_first={:?} inspect_problems={} inspect_status={} inspect_first={:?} active_path={} status={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -576,6 +587,7 @@ fn main() {
                                     app.coverage_first(),
                                     app.coverage_badge_count(),
                                     app.coverage_gutter_run_count(),
+                                    app.coverage_run_busy(),
                                     app.bookmark_count(),
                                     app.bookmark_status(),
                                     app.bookmark_first(),

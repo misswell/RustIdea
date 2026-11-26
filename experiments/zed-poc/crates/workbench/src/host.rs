@@ -613,6 +613,12 @@ impl NativeHost {
         ide_host::ops::run::stop(&self.host, MAIN_WINDOW, run)
     }
 
+    pub fn run_is_active(&self, run: ide_core::RunId) -> bool {
+        ide_host::ops::run::list(&self.host)
+            .iter()
+            .any(|info| info.id == run && info.running)
+    }
+
     pub async fn spawn_terminal(
         &self,
         options: ide_terminal::TerminalOptions,
@@ -844,6 +850,26 @@ impl NativeHost {
     pub async fn coverage_import(&self, path: PathBuf) -> IdeResult<ide_coverage::CoverageSuite> {
         self.run(move |host| async move {
             ide_host::ops::coverage::coverage_import(&host, MAIN_WINDOW, path.into()).await
+        })
+        .await
+    }
+
+    pub async fn coverage_prepare(
+        &self,
+        config: ide_run::RunConfig,
+    ) -> IdeResult<ide_coverage::CoveragePrepared> {
+        self.run(move |host| async move {
+            ide_host::ops::coverage::coverage_prepare(&host, MAIN_WINDOW, config).await
+        })
+        .await
+    }
+
+    pub async fn coverage_collect(
+        &self,
+        report: ide_coverage::CoverageReportSpec,
+    ) -> IdeResult<ide_coverage::CoverageSuite> {
+        self.run(move |host| async move {
+            ide_host::ops::coverage::coverage_collect(&host, MAIN_WINDOW, report).await
         })
         .await
     }

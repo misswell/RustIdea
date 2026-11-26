@@ -83,6 +83,19 @@ fn coverage_runs(lines: &[ide_coverage::LineCoverage]) -> Vec<(CoverageState, (u
     runs
 }
 
+fn push_run_chunk(output: &mut String, chunk: ide_run::OutputChunk) {
+    let text = match chunk {
+        ide_run::OutputChunk::Stdout { text }
+        | ide_run::OutputChunk::Stderr { text }
+        | ide_run::OutputChunk::System { text } => text,
+    };
+    output.push_str(&text);
+    if output.len() > 2_000_000 {
+        let split = output.len().saturating_sub(1_800_000);
+        output.drain(..split);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarMode {
     Project,
@@ -745,6 +758,7 @@ pub struct Workbench {
     coverage_line_files: std::collections::HashMap<PathBuf, Vec<ide_coverage::LineCoverage>>,
     coverage_gutter_runs: usize,
     bookmark_gutter_runs: usize,
+    coverage_run_busy: bool,
     coverage_status: gpui::SharedString,
     coverage_path_input: Entity<TextInput>,
     coverage_sort_lines: bool,
@@ -1558,6 +1572,7 @@ impl Workbench {
             coverage_line_files: std::collections::HashMap::new(),
             coverage_gutter_runs: 0,
             bookmark_gutter_runs: 0,
+            coverage_run_busy: false,
             coverage_status: "Import a coverage report to inspect it".into(),
             coverage_path_input,
             coverage_sort_lines: true,
@@ -3502,23 +3517,7 @@ impl Workbench {
                 .update(cx, |app, cx| {
                     match result {
                         Ok(suite) => {
-                            let mut rows = crate::coverage::coverage_rows(&root, &suite);
-                            crate::coverage::sort_rows(&mut rows, app.coverage_sort_lines);
-                            let lookup = crate::coverage::lookup(&root, &suite);
-                            let line_files = crate::coverage::line_files(&root, &suite);
-                            let (covered, total, _, _) = crate::coverage::totals(&suite.files);
-                            app.coverage_status = format!(
-                                "{} · {} files · {} lines",
-                                suite.runner,
-                                suite.files.len(),
-                                crate::coverage::format_percent(covered, total)
-                            )
-                            .into();
-                            app.coverage_rows = rows;
-                            app.coverage_lookup = lookup;
-                            app.coverage_line_files = line_files;
-                            app.coverage_suite = Some(suite);
-                            app.apply_gutter_markers_to_open_editors(cx);
+                            app.set_coverage_suite(root.clone(), suite, cx);
                         }
                         Err(error) => {
                             app.coverage_rows.clear();
@@ -3528,6 +3527,177 @@ impl Workbench {
                             app.coverage_status =
                                 format!("Coverage import failed: {}", error.message).into();
                             app.apply_gutter_markers_to_open_editors(cx);
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn set_coverage_suite(
+        &mut self,
+        root: PathBuf,
+        suite: ide_coverage::CoverageSuite,
+        cx: &mut Context<Self>,
+    ) {
+        let mut rows = crate::coverage::coverage_rows(&root, &suite);
+        crate::coverage::sort_rows(&mut rows, self.coverage_sort_lines);
+        let lookup = crate::coverage::lookup(&root, &suite);
+        let line_files = crate::coverage::line_files(&root, &suite);
+        let (covered, total, _, _) = crate::coverage::totals(&suite.files);
+        self.coverage_status = format!(
+            "{} · {} files · {} lines",
+            suite.runner,
+            suite.files.len(),
+            crate::coverage::format_percent(covered, total)
+        )
+        .into();
+        self.coverage_rows = rows;
+        self.coverage_lookup = lookup;
+        self.coverage_line_files = line_files;
+        self.coverage_suite = Some(suite);
+        self.apply_gutter_markers_to_open_editors(cx);
+    }
+
+    fn run_with_coverage(&mut self, cx: &mut Context<Self>) {
+        if self.coverage_run_busy {
+            return;
+        }
+        let Some(config) = self.run_configs.get(self.selected_run).cloned() else {
+            self.coverage_status = "No run configuration selected".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.coverage_run_busy = true;
+        self.coverage_status = format!("Preparing coverage for {}…", config.name).into();
+        cx.spawn(async move |this, cx| {
+            let prepared = host.coverage_prepare(config).await;
+            let Some((runner, launch, report)) = (match prepared {
+                Ok(ide_coverage::CoveragePrepared::Ready {
+                    runner,
+                    launch,
+                    report,
+                }) => Some((runner, launch, report)),
+                Ok(ide_coverage::CoveragePrepared::MissingTool {
+                    message, install, ..
+                }) => {
+                    let status = if let Some(install) = install {
+                        format!(
+                            "{} Install: {} {}",
+                            message,
+                            install.command,
+                            install.args.join(" ")
+                        )
+                    } else {
+                        message
+                    };
+                    let handle = this
+                        .update(cx, |app, cx| {
+                            app.coverage_run_busy = false;
+                            app.coverage_status = status.into();
+                            cx.notify();
+                            app.window_handle
+                        })
+                        .ok()
+                        .flatten();
+                    refresh_window(handle, cx);
+                    return;
+                }
+                Ok(ide_coverage::CoveragePrepared::Unsupported { reason }) => {
+                    let handle = this
+                        .update(cx, |app, cx| {
+                            app.coverage_run_busy = false;
+                            app.coverage_status = format!("Coverage unsupported: {reason}").into();
+                            cx.notify();
+                            app.window_handle
+                        })
+                        .ok()
+                        .flatten();
+                    refresh_window(handle, cx);
+                    return;
+                }
+                Err(error) => {
+                    let handle = this
+                        .update(cx, |app, cx| {
+                            app.coverage_run_busy = false;
+                            app.coverage_status =
+                                format!("Coverage preparation failed: {}", error.message).into();
+                            cx.notify();
+                            app.window_handle
+                        })
+                        .ok()
+                        .flatten();
+                    refresh_window(handle, cx);
+                    return;
+                }
+            }) else {
+                return;
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.coverage_status = format!("Running {runner}…").into();
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+            let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+            let emit: ide_host::ops::Emit<ide_run::OutputChunk> = Arc::new(move |chunk| {
+                let _ = out_tx.send(chunk);
+            });
+            let start = host.start_run(*launch, emit).await;
+            let mut output = String::new();
+            let mut timed_out = false;
+            if let Ok(info) = &start {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                loop {
+                    while let Ok(chunk) = out_rx.try_recv() {
+                        push_run_chunk(&mut output, chunk);
+                    }
+                    if !host.run_is_active(info.id) {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        timed_out = true;
+                        let _ = host.stop_run(info.id);
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
+                }
+                while let Ok(chunk) = out_rx.try_recv() {
+                    push_run_chunk(&mut output, chunk);
+                }
+            }
+            let result = if timed_out {
+                Err(ide_core::IdeError::internal(
+                    "coverage run exceeded the 10-minute limit",
+                ))
+            } else {
+                match start {
+                    Ok(_) => host.coverage_collect(report).await,
+                    Err(error) => Err(error),
+                }
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.coverage_run_busy = false;
+                    app.run_output = output;
+                    match result {
+                        Ok(suite) => app.set_coverage_suite(root.clone(), suite, cx),
+                        Err(error) => {
+                            app.coverage_status =
+                                format!("Coverage run failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -7372,6 +7542,27 @@ impl Workbench {
 
     pub fn coverage_gutter_run_count(&self) -> usize {
         self.coverage_gutter_runs
+    }
+
+    pub fn smoke_run_with_coverage(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        if let Some(index) = index {
+            self.selected_run = index;
+        }
+        self.select_sidebar(SidebarMode::Coverage, cx);
+        self.run_with_coverage(cx);
+    }
+
+    pub fn smoke_run_with_coverage_for(&mut self, needle: &str, cx: &mut Context<Self>) {
+        let needle = needle.to_lowercase();
+        let index = self.run_configs.iter().position(|config| {
+            config.name.to_lowercase().contains(&needle)
+                || config.command.to_lowercase().contains(&needle)
+        });
+        self.smoke_run_with_coverage(index, cx);
+    }
+
+    pub fn coverage_run_busy(&self) -> bool {
+        self.coverage_run_busy
     }
 
     pub fn bookmark_gutter_run_count(&self) -> usize {
@@ -14524,6 +14715,29 @@ impl Workbench {
                                 this.import_coverage(cx);
                             }))
                             .child("Import"),
+                    )
+                    .child(
+                        div()
+                            .id("coverage-run")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.coverage_run_busy {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.run_with_coverage(cx);
+                            }))
+                            .child(if self.coverage_run_busy {
+                                "Running…"
+                            } else {
+                                "Run with Coverage"
+                            }),
                     )
                     .child(
                         div()

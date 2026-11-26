@@ -435,7 +435,7 @@ Panel coverage at this commit:
 | Replace in Files | working (all current matches, preserve case) | `ops::search::replace_in_files` |
 | TODO | working (comment scan/navigation/filters) | `ops::search` regex + comment context |
 | Dependencies | Maven/Gradle/sbt modules and libraries with filter | `ops::build::build_model` + `ide-build` |
-| Coverage | import lcov/JaCoCo/Go/SimpleCov reports, sort, file/directory percentages, project-tree badges, editor gutter highlights, file navigation | `ops::coverage::coverage_import`, Zed gutter highlights |
+| Coverage | Run with Coverage for the selected run configuration, import lcov/JaCoCo/Go/SimpleCov reports, sort, file/directory percentages, project-tree badges, editor gutter highlights, file navigation | `ops::coverage::coverage_prepare/collect/import`, Zed gutter highlights |
 | Bookmarks | F3 toggle at caret, editor gutter marker, navigable list, remove, per-project JSON persistence | local store + navigation, Zed gutter highlights |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers | `ide-docker` |
@@ -647,6 +647,14 @@ coverage_files=1 coverage_status=lcov · 1 files · 66% (2/3) lines
 coverage_first="src/main/java/com/example/App.java" coverage_badges=7 coverage_gutter=2
 ```
 
+Run with Coverage smoke on a Cargo project through a fake `cargo llvm-cov`
+CLI (the report is written by the fake tool, then collected through OpenIDEA):
+
+```text
+coverage_files=1 coverage_status=cargo-llvm-cov · 1 files · 50% (1/2) lines
+coverage_first="src/main.rs" coverage_badges=3 coverage_gutter=2 coverage_run_busy=false
+```
+
 Bookmark smoke (F3 on line 1, then a fresh process reloading the same config):
 
 ```text
@@ -827,9 +835,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   source/request editors of their own. Coverage imports existing lcov, JaCoCo,
   Go and SimpleCov reports; project-tree badges show file and directory
   coverage, and the editor applies covered/partial/uncovered gutter highlights.
-  Launching a configuration under coverage is still missing, and the gutter
-  colors are smoke-verified through the Zed highlight API rather than a visual
-  screenshot. Bookmarks have a navigable panel and an editor gutter marker
+  The coverage panel can launch the selected run configuration with coverage
+  and collect its report; the gutter colors are smoke-verified through the Zed
+  highlight API rather than a visual screenshot. Bookmarks have a navigable panel and an editor gutter marker
   (also API-smoke-verified, not visually captured). Services lists Docker objects and can
   start/stop/restart containers, but logs, pull/prune, custom connections and
   Compose lifecycle controls are missing. GitHub lists and filters pull
