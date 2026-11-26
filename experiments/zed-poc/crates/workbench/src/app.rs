@@ -950,6 +950,8 @@ pub struct Workbench {
     _settings_filter_subscription: Subscription,
     setting_edit_key: Option<String>,
     setting_edit_input: Entity<TextInput>,
+    setting_edit_editor: Option<Entity<Editor>>,
+    setting_edit_buffer: Option<Entity<Buffer>>,
     setting_edit_status: gpui::SharedString,
     _setting_edit_subscription: Subscription,
     pending_goto: Option<(PathBuf, u32, u32)>,
@@ -1650,6 +1652,8 @@ impl Workbench {
                 TextInputEvent::Submit(_) => app.save_setting_editor(cx),
                 TextInputEvent::Cancel => {
                     app.setting_edit_key = None;
+                    app.setting_edit_editor = None;
+                    app.setting_edit_buffer = None;
                     cx.notify();
                 }
                 _ => {}
@@ -1864,6 +1868,8 @@ impl Workbench {
             _settings_filter_subscription: settings_filter_subscription,
             setting_edit_key: None,
             setting_edit_input,
+            setting_edit_editor: None,
+            setting_edit_buffer: None,
             setting_edit_status: "Edit setting value".into(),
             _setting_edit_subscription: setting_edit_subscription,
             pending_goto: None,
@@ -2143,14 +2149,26 @@ impl Workbench {
         &mut self,
         key: String,
         value: serde_json::Value,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         let raw = match value {
             serde_json::Value::String(value) => value,
             value => value.to_string(),
         };
-        self.setting_edit_input
-            .update(cx, |input, cx| input.set_content(raw, cx));
+        if let Some(window) = window {
+            let buffer = cx.new(|cx| Buffer::local(raw, cx));
+            let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
+            let focus = editor.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            self.setting_edit_buffer = Some(buffer);
+            self.setting_edit_editor = Some(editor);
+        } else {
+            self.setting_edit_buffer = None;
+            self.setting_edit_editor = None;
+            self.setting_edit_input
+                .update(cx, |input, cx| input.set_content(raw, cx));
+        }
         self.setting_edit_status = format!("Editing {key}").into();
         self.setting_edit_key = Some(key);
         cx.notify();
@@ -2160,7 +2178,12 @@ impl Workbench {
         let Some(key) = self.setting_edit_key.take() else {
             return;
         };
-        let text = self.setting_edit_input.read(cx).content().trim().to_owned();
+        let text = if let Some(buffer) = self.setting_edit_buffer.take() {
+            self.setting_edit_editor = None;
+            buffer.read(cx).snapshot().text().trim().to_owned()
+        } else {
+            self.setting_edit_input.read(cx).content().trim().to_owned()
+        };
         let value =
             serde_json::from_str(&text).unwrap_or_else(|_| serde_json::Value::String(text.clone()));
         if let serde_json::Value::String(value) = &value
@@ -8334,9 +8357,31 @@ impl Workbench {
         self.open_setting_editor(
             "editor.fontFamily".into(),
             serde_json::Value::String("Menlo".into()),
+            None,
             cx,
         );
         self.save_setting_editor(cx);
+    }
+
+    pub fn smoke_settings_json(
+        &mut self,
+        key: String,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&value) else {
+            self.settings_status = "Invalid JSON in settings smoke".into();
+            cx.notify();
+            return;
+        };
+        self.select_sidebar(SidebarMode::Settings, cx);
+        self.open_setting_editor(key, value, Some(window), cx);
+        self.save_setting_editor(cx);
+    }
+
+    pub fn settings_keymap_override_count(&self) -> usize {
+        self.settings_data.keymap_overrides.len()
     }
 
     pub fn settings_font_family(&self) -> &str {
@@ -10290,10 +10335,11 @@ impl Workbench {
                     .when(enabled.is_none(), |row| {
                         row.cursor_pointer()
                             .hover(|style| style.bg(theme.panel_alt))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.open_setting_editor(
                                     key_for_edit.clone(),
                                     value_for_edit.clone(),
+                                    Some(window),
                                     cx,
                                 );
                             }))
@@ -10624,7 +10670,12 @@ impl Workbench {
                     .text_color(theme.muted)
                     .child(key.clone()),
             )
-            .child(div().px_2().pb_1().child(self.setting_edit_input.clone()))
+            .when_some(self.setting_edit_editor.clone(), |modal, editor| {
+                modal.child(div().h(px(220.)).px_2().pb_1().child(editor))
+            })
+            .when(self.setting_edit_editor.is_none(), |modal| {
+                modal.child(div().px_2().pb_1().child(self.setting_edit_input.clone()))
+            })
             .child(
                 div()
                     .px_2()
@@ -10666,6 +10717,8 @@ impl Workbench {
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.setting_edit_key = None;
+                                this.setting_edit_editor = None;
+                                this.setting_edit_buffer = None;
                                 cx.notify();
                             }))
                             .child("Cancel"),

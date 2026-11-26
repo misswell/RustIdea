@@ -375,8 +375,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   language-server/debug-adapter status through `ops::tools::tools_list` and can
   install a selected tool (86 tools on this machine);
 - Settings shows the effective OpenIDEA settings as a filterable, flattened
-  list; boolean values are live toggles, and string/number/other JSON values
-  open an inline value editor, all written through
+  list; boolean values are live toggles, and string/number/array/object values
+  open a multiline Zed-Editor JSON modal, all written through
   `ops::project::set_settings` (verified below);
 - Cmd-P opens a native quick-open overlay backed by
   `ops::nav::find_files`; typing re-queries the project index and clicking or
@@ -462,7 +462,7 @@ Panel coverage at this commit:
 | MCP | list/toggle/add/update/remove stdio/HTTP/SSE servers | `ops::agent::mcp_*` |
 | Tools | list/install | `ops::tools` |
 | Plugins | installed list + marketplace/preview/install + optional-capability consent | `PluginHost` |
-| Settings | filter + boolean toggles + JSON value editor | `ops::project::settings` / `set_settings` |
+| Settings | filter + boolean toggles + multiline JSON editor for scalars/lists/maps | `ops::project::settings` / `set_settings` |
 | Debug | attach/session console, line breakpoints, stack/scopes/variables, evaluate, resume/pause/step (session runtime unverified) | `ops::debug` |
 | Terminal | working VT screen | Zed `terminal` + `ops::term` |
 | Run | detected/user configurations, create/edit/delete user configurations in `.openidea/run.toml`, start/stop, output/exit status | `ops::run` |
@@ -612,6 +612,12 @@ String-setting smoke in an isolated config root:
 ```text
 settings_rows=466 font_family="Menlo"
 settings.toml: fontFamily = "Menlo"
+```
+
+Structured JSON setting smoke (`keymapOverrides.smokeAction = ["Meta+Shift+9"]`):
+
+```text
+settings_rows=467 settings_keymap_overrides=1
 ```
 
 Notebook cell-edit smoke (fresh `.ipynb`, committed then saved):
@@ -943,8 +949,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   remote-write verification (UI path exists), structured question/form widgets
   and live subagent/form verification
   are not yet integrated. MCP add/update/remove is wired for stdio, HTTP and
-  SSE transports. Settings edits booleans and JSON scalars; structured
-  list/map editors are missing. Database/HTTP have working execution paths but no
+  SSE transports. Settings edits booleans and JSON scalars/lists/maps through a
+  multiline editor; dedicated widgets for complex schemas are missing. Database/HTTP have working execution paths but no
   source/request editors of their own. Coverage imports existing lcov, JaCoCo,
   Go and SimpleCov reports; project-tree badges show file and directory
   coverage, and the editor applies covered/partial/uncovered gutter highlights.
