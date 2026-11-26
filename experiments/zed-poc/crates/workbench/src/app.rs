@@ -2832,6 +2832,18 @@ impl Workbench {
         );
     }
 
+    fn clear_notebook_outputs(&mut self, cell: String, cx: &mut Context<Self>) {
+        self.apply_notebook_edit(
+            ide_notebook::NotebookEdit::SetOutputs {
+                cell,
+                outputs: Vec::new(),
+                execution_count: None,
+            },
+            "Clearing cell outputs…",
+            cx,
+        );
+    }
+
     fn open_notebook_cell_editor(
         &mut self,
         cell: String,
@@ -8420,6 +8432,29 @@ impl Workbench {
             .unwrap_or(0)
     }
 
+    pub fn smoke_notebook_clear_outputs(&mut self, cx: &mut Context<Self>) {
+        let cell = self.notebook.as_ref().and_then(|notebook| {
+            notebook
+                .cells
+                .iter()
+                .find(|cell| !cell.outputs.is_empty())
+                .map(|cell| cell.id.clone())
+        });
+        let Some(cell) = cell else {
+            self.notebook_status = "No cell with outputs".into();
+            cx.notify();
+            return;
+        };
+        self.clear_notebook_outputs(cell, cx);
+    }
+
+    pub fn notebook_output_count(&self) -> usize {
+        self.notebook
+            .as_ref()
+            .map(|notebook| notebook.cells.iter().map(|cell| cell.outputs.len()).sum())
+            .unwrap_or(0)
+    }
+
     pub fn smoke_run_status(&self) -> String {
         self.run_status.to_string()
     }
@@ -11123,6 +11158,7 @@ impl Workbench {
                 let edit_id = cell.id.clone();
                 let type_id = cell.id.clone();
                 let delete_id = cell.id.clone();
+                let clear_id = cell.id.clone();
                 let cell_type = cell.cell_type.clone();
                 let source = cell.source.clone();
                 let mut body = div()
@@ -11191,6 +11227,22 @@ impl Workbench {
                                     }))
                                     .child("type"),
                             )
+                            .when(!cell.outputs.is_empty(), |row| {
+                                row.child(
+                                    div()
+                                        .id(("notebook-clear-output", index))
+                                        .px_1()
+                                        .text_size(px(9.))
+                                        .text_color(theme.warning)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, _, cx| {
+                                                this.clear_notebook_outputs(clear_id.clone(), cx);
+                                            },
+                                        ))
+                                        .child("clear output"),
+                                )
+                            })
                             .child(
                                 div()
                                     .id(("notebook-delete", index))

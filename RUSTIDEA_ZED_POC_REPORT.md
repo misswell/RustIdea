@@ -416,7 +416,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   source editing, and Commit uses `NotebookEdit::SetSource` followed by
   `ops::notebook::save`; the panel also inserts code/markdown cells, deletes
   cells and toggles code↔markdown through `NotebookEdit`; explicit Save and Run
-  all are in the panel header;
+  all are in the panel header, and per-cell Clear Output uses
+  `NotebookEdit::SetOutputs` followed by save;
 - buffer edits are sent incrementally to
   `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
   `DocPatched` events and diagnostics are applied back to Zed buffers;
@@ -553,6 +554,15 @@ Notebook smoke (two-cell `.ipynb`):
 ```text
 notebook_cells=2
 ```
+
+Notebook clear-output smoke:
+
+```text
+notebook_cells=2 notebook_outputs=0
+```
+
+The saved `.ipynb` had the executed cell's `outputs` emptied and
+`execution_count` reset to null.
 
 Quick-open smoke:
 
@@ -929,7 +939,7 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
 - Plugin live UI contributions, conditioned breakpoints/logpoints and Java/
-  Unity attach, notebook rich-output editing, live
+  Unity attach, richer notebook output editing (clear is implemented), live
   remote-write verification (UI path exists), structured question/form widgets
   and live subagent/form verification
   are not yet integrated. MCP add/update/remove is wired for stdio, HTTP and

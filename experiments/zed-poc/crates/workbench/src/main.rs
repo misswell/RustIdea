@@ -327,6 +327,8 @@ fn main() {
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK_EDIT").is_some();
                 let smoke_notebook_add =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK_ADD").is_some();
+                let smoke_notebook_clear_outputs =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK_CLEAR_OUTPUTS").is_some();
                 let smoke_search = std::env::var("RUSTIDEA_ZED_SMOKE_SEARCH").ok();
                 let smoke_replace = std::env::var("RUSTIDEA_ZED_SMOKE_REPLACE").ok();
                 let smoke_todo = std::env::var_os("RUSTIDEA_ZED_SMOKE_TODO").is_some();
@@ -601,6 +603,9 @@ fn main() {
                                 if smoke_notebook_add {
                                     app.smoke_notebook_add_markdown(cx);
                                 }
+                                if smoke_notebook_clear_outputs {
+                                    app.smoke_notebook_clear_outputs(cx);
+                                }
                                 if smoke_debug_attach {
                                     app.smoke_debug_attach(cx);
                                 }
@@ -667,7 +672,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} run_configs={} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} coverage_badges={} coverage_gutter={} coverage_run_busy={} bookmarks={} bookmark_status={} bookmark_first={:?} bookmark_gutter={} color_preview={} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} docker_logs={} docker_logs_status={} github_prs={} github_status={} github_first={:?} github_detail={} github_comments={} github_timeline={} github_review={} github_diff_files={} github_diff_lines={} github_diff_status={} github_inline={} github_detail_status={} heap_classes={} heap_object_rows={} heap_objects_status={} heap_object_first={:?} heap_status={} heap_first={:?} heap_compare={} heap_compare_status={} profile_methods={} profile_tree={} profile_status={} profile_first={:?} logcat_lines={} logcat_matches={} logcat_export={:?} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} duplicate_groups={} duplicate_status={} duplicate_first={:?} structural_matches={} structural_status={} structural_apply={} structural_first={:?} inspect_problems={} inspect_status={} inspect_first={:?} active_path={} status={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
+    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} run_configs={} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} coverage_badges={} coverage_gutter={} coverage_run_busy={} bookmarks={} bookmark_status={} bookmark_first={:?} bookmark_gutter={} color_preview={} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} docker_logs={} docker_logs_status={} github_prs={} github_status={} github_first={:?} github_detail={} github_comments={} github_timeline={} github_review={} github_diff_files={} github_diff_lines={} github_diff_status={} github_inline={} github_detail_status={} heap_classes={} heap_object_rows={} heap_objects_status={} heap_object_first={:?} heap_status={} heap_first={:?} heap_compare={} heap_compare_status={} profile_methods={} profile_tree={} profile_status={} profile_first={:?} logcat_lines={} logcat_matches={} logcat_export={:?} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} duplicate_groups={} duplicate_status={} duplicate_first={:?} structural_matches={} structural_status={} structural_apply={} structural_first={:?} inspect_problems={} inspect_status={} inspect_first={:?} active_path={} status={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_outputs={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -772,6 +777,7 @@ fn main() {
                                     app.db_status(),
                                     app.remote_status(),
                                     app.notebook_cell_count(),
+                                    app.notebook_output_count(),
                                     app.notebook_first_source(),
                                     app.agents_count(),
                                     app.agent_tasks_count(),
