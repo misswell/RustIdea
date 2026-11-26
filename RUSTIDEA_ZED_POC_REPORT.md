@@ -362,7 +362,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - HTTP parses the active `.http` file, lists requests, selects a named
   environment from `http-client(.private).env.json`, executes the selected
   request through `ide_http::run` with its variables resolved, shows status,
-  headers and body, and lists/reopens/clears the project's response history;
+  headers and body, lists/reopens/clears the project's response history, and
+  lists `.http`/`.rest` files across the project for opening as collections;
 - Remote lists OpenIDEA SSH configurations, opens a real SSH PTY-backed
   terminal through `ops::term::spawn_ssh`, and browses/previews remote files
   over SFTP (`SshManager::session` + `RemoteFs::list/read`); the preview opens
@@ -463,7 +464,7 @@ Panel coverage at this commit:
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
 | Database | working (source/connect/query) | `ops::db` |
-| HTTP Client | file parse/run/response, environment selector, persisted response history with reopen/clear, plus unsaved multiline request editor with Send | `ide_http::run`, `ide_http::env`, `Project::http_history` |
+| HTTP Client | project `.http`/`.rest` collection list, file parse/run/response, environment selector, persisted response history with reopen/clear, plus unsaved multiline request editor with Send | `ide_http::run`, `ide_http::env`, `Project::http_history` |
 | Remote Host | SSH terminal, SFTP browse/preview/edit | `ops::term::spawn_ssh`, `SshManager` |
 | Notebook | viewer + cell edit/insert/delete/type + output JSON edit/clear + save/run all | `ops::notebook` |
 | Agents | working (providers/tasks/timeline/prompt/cancel) | `ops::agent` |
@@ -573,6 +574,16 @@ url=http://127.0.0.1:8741/hello.txt
 
 The history index is stored under the project's app data directory;
 the entry's URL shows the substituted environment value, and its status is 200.
+
+HTTP collection-list smoke on a project containing `api/a.http`,
+`api/b.rest` and `target/c.http`:
+
+```text
+WORKBENCH_HTTP_UI files=2 files_status="2 .http files"
+```
+
+The scanner found the two request files outside build directories and skipped
+`target/c.http`.
 
 Outline smoke on the Java project:
 
@@ -1027,7 +1038,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 63 passed; 0 failed
+documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 64 passed; 0 failed
 ide-github: 12 passed; 0 failed
 ```
 
@@ -1051,9 +1062,10 @@ ide-github: 12 passed; 0 failed
   are not yet integrated. MCP add/update/remove is wired for stdio, HTTP and
   SSE transports. Settings edits booleans and JSON scalars/lists/maps through a
   multiline editor; dedicated widgets for complex schemas are missing. HTTP has
-  an unsaved request editor with Send plus environment selection and persisted
-  response history, but collections, auth helpers and multi-request tabs are
-  missing. Database now creates SQLite sources and has schema/table browsing
+  a flat project collection list plus an unsaved request editor with Send,
+  environment selection and persisted response history, but nested collection
+  metadata, auth helpers and multi-request tabs are missing. Database now
+  creates SQLite sources and has schema/table browsing
   and console-file source editing, but typed connection editors for other
   drivers, result grids and saved console history are missing. Coverage imports
   existing lcov, JaCoCo,

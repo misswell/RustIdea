@@ -581,6 +581,19 @@ impl NativeHost {
         self.host.project(MAIN_WINDOW)?.http_history.clear()
     }
 
+    pub async fn http_files(&self) -> IdeResult<Vec<PathBuf>> {
+        let root = self.host.project(MAIN_WINDOW)?.root.clone();
+        self.runtime
+            .spawn_blocking(move || {
+                let mut files = Vec::new();
+                collect_http_files(&root, 0, &mut files);
+                files.sort();
+                files
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))
+    }
+
     pub fn db_sources(&self) -> IdeResult<Vec<ide_db::DataSource>> {
         ide_host::ops::db::sources(&self.host, MAIN_WINDOW)
     }
@@ -1971,6 +1984,37 @@ fn github_repo_from_url(url: &str) -> String {
     format!("{owner}/{repo}")
 }
 
+fn collect_http_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if path.is_dir() {
+            if matches!(
+                name.as_ref(),
+                ".git" | "target" | "node_modules" | "dist" | ".gradle" | ".idea"
+            ) {
+                continue;
+            }
+            collect_http_files(&path, depth + 1, out);
+        } else if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("http") || extension.eq_ignore_ascii_case("rest")
+            })
+        {
+            out.push(path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2054,5 +2098,22 @@ mod tests {
         assert_eq!(removed.len(), 1);
         assert_eq!(ignore_rules.len(), 1);
         assert_eq!(report.dropped, 2);
+    }
+
+    #[test]
+    fn http_file_scan_selects_http_and_rest_and_skips_build_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("api")).unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("api/requests.http"), "GET https://a\n").unwrap();
+        std::fs::write(root.join("api/extra.rest"), "GET https://b\n").unwrap();
+        std::fs::write(root.join("api/notes.txt"), "skip\n").unwrap();
+        std::fs::write(root.join("target/ignored.http"), "GET https://c\n").unwrap();
+        let mut files = Vec::new();
+        collect_http_files(root, 0, &mut files);
+        files.sort();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|path| !path.starts_with(root.join("target"))));
     }
 }

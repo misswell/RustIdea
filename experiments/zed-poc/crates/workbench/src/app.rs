@@ -1032,6 +1032,8 @@ pub struct Workbench {
     http_history: Vec<ide_http::HistoryEntry>,
     http_history_open: bool,
     http_history_status: gpui::SharedString,
+    http_files: Vec<PathBuf>,
+    http_files_status: gpui::SharedString,
     db_sources: Vec<ide_db::DataSource>,
     db_connected: Vec<String>,
     db_selected: usize,
@@ -2031,6 +2033,8 @@ impl Workbench {
             http_history: Vec::new(),
             http_history_open: false,
             http_history_status: "No HTTP history loaded".into(),
+            http_files: Vec::new(),
+            http_files_status: "No .http files loaded".into(),
             db_sources: Vec::new(),
             db_connected: Vec::new(),
             db_selected: 0,
@@ -2409,12 +2413,14 @@ impl Workbench {
         let Some(doc) = self.active else {
             self.http_blocks.clear();
             self.http_status = "Open an .http file to list requests".into();
+            self.refresh_http_files(cx);
             cx.notify();
             return;
         };
         let Some(document) = self.documents.get(&doc) else {
             self.http_blocks.clear();
             self.http_status = "Open an .http file to list requests".into();
+            self.refresh_http_files(cx);
             cx.notify();
             return;
         };
@@ -2452,6 +2458,39 @@ impl Workbench {
             }
         }
         self.refresh_http_history(cx);
+        self.refresh_http_files(cx);
+        cx.notify();
+    }
+
+    fn refresh_http_files(&mut self, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.http_files().await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(files) => {
+                            app.http_files = files;
+                            app.http_files_status = if app.http_files.is_empty() {
+                                "No .http files in the project".into()
+                            } else {
+                                format!("{} .http files", app.http_files.len()).into()
+                            };
+                        }
+                        Err(error) => {
+                            app.http_files.clear();
+                            app.http_files_status =
+                                format!("HTTP file scan failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
         cx.notify();
     }
 
@@ -8927,6 +8966,11 @@ impl Workbench {
         self.select_http_env(Some(env), cx);
     }
 
+    pub fn smoke_http_files(&mut self, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Http, cx);
+        self.refresh_http(cx);
+    }
+
     pub fn http_history_count(&self) -> usize {
         self.http_history.len()
     }
@@ -8937,6 +8981,14 @@ impl Workbench {
 
     pub fn http_env_text(&self) -> String {
         self.http_env.clone().unwrap_or_default()
+    }
+
+    pub fn http_file_count(&self) -> usize {
+        self.http_files.len()
+    }
+
+    pub fn http_files_status_text(&self) -> String {
+        self.http_files_status.to_string()
     }
 
     pub fn http_editor_status_text(&self) -> String {
@@ -11901,6 +11953,35 @@ impl Workbench {
                     .child(env.clone()),
             );
         }
+        let mut file_rows = div()
+            .id("http-files")
+            .flex_none()
+            .max_h(px(92.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, path) in self.http_files.iter().take(100).enumerate() {
+            let path_for_app = path.clone();
+            let label = path
+                .strip_prefix(&self.root)
+                .unwrap_or(path)
+                .display()
+                .to_string();
+            file_rows = file_rows.child(
+                div()
+                    .id(("http-file", index))
+                    .px_2()
+                    .py(px(1.))
+                    .text_size(px(9.5))
+                    .text_color(theme.muted)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_path(path_for_app.clone(), cx);
+                    }))
+                    .child(label),
+            );
+        }
         let mut history_rows = div()
             .id("http-history")
             .flex_none()
@@ -12090,6 +12171,19 @@ impl Workbench {
                     ),
             )
             .child(environments)
+            .child(
+                div()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(9.))
+                    .text_color(theme.faint)
+                    .child("FILES")
+                    .child(div().flex_1())
+                    .child(self.http_files_status.clone()),
+            )
+            .child(file_rows)
             .when(self.http_history_open, |view| view.child(history_rows))
             .when(!self.http_history_open, |view| view.child(requests))
             .child(output)
