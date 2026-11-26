@@ -214,7 +214,6 @@ struct GitState {
     selected: Option<PathBuf>,
     commit_message: String,
     diff_preview: Option<(PathBuf, String)>,
-    output: String,
     loading: bool,
     error: Option<String>,
 }
