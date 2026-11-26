@@ -28,6 +28,10 @@ jobs:
       - name: Fetch pinned Zed and apply tree-sitter patch
         run: scripts/fetch-zed.sh
 
+      - name: Install POC Clippy component
+        working-directory: experiments/zed-poc
+        run: rustup component add clippy
+
       - name: Check POC workspace
         working-directory: experiments/zed-poc
         run: cargo check --locked -p rustidea-zed-workbench
