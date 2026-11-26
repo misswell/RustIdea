@@ -814,6 +814,8 @@ pub struct Workbench {
     docker_logs_status: gpui::SharedString,
     docker_logs_container: Option<String>,
     docker_logs_busy: bool,
+    docker_pull_input: Entity<TextInput>,
+    _docker_pull_subscription: Subscription,
     github_availability: Option<ide_github::GhAvailability>,
     github_pulls: Vec<ide_github::PullRequestSummary>,
     github_status: gpui::SharedString,
@@ -1399,6 +1401,21 @@ impl Workbench {
                     app.add_github_comment(cx);
                 }
             });
+        let docker_pull_input = cx.new(|cx| {
+            TextInput::new(
+                "Image reference (e.g. postgres:16)…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let docker_pull_subscription = cx.subscribe(&docker_pull_input, |app, _, event, cx| {
+            if let TextInputEvent::Submit(_) = event {
+                app.pull_docker_image(cx);
+            }
+        });
         let heap_path_input = cx.new(|cx| {
             TextInput::new(
                 "Heap snapshot path (.hprof)…",
@@ -1637,6 +1654,8 @@ impl Workbench {
             docker_logs_status: gpui::SharedString::default(),
             docker_logs_container: None,
             docker_logs_busy: false,
+            docker_pull_input,
+            _docker_pull_subscription: docker_pull_subscription,
             github_availability: None,
             github_pulls: Vec::new(),
             github_status: "Open GitHub to load pull requests".into(),
@@ -5790,6 +5809,92 @@ impl Workbench {
         cx.notify();
     }
 
+    fn pull_docker_image(&mut self, cx: &mut Context<Self>) {
+        if self.docker_busy {
+            return;
+        }
+        let reference = self.docker_pull_input.read(cx).content().trim().to_owned();
+        if reference.is_empty() {
+            self.docker_status = "Enter an image reference to pull".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        self.docker_busy = true;
+        self.docker_status = format!("Pulling {reference}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.docker_pull(reference.clone()).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.docker_busy = false;
+                    match result {
+                        Ok(lines) => {
+                            app.docker_status = lines
+                                .last()
+                                .cloned()
+                                .unwrap_or_else(|| format!("Pulled {reference}"))
+                                .into();
+                        }
+                        Err(error) => {
+                            app.docker_status =
+                                format!("Docker pull failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn prune_docker(&mut self, target: ide_docker::PruneTarget, cx: &mut Context<Self>) {
+        if self.docker_busy {
+            return;
+        }
+        let label = match target {
+            ide_docker::PruneTarget::Containers => "stopped containers",
+            ide_docker::PruneTarget::Images => "dangling images",
+            ide_docker::PruneTarget::AllImages => "unused images",
+            ide_docker::PruneTarget::Volumes => "unused volumes",
+            ide_docker::PruneTarget::Networks => "unused networks",
+            ide_docker::PruneTarget::System => "unused Docker data",
+        };
+        let host = self.host.clone();
+        self.docker_busy = true;
+        self.docker_status = format!("Pruning {label}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.docker_prune(target).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.docker_busy = false;
+                    match result {
+                        Ok(lines) => {
+                            app.docker_status = lines
+                                .last()
+                                .cloned()
+                                .unwrap_or_else(|| format!("Pruned {label}"))
+                                .into();
+                        }
+                        Err(error) => {
+                            app.docker_status =
+                                format!("Docker prune failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn refresh_github(&mut self, cx: &mut Context<Self>) {
         if self.github_busy {
             return;
@@ -7957,6 +8062,24 @@ impl Workbench {
             return;
         };
         self.open_docker_logs(container.id, container.name, cx);
+    }
+
+    pub fn smoke_docker_pull(&mut self, reference: String, cx: &mut Context<Self>) {
+        self.docker_pull_input.update(cx, |input, cx| {
+            input.set_content(reference, cx);
+        });
+        self.pull_docker_image(cx);
+    }
+
+    pub fn smoke_docker_prune(&mut self, target: &str, cx: &mut Context<Self>) {
+        let target = match target {
+            "containers" => ide_docker::PruneTarget::Containers,
+            "images" => ide_docker::PruneTarget::AllImages,
+            "volumes" => ide_docker::PruneTarget::Volumes,
+            "networks" => ide_docker::PruneTarget::Networks,
+            _ => ide_docker::PruneTarget::System,
+        };
+        self.prune_docker(target, cx);
     }
 
     pub fn docker_log_count(&self) -> usize {
@@ -12057,6 +12180,53 @@ impl Workbench {
                     ),
             )
             .child(div().px_2().py_1().child(tab_row))
+            .child({
+                let prune_target = match self.docker_tab {
+                    DockerTab::Containers => ide_docker::PruneTarget::Containers,
+                    DockerTab::Images => ide_docker::PruneTarget::AllImages,
+                    DockerTab::Volumes => ide_docker::PruneTarget::Volumes,
+                    DockerTab::Networks => ide_docker::PruneTarget::Networks,
+                };
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.docker_pull_input.clone())
+                    .child(
+                        div()
+                            .id("docker-pull")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(8.5))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.pull_docker_image(cx);
+                            }))
+                            .child("Pull"),
+                    )
+                    .child(
+                        div()
+                            .id("docker-prune")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(8.5))
+                            .text_color(theme.warning)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.prune_docker(prune_target, cx);
+                            }))
+                            .child("Prune"),
+                    )
+            })
             .child(rows)
             .when(self.docker_logs_container.is_some(), |root| {
                 root.child(

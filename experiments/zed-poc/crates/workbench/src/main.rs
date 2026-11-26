@@ -328,6 +328,8 @@ fn main() {
                 let smoke_services =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_SERVICES").is_some();
                 let smoke_docker_logs = std::env::var("RUSTIDEA_ZED_SMOKE_DOCKER_LOGS").ok();
+                let smoke_docker_pull = std::env::var("RUSTIDEA_ZED_SMOKE_DOCKER_PULL").ok();
+                let smoke_docker_prune = std::env::var("RUSTIDEA_ZED_SMOKE_DOCKER_PRUNE").ok();
                 let smoke_github = std::env::var_os("RUSTIDEA_ZED_SMOKE_GITHUB").is_some();
                 let smoke_github_pr = std::env::var("RUSTIDEA_ZED_SMOKE_GITHUB_PR")
                     .ok()
@@ -591,6 +593,12 @@ fn main() {
                                 }
                                 if let Some(target) = &smoke_docker_logs {
                                     app.smoke_docker_logs(target, cx);
+                                }
+                                if let Some(reference) = &smoke_docker_pull {
+                                    app.smoke_docker_pull(reference.clone(), cx);
+                                }
+                                if let Some(target) = &smoke_docker_prune {
+                                    app.smoke_docker_prune(target, cx);
                                 }
                             })
                             .ok();

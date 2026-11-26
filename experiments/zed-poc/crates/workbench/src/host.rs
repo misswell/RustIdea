@@ -1335,6 +1335,47 @@ impl NativeHost {
         .await
     }
 
+    pub async fn docker_pull(&self, reference: String) -> IdeResult<Vec<String>> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                let cancel = ide_core::CancellationToken::new();
+                let lines = std::cell::RefCell::new(Vec::new());
+                ide_docker::pull(
+                    &ide_docker::DockerEndpoint::Default,
+                    &reference,
+                    None,
+                    &cancel,
+                    &|line| lines.borrow_mut().push(line.trim_end().to_owned()),
+                )?;
+                Ok(lines.into_inner())
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
+    pub async fn docker_prune(&self, target: ide_docker::PruneTarget) -> IdeResult<Vec<String>> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                let cancel = ide_core::CancellationToken::new();
+                let lines = std::cell::RefCell::new(Vec::new());
+                ide_docker::prune(
+                    &ide_docker::DockerEndpoint::Default,
+                    target,
+                    &cancel,
+                    &|line| lines.borrow_mut().push(line.trim_end().to_owned()),
+                )?;
+                Ok(lines.into_inner())
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
     pub async fn github_availability(
         &self,
         root: PathBuf,
