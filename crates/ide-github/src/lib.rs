@@ -370,6 +370,28 @@ pub fn reopen(root: &Path, number: u32) -> IdeResult<()> {
     run(root, &["pr", "reopen", &n]).map(drop)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+/// Merges a pull request (`gh pr merge`), optionally deleting its branch.
+pub fn merge(root: &Path, number: u32, method: MergeMethod, delete_branch: bool) -> IdeResult<()> {
+    let n = number.to_string();
+    let flag = match method {
+        MergeMethod::Merge => "--merge",
+        MergeMethod::Squash => "--squash",
+        MergeMethod::Rebase => "--rebase",
+    };
+    let mut args = vec!["pr", "merge", &n, flag];
+    if delete_branch {
+        args.push("--delete-branch");
+    }
+    run(root, &args).map(drop)
+}
+
 /// Adds an inline review comment on a diff line (`LEFT` base, `RIGHT` head).
 #[allow(clippy::too_many_arguments)]
 pub fn add_review_comment(

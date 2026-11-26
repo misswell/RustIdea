@@ -1461,6 +1461,24 @@ impl NativeHost {
         .await
     }
 
+    pub async fn github_merge_pr(
+        &self,
+        root: PathBuf,
+        number: u32,
+        method: ide_github::MergeMethod,
+        delete_branch: bool,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                ide_github::merge(&root, number, method, delete_branch)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn github_add_review_comment(
         &self,

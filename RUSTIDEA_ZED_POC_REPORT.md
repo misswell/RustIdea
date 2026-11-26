@@ -439,7 +439,7 @@ Panel coverage at this commit:
 | Bookmarks | F3 toggle at caret, editor gutter marker, navigable list, remove, per-project JSON persistence | local store + navigation, Zed gutter highlights |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers | `ide-docker` |
-| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, conversation and inline diff comments, close/reopen, open in browser | `ide-github`, `ide-vcs` |
+| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, conversation and inline diff comments, close/reopen, merge (merge/squash/rebase with two-click confirmation), open in browser | `ide-github`, `ide-vcs` |
 | Heap | import `.hprof`, class table, class object pages, GC-root path | `ops::heap::debug_heap_open/classes/dominators/path` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, source navigation | `ide-profiler` |
 | Logcat | adb devices, streaming threadtime log, level/text filters | `adb` process |
@@ -721,6 +721,13 @@ github_review=Reopened #42
 pr reopen 42
 ```
 
+GitHub merge smoke through the fake `gh` CLI:
+
+```text
+github_review=Merged #42
+pr merge 42 --squash
+```
+
 Heap snapshot smoke with a generated `ide-heap` sample:
 
 ```text
@@ -867,8 +874,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   start/stop/restart containers, but logs, pull/prune, custom connections and
   Compose lifecycle controls are missing. GitHub lists and filters pull
   requests and shows details/checks/review comments/timeline and a unified
-  diff, submits reviews, conversation comments, inline diff comments and
-  closes/reopens pull requests, but merge actions are missing. Heap
+  diff, submits reviews, conversation comments, inline diff comments,
+  closes/reopens and merges pull requests (two-click confirmation). Heap
   imports and lists
   classes and object pages with GC-root paths, but capture from a live JVM,
   snapshot comparison and richer instance/field detail are missing. Profiler

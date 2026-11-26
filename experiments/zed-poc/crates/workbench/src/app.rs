@@ -800,6 +800,7 @@ pub struct Workbench {
     github_diff_busy: bool,
     github_inline_target: Option<(String, u32, String)>,
     github_inline_status: gpui::SharedString,
+    github_merge_confirm: Option<ide_github::MergeMethod>,
     heap_info: Option<ide_host::ops::heap::HeapSnapshotInfo>,
     heap_classes: Vec<ide_host::ops::heap::HeapClassRow>,
     heap_path_input: Entity<TextInput>,
@@ -1616,6 +1617,7 @@ impl Workbench {
             github_diff_busy: false,
             github_inline_target: None,
             github_inline_status: gpui::SharedString::default(),
+            github_merge_confirm: None,
             heap_info: None,
             heap_classes: Vec::new(),
             heap_path_input,
@@ -5804,6 +5806,7 @@ impl Workbench {
         self.github_diff_status = "Select Diff to load changed files".into();
         self.github_inline_target = None;
         self.github_inline_status = gpui::SharedString::default();
+        self.github_merge_confirm = None;
         self.github_tab = GitHubTab::Overview;
         self.github_detail_status = format!("Loading pull request #{number}…").into();
         self.load_github_pr(number, false, cx);
@@ -6132,6 +6135,56 @@ impl Workbench {
                         Err(error) => {
                             app.github_review_status =
                                 format!("Pull request action failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn request_github_merge(&mut self, method: ide_github::MergeMethod, cx: &mut Context<Self>) {
+        if self.github_review_busy {
+            return;
+        }
+        if self.github_merge_confirm != Some(method) {
+            self.github_merge_confirm = Some(method);
+            self.github_review_status = format!("Click again to confirm {:?} merge", method).into();
+            cx.notify();
+            return;
+        }
+        self.github_merge_confirm = None;
+        self.merge_github_pr(method, cx);
+    }
+
+    fn merge_github_pr(&mut self, method: ide_github::MergeMethod, cx: &mut Context<Self>) {
+        let Some(number) = self.github_selected else {
+            self.github_review_status = "Select a pull request first".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.github_review_busy = true;
+        self.github_review_status = format!("Merging #{number} ({method:?})…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host.github_merge_pr(root, number, method, false).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.github_review_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.github_review_status = format!("Merged #{number}").into();
+                            app.reload_github_pr(number, cx);
+                        }
+                        Err(error) => {
+                            app.github_review_status =
+                                format!("Merge failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -7894,6 +7947,15 @@ impl Workbench {
 
     pub fn smoke_github_state(&mut self, action: &str, cx: &mut Context<Self>) {
         self.set_github_pr_state(action == "reopen", cx);
+    }
+
+    pub fn smoke_github_merge(&mut self, method: &str, cx: &mut Context<Self>) {
+        let method = match method {
+            "merge" => ide_github::MergeMethod::Merge,
+            "rebase" => ide_github::MergeMethod::Rebase,
+            _ => ide_github::MergeMethod::Squash,
+        };
+        self.merge_github_pr(method, cx);
     }
 
     pub fn github_diff_file_count(&self) -> usize {
@@ -12159,6 +12221,43 @@ impl Workbench {
                                 }))
                                 .child(if is_open { "Close PR" } else { "Reopen PR" }),
                         )
+                        .when(is_open, |row| {
+                            row.children(
+                                [
+                                    ("Merge", ide_github::MergeMethod::Merge),
+                                    ("Squash", ide_github::MergeMethod::Squash),
+                                    ("Rebase", ide_github::MergeMethod::Rebase),
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, (label, method))| {
+                                    let pending = self.github_merge_confirm == Some(method);
+                                    div()
+                                        .id(("github-merge", index))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(if pending {
+                                            theme.accent_muted
+                                        } else {
+                                            theme.panel_alt
+                                        })
+                                        .text_size(px(8.5))
+                                        .text_color(if pending {
+                                            theme.accent
+                                        } else {
+                                            theme.muted
+                                        })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, _, cx| {
+                                                this.request_github_merge(method, cx);
+                                            },
+                                        ))
+                                        .child(label)
+                                }),
+                            )
+                        })
                         .when(!self.github_review_status.is_empty(), |row| {
                             row.child(
                                 div()
