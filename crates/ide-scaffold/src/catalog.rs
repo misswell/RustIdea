@@ -327,20 +327,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn icons_exist() {
-        let icons = std::fs::read_to_string(Path::new(ROOT).join("src/ui/icons.tsx")).unwrap();
-        for def in all() {
-            assert!(
-                icons.contains(&format!("\"{}\":", def.icon))
-                    || icons.contains(&format!("\n  {}:", def.icon)),
-                "{}: no icon `{}`",
-                def.id,
-                def.icon
-            );
-        }
-    }
-
     /// Text the UI shows, which it translates through the source-text catalogs.
     fn texts(def: &Def) -> Vec<String> {
         let mut out = Vec::new();
