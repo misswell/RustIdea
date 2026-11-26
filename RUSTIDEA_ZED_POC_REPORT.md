@@ -329,8 +329,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   preserve-case option, cancellable backend request) and re-runs the search;
 - a native Git tool window shows the branch, changed files, stage/unstage
   actions and a commit-message field backed by `ide-vcs`;
-- the editor previews `#RGB`, `#RGBA`, `#RRGGBB` and `#RRGGBBAA` literals with
-  semi-transparent background highlights, refreshed after edits;
+- the editor previews `#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`, `rgb()`,
+  `rgba()`, `hsl()` and `hsla()` literals with semi-transparent background
+  highlights, refreshed after edits;
 - the editor now binds core Zed actions: caret movement/selection, backspace/
   delete, page up/down, undo/redo, copy/cut/paste/select-all, comment toggle,
   indent/outdent, completion (Ctrl-Space), go-to-definition/declaration
@@ -760,6 +761,13 @@ Color-preview smoke on a CSS file with four hex literals:
 color_preview=4
 ```
 
+Color-function preview smoke on a file with two hex, `rgb`, `rgba`, `hsl` and
+`hsla` literals:
+
+```text
+color_preview=6
+```
+
 Git Log smoke on this repository:
 
 ```text
@@ -1046,7 +1054,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 64 passed; 0 failed
+documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 66 passed; 0 failed
 ide-github: 12 passed; 0 failed
 ```
 
@@ -1099,8 +1107,8 @@ ide-github: 12 passed; 0 failed
   Scratch panel lists and creates files with Java/Python/Rust/JS/Markdown
   template shortcuts; a full language chooser is still missing. Save As currently saves a copy: the OpenIDEA document
   layer only supports re-keying untitled buffers, not renaming an existing file.
-  Color preview covers hex literals only; `rgb()`/`hsl()` literals and a color
-  picker are not implemented.
+  Color preview covers hex and `rgb()`/`rgba()`/`hsl()`/`hsla()` literals; a
+  color picker and CSS named colors are not implemented.
   The Run panel can create/edit/delete shell configurations and fill Cargo,
   npm, Python, Maven and Gradle templates; type-specific configuration dialogs
   and non-shell configuration kinds are not implemented.
