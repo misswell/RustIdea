@@ -124,6 +124,22 @@ fn profile_tree_rows(profile: &ide_profiler::Profile, limit: usize) -> Vec<(u32,
     rows
 }
 
+fn load_logcat_filter_history(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .take(10)
+        .collect()
+}
+
+fn save_logcat_filter_history(path: &std::path::Path, history: &[String]) {
+    if let Ok(text) = serde_json::to_string_pretty(history) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarMode {
     Project,
@@ -860,9 +876,12 @@ pub struct Workbench {
     logcat_device_input: Entity<TextInput>,
     logcat_filter_input: Entity<TextInput>,
     logcat_filter: String,
+    logcat_filter_history: Vec<String>,
+    logcat_filter_history_file: PathBuf,
     logcat_level: crate::logcat::LogLevel,
     logcat_cancel: Option<ide_core::CancellationToken>,
     logcat_busy: bool,
+    logcat_export_path: Option<PathBuf>,
     _logcat_device_subscription: Subscription,
     _logcat_filter_subscription: Subscription,
     scratch_dir: PathBuf,
@@ -1471,12 +1490,15 @@ impl Workbench {
                 cx,
             )
         });
-        let logcat_filter_subscription = cx.subscribe(&logcat_filter_input, |app, _, event, cx| {
-            if let TextInputEvent::Change(filter) = event {
-                app.logcat_filter = filter.clone();
-                cx.notify();
-            }
-        });
+        let logcat_filter_subscription =
+            cx.subscribe(&logcat_filter_input, |app, _, event, cx| match event {
+                TextInputEvent::Change(filter) => {
+                    app.logcat_filter = filter.clone();
+                    cx.notify();
+                }
+                TextInputEvent::Submit(_) => app.record_logcat_filter(cx),
+                _ => {}
+            });
         let scratch_name_input = cx.new(|cx| {
             TextInput::new(
                 "Scratch file name (notes, Main.java…) then Enter",
@@ -1567,6 +1589,8 @@ impl Workbench {
         let bookmarks_file = host.config_dir().join("bookmarks.json");
         let bookmark_store = crate::bookmarks::BookmarkStore::load(&bookmarks_file);
         let bookmarks = bookmark_store.project(&root).to_vec();
+        let logcat_filter_history_file = host.config_dir().join("logcat-filters.json");
+        let logcat_filter_history = load_logcat_filter_history(&logcat_filter_history_file);
         let mut app = Self {
             host,
             language_registry,
@@ -1700,9 +1724,12 @@ impl Workbench {
             logcat_device_input,
             logcat_filter_input,
             logcat_filter: String::new(),
+            logcat_filter_history,
+            logcat_filter_history_file,
             logcat_level: crate::logcat::LogLevel::Verbose,
             logcat_cancel: None,
             logcat_busy: false,
+            logcat_export_path: None,
             _logcat_device_subscription: logcat_device_subscription,
             _logcat_filter_subscription: logcat_filter_subscription,
             scratch_dir,
@@ -7017,10 +7044,91 @@ impl Workbench {
         cx.notify();
     }
 
+    fn filtered_logcat_lines(&self) -> Vec<&crate::logcat::LogcatLine> {
+        let query = crate::logcat::parse_filter_query(&self.logcat_filter);
+        self.logcat_lines
+            .iter()
+            .filter(|line| {
+                line.level != crate::logcat::LogLevel::Unknown
+                    && line.level >= self.logcat_level
+                    && query.matches(line)
+            })
+            .take(5_000)
+            .collect()
+    }
+
+    fn record_logcat_filter(&mut self, cx: &mut Context<Self>) {
+        let filter = self.logcat_filter.trim().to_owned();
+        if filter.is_empty() {
+            return;
+        }
+        self.logcat_filter_history.retain(|entry| entry != &filter);
+        self.logcat_filter_history.insert(0, filter);
+        self.logcat_filter_history.truncate(10);
+        save_logcat_filter_history(
+            &self.logcat_filter_history_file,
+            &self.logcat_filter_history,
+        );
+        cx.notify();
+    }
+
+    fn apply_logcat_filter(&mut self, filter: String, cx: &mut Context<Self>) {
+        self.logcat_filter = filter.clone();
+        self.logcat_filter_input.update(cx, |input, cx| {
+            input.set_content(filter, cx);
+        });
+        self.record_logcat_filter(cx);
+        cx.notify();
+    }
+
+    fn export_logcat(&mut self, cx: &mut Context<Self>) {
+        let lines = self.filtered_logcat_lines();
+        if lines.is_empty() {
+            self.logcat_status = "No log lines match the current filter".into();
+            cx.notify();
+            return;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        let path = self
+            .host
+            .config_dir()
+            .join(format!("logcat-export-{stamp}.log"));
+        let text = lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "{} {} {}: {}",
+                    line.time,
+                    line.level.letter(),
+                    line.tag,
+                    line.message
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let line_count = lines.len();
+        drop(lines);
+        match std::fs::write(&path, format!("{text}\n")) {
+            Ok(()) => {
+                self.logcat_export_path = Some(path.clone());
+                self.logcat_status =
+                    format!("Exported {line_count} line(s) to {}", path.display()).into();
+            }
+            Err(error) => {
+                self.logcat_status = format!("Logcat export failed: {error}").into();
+            }
+        }
+        cx.notify();
+    }
+
     fn start_logcat(&mut self, cx: &mut Context<Self>) {
         if self.logcat_busy {
             return;
         }
+        self.record_logcat_filter(cx);
         let requested = self
             .logcat_device_input
             .read(cx)
@@ -8340,6 +8448,28 @@ impl Workbench {
         self.logcat_lines
             .first()
             .map(|line| format!("{} {}: {}", line.level.letter(), line.tag, line.message))
+            .unwrap_or_default()
+    }
+
+    pub fn logcat_match_count(&self) -> usize {
+        self.filtered_logcat_lines().len()
+    }
+
+    pub fn smoke_logcat_filter(&mut self, filter: String, cx: &mut Context<Self>) {
+        self.logcat_filter_input.update(cx, |input, cx| {
+            input.set_content(filter.clone(), cx);
+        });
+        self.apply_logcat_filter(filter, cx);
+    }
+
+    pub fn smoke_logcat_export(&mut self, cx: &mut Context<Self>) {
+        self.export_logcat(cx);
+    }
+
+    pub fn logcat_export_path_text(&self) -> String {
+        self.logcat_export_path
+            .as_ref()
+            .map(|path| path.display().to_string())
             .unwrap_or_default()
     }
 
@@ -13783,7 +13913,7 @@ impl Workbench {
 
     fn render_logcat(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
-        let filter = self.logcat_filter.to_lowercase();
+        let filtered_lines = self.filtered_logcat_lines();
         let mut device_rows = div()
             .id("logcat-devices")
             .flex_none()
@@ -13847,19 +13977,7 @@ impl Workbench {
                     .child(self.logcat_status.clone()),
             );
         }
-        for (index, line) in self.logcat_lines.iter().enumerate() {
-            if line.level < self.logcat_level {
-                continue;
-            }
-            if !filter.is_empty()
-                && !line.message.to_lowercase().contains(&filter)
-                && !line.tag.to_lowercase().contains(&filter)
-            {
-                continue;
-            }
-            if index >= 1_000 {
-                break;
-            }
+        for (index, line) in filtered_lines.into_iter().take(1_000).enumerate() {
             let color = match line.level {
                 crate::logcat::LogLevel::Verbose => theme.faint,
                 crate::logcat::LogLevel::Debug => theme.muted,
@@ -14005,6 +14123,20 @@ impl Workbench {
                             }))
                             .child("Devices"),
                     )
+                    .child(
+                        div()
+                            .id("logcat-export")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(theme.accent)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.export_logcat(cx);
+                            }))
+                            .child("Export"),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
@@ -14033,6 +14165,31 @@ impl Workbench {
                     .gap_2()
                     .child(div().flex_1().child(self.logcat_filter_input.clone()))
                     .child(level_row),
+            )
+            .child(
+                div().px_2().py_1().flex().items_center().gap_1().children(
+                    self.logcat_filter_history
+                        .iter()
+                        .take(6)
+                        .enumerate()
+                        .map(|(index, filter)| {
+                            let value = filter.clone();
+                            let click_value = value.clone();
+                            div()
+                                .id(("logcat-history", index))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(theme.panel_alt)
+                                .text_size(px(8.5))
+                                .text_color(theme.muted)
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.apply_logcat_filter(click_value.clone(), cx);
+                                }))
+                                .child(value)
+                        }),
+                ),
             )
             .child(device_rows)
             .child(rows)

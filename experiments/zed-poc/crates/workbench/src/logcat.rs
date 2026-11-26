@@ -49,6 +49,83 @@ pub struct LogcatLine {
     pub message: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LogcatFilterQuery {
+    pub level: Option<LogLevel>,
+    pub tag: Option<String>,
+    pub exclude_tag: Option<String>,
+    pub package: Option<String>,
+    pub text: Vec<String>,
+}
+
+impl LogcatFilterQuery {
+    pub fn matches(&self, line: &LogcatLine) -> bool {
+        if let Some(level) = self.level
+            && (line.level == LogLevel::Unknown || line.level < level)
+        {
+            return false;
+        }
+        let tag = line.tag.to_lowercase();
+        let message = line.message.to_lowercase();
+        if let Some(expected) = &self.tag
+            && !tag.contains(expected)
+        {
+            return false;
+        }
+        if let Some(excluded) = &self.exclude_tag
+            && tag.contains(excluded)
+        {
+            return false;
+        }
+        if let Some(package) = &self.package
+            && !message.contains(package)
+            && !tag.contains(package)
+        {
+            return false;
+        }
+        self.text
+            .iter()
+            .all(|term| message.contains(term) || tag.contains(term))
+    }
+}
+
+pub fn parse_filter_query(raw: &str) -> LogcatFilterQuery {
+    let mut query = LogcatFilterQuery::default();
+    for token in raw.split_whitespace() {
+        let lower = token.to_lowercase();
+        if let Some(value) = lower.strip_prefix("level:") {
+            if let Some(letter) = value.chars().next() {
+                let level = LogLevel::from_letter(&letter.to_string());
+                if level != LogLevel::Unknown {
+                    query.level = Some(level);
+                }
+            }
+        } else if let Some(value) = lower.strip_prefix("-tag:") {
+            if !value.is_empty() {
+                query.exclude_tag = Some(value.to_owned());
+            }
+        } else if let Some(value) = lower.strip_prefix("tag:") {
+            if !value.is_empty() {
+                query.tag = Some(value.to_owned());
+            }
+        } else if let Some(value) = lower.strip_prefix("package:") {
+            if !value.is_empty() {
+                query.package = Some(value.to_owned());
+            }
+        } else if let Some(value) = lower
+            .strip_prefix("message:")
+            .or_else(|| lower.strip_prefix("msg:"))
+        {
+            if !value.is_empty() {
+                query.text.push(value.to_owned());
+            }
+        } else if !token.is_empty() {
+            query.text.push(lower);
+        }
+    }
+    query
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogcatDevice {
     pub serial: String,
@@ -241,5 +318,32 @@ mod tests {
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].model.as_deref(), Some("Pixel 7"));
         assert_eq!(devices[1].state, "offline");
+    }
+
+    #[test]
+    fn parses_android_studio_filter_tokens() {
+        let query =
+            parse_filter_query("tag:Activity level:E package:com.example crash -tag:System");
+        assert_eq!(query.tag.as_deref(), Some("activity"));
+        assert_eq!(query.exclude_tag.as_deref(), Some("system"));
+        assert_eq!(query.package.as_deref(), Some("com.example"));
+        assert_eq!(query.level, Some(LogLevel::Error));
+        assert_eq!(query.text, vec!["crash"]);
+    }
+
+    #[test]
+    fn filter_query_matches_tag_level_package_and_text() {
+        let line = LogcatLine {
+            time: "11-04 12:52:40.456".into(),
+            pid: "1234".into(),
+            level: LogLevel::Error,
+            tag: "AndroidRuntime".into(),
+            message: "java.lang.NullPointerException: boom in com.example".into(),
+        };
+        let query = parse_filter_query("tag:runtime level:E package:com.example boom");
+        assert!(query.matches(&line));
+        assert!(!parse_filter_query("level:F").matches(&line));
+        assert!(!parse_filter_query("-tag:runtime").matches(&line));
+        assert!(!parse_filter_query("tag:Activity").matches(&line));
     }
 }

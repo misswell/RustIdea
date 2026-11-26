@@ -442,7 +442,7 @@ Panel coverage at this commit:
 | GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, conversation and inline diff comments, close/reopen, merge (merge/squash/rebase with two-click confirmation), open in browser | `ide-github`, `ide-vcs` |
 | Heap | import `.hprof`, class table, class object pages, GC-root path | `ops::heap::debug_heap_open/classes/dominators/path` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, call tree, source navigation | `ide-profiler` |
-| Logcat | adb devices, streaming threadtime log, level/text filters | `adb` process |
+| Logcat | adb devices, streaming threadtime log, level/text filters, Android Studio `tag:`/`level:`/`package:`/`message:` query grammar, persisted filter history, log export | `adb` process |
 | Scratch | list/create/edit scratch files and Java/Python/Rust/JS/Markdown templates in the app data directory | local workspace + `ops::doc` |
 | Recent Files | per-project MRU list persisted in app config | local store |
 | Save a Copy | writes the active unsaved buffer text to a chosen path | `save_file_copy` |
@@ -781,6 +781,16 @@ logcat_lines=2 logcat_status=logcat stopped · 2 lines
 logcat_first="I ActivityManager: Start proc com.example"
 ```
 
+Logcat query + export smoke (`tag:AndroidRuntime level:E`):
+
+```text
+logcat_lines=2 logcat_matches=1
+logcat_export="…/logcat-export-1795659359.log"
+logcat_status=Exported 1 line(s) to …/logcat-export-1795659359.log
+```
+
+The exported file contained only `E AndroidRuntime: java.lang.NullPointerException: boom`.
+
 Scratch file smoke:
 
 ```text
@@ -866,7 +876,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff: 56 passed; 0 failed
+documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff: 58 passed; 0 failed
 ```
 
 ## Not yet done
@@ -904,8 +914,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   classes and object pages with GC-root paths, but capture from a live JVM,
   snapshot comparison and richer instance/field detail are missing. Profiler
   imports Node CPU profiles, lists methods and shows a call tree, but
-  recording new profiles and Python/JVM/perf formats are missing. Logcat lists devices, streams and filters threadtime output, but the
-  Android Studio query grammar, filter history and log export are missing. The
+  recording new profiles and Python/JVM/perf formats are missing. Logcat lists devices, streams, filters threadtime output,
+  supports the Android Studio query grammar, persists filter history and exports logs. The
   Scratch panel lists and creates files with Java/Python/Rust/JS/Markdown
   template shortcuts; a full language chooser is still missing. Save As currently saves a copy: the OpenIDEA document
   layer only supports re-keying untitled buffers, not renaming an existing file.
