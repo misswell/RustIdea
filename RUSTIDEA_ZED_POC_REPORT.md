@@ -327,6 +327,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   preserve-case option, cancellable backend request) and re-runs the search;
 - a native Git tool window shows the branch, changed files, stage/unstage
   actions and a commit-message field backed by `ide-vcs`;
+- the editor previews `#RGB`, `#RGBA`, `#RRGGBB` and `#RRGGBBAA` literals with
+  semi-transparent background highlights, refreshed after edits;
 - the editor now binds core Zed actions: caret movement/selection, backspace/
   delete, page up/down, undo/redo, copy/cut/paste/select-all, comment toggle,
   indent/outdent, completion (Ctrl-Space), go-to-definition/declaration
@@ -662,6 +664,12 @@ bookmarks=1 bookmark_first="/private/tmp/rustidea-bookmark-smoke/src/main.rs:1" 
 bookmarks.json text="fn main() {"
 ```
 
+Color-preview smoke on a CSS file with four hex literals:
+
+```text
+color_preview=4
+```
+
 Git Log smoke on this repository:
 
 ```text
@@ -889,7 +897,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff: 58 passed; 0 failed
+documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 61 passed; 0 failed
 ```
 
 ## Not yet done
@@ -932,6 +940,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   Scratch panel lists and creates files with Java/Python/Rust/JS/Markdown
   template shortcuts; a full language chooser is still missing. Save As currently saves a copy: the OpenIDEA document
   layer only supports re-keying untitled buffers, not renaming an existing file.
+  Color preview covers hex literals only; `rgb()`/`hsl()` literals and a color
+  picker are not implemented.
   Analysis runs Locate Duplicates, structural search, structural replacement
   and Inspect Code. Replace uses the OpenIDEA document layer and saves files
   that were opened transiently; edits in already-open buffers stay dirty until

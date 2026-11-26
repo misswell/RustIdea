@@ -5,6 +5,7 @@ mod bookmarks;
 mod bridge;
 mod build_tools;
 mod code_actions;
+mod color_preview;
 mod completion;
 mod coverage;
 mod documents;
@@ -365,6 +366,8 @@ fn main() {
                     std::env::var("RUSTIDEA_ZED_SMOKE_SCRATCH_TEMPLATE").ok();
                 let smoke_recent = std::env::var_os("RUSTIDEA_ZED_SMOKE_RECENT").is_some();
                 let smoke_save_as = std::env::var("RUSTIDEA_ZED_SMOKE_SAVE_AS").ok();
+                let smoke_color_preview =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_COLOR_PREVIEW").is_some();
                 let smoke_analysis =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_ANALYSIS").is_some();
                 let smoke_structural = std::env::var("RUSTIDEA_ZED_SMOKE_STRUCTURAL").ok();
@@ -534,6 +537,9 @@ fn main() {
                                 if let Some(path) = &smoke_save_as {
                                     app.smoke_save_as(path.clone(), cx);
                                 }
+                                if smoke_color_preview {
+                                    app.smoke_color_preview(window, cx);
+                                }
                                 if smoke_analysis {
                                     app.smoke_analysis(cx);
                                 }
@@ -631,7 +637,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} coverage_badges={} coverage_gutter={} coverage_run_busy={} bookmarks={} bookmark_status={} bookmark_first={:?} bookmark_gutter={} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} docker_logs={} docker_logs_status={} github_prs={} github_status={} github_first={:?} github_detail={} github_comments={} github_timeline={} github_review={} github_diff_files={} github_diff_lines={} github_diff_status={} github_inline={} github_detail_status={} heap_classes={} heap_object_rows={} heap_objects_status={} heap_object_first={:?} heap_status={} heap_first={:?} heap_compare={} heap_compare_status={} profile_methods={} profile_tree={} profile_status={} profile_first={:?} logcat_lines={} logcat_matches={} logcat_export={:?} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} duplicate_groups={} duplicate_status={} duplicate_first={:?} structural_matches={} structural_status={} structural_apply={} structural_first={:?} inspect_problems={} inspect_status={} inspect_first={:?} active_path={} status={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
+    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} coverage_badges={} coverage_gutter={} coverage_run_busy={} bookmarks={} bookmark_status={} bookmark_first={:?} bookmark_gutter={} color_preview={} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} docker_logs={} docker_logs_status={} github_prs={} github_status={} github_first={:?} github_detail={} github_comments={} github_timeline={} github_review={} github_diff_files={} github_diff_lines={} github_diff_status={} github_inline={} github_detail_status={} heap_classes={} heap_object_rows={} heap_objects_status={} heap_object_first={:?} heap_status={} heap_first={:?} heap_compare={} heap_compare_status={} profile_methods={} profile_tree={} profile_status={} profile_first={:?} logcat_lines={} logcat_matches={} logcat_export={:?} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} duplicate_groups={} duplicate_status={} duplicate_first={:?} structural_matches={} structural_status={} structural_apply={} structural_first={:?} inspect_problems={} inspect_status={} inspect_first={:?} active_path={} status={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -657,6 +663,7 @@ fn main() {
                                     app.bookmark_status(),
                                     app.bookmark_first(),
                                     app.bookmark_gutter_run_count(),
+                                    app.color_preview_count(cx),
                                     app.smoke_git_branch(),
                                     app.smoke_git_files(),
                                     app.git_log_count(),

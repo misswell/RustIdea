@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use editor::Editor;
+use editor::{Editor, HighlightKey};
 use gpui::{
     ClickEvent, Context, Entity, Focusable as _, SharedString, Subscription,
     UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
@@ -3862,6 +3862,66 @@ impl Workbench {
         count
     }
 
+    fn apply_color_preview_for_doc(&mut self, doc: DocId, cx: &mut Context<Self>) {
+        for ((editor_doc, _), editor) in &self.editors {
+            if *editor_doc == doc {
+                Self::apply_color_preview(editor, cx);
+            }
+        }
+    }
+
+    fn apply_color_preview(editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
+        let text = snapshot.text();
+        if text.len() > 2_000_000 {
+            return;
+        }
+        let literals = crate::color_preview::find_color_literals(&text);
+        if literals.is_empty() {
+            editor.update(cx, |editor, cx| {
+                editor
+                    .clear_background_highlights(HighlightKey::SyntaxTreeView(usize::MAX - 7), cx);
+            });
+            return;
+        }
+        let mut ranges = Vec::with_capacity(literals.len());
+        let mut colors = Vec::with_capacity(literals.len());
+        for literal in literals.into_iter().take(2_000) {
+            let start = snapshot.offset_to_point(editor::MultiBufferOffset(literal.start));
+            let end = snapshot.offset_to_point(editor::MultiBufferOffset(literal.end));
+            ranges.push(snapshot.anchor_before(start)..snapshot.anchor_before(end));
+            let rgba = gpui::rgba(crate::color_preview::packed_rgba(literal.rgba)).alpha(0.32);
+            colors.push(gpui::Hsla::from(rgba));
+        }
+        editor.update(cx, |editor, cx| {
+            editor.highlight_background(
+                HighlightKey::SyntaxTreeView(usize::MAX - 7),
+                &ranges,
+                move |index, _| {
+                    colors
+                        .get(*index)
+                        .copied()
+                        .unwrap_or(gpui::transparent_black())
+                },
+                cx,
+            );
+        });
+    }
+
+    pub fn color_preview_count(&self, cx: &mut Context<Self>) -> usize {
+        let Some(doc) = self.active else {
+            return 0;
+        };
+        let Some(document) = self.documents.get(&doc) else {
+            return 0;
+        };
+        let text = document.buffer.read(cx).snapshot().text();
+        if text.len() > 2_000_000 {
+            return 0;
+        }
+        crate::color_preview::find_color_literals(&text).len()
+    }
+
     fn apply_coverage_gutter(
         editor: &Entity<Editor>,
         path: &std::path::Path,
@@ -4499,6 +4559,7 @@ impl Workbench {
         });
         self.editors.insert((doc, secondary), editor.clone());
         self.apply_gutter_markers_to_open_editors(cx);
+        self.apply_color_preview_for_doc(doc, cx);
         Some(editor)
     }
 
@@ -4991,6 +5052,7 @@ impl Workbench {
         let subscription = cx.subscribe(&buffer, move |app, _, event: &BufferEvent, cx| {
             if is_buffer_edited(event) {
                 app.sync_document(doc_id, cx);
+                app.apply_color_preview_for_doc(doc_id, cx);
             }
         });
         self.documents.insert(doc_id, doc);
@@ -8144,6 +8206,13 @@ impl Workbench {
         if let Some(doc) = self.active {
             self.ensure_editor(doc, false, window, cx);
             self.apply_gutter_markers_to_open_editors(cx);
+        }
+    }
+
+    pub fn smoke_color_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(doc) = self.active {
+            self.ensure_editor(doc, false, window, cx);
+            self.apply_color_preview_for_doc(doc, cx);
         }
     }
 
