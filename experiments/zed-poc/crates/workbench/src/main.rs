@@ -286,6 +286,10 @@ fn main() {
                     .unwrap_or_default();
                 let smoke_run_config_env = std::env::var("RUSTIDEA_ZED_SMOKE_RUN_CONFIG_ENV")
                     .unwrap_or_default();
+                let smoke_run_config_edit =
+                    std::env::var("RUSTIDEA_ZED_SMOKE_RUN_CONFIG_EDIT").ok();
+                let smoke_run_config_delete =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_RUN_CONFIG_DELETE").is_some();
                 let smoke_terminal =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some();
                 let smoke_outline = std::env::var_os("RUSTIDEA_ZED_SMOKE_OUTLINE").is_some();
@@ -640,6 +644,12 @@ fn main() {
                                 }
                                 if let Some(target) = &smoke_docker_prune {
                                     app.smoke_docker_prune(target, cx);
+                                }
+                                if let Some(name) = &smoke_run_config_edit {
+                                    app.smoke_edit_run_config(name.clone(), cx);
+                                }
+                                if smoke_run_config_delete {
+                                    app.smoke_delete_run_config(cx);
                                 }
                                 if let Some(action) = &smoke_docker_compose {
                                     app.smoke_docker_compose(action, cx);

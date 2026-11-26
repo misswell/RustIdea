@@ -464,7 +464,7 @@ Panel coverage at this commit:
 | Settings | filter + boolean toggles + JSON value editor | `ops::project::settings` / `set_settings` |
 | Debug | attach/session console, line breakpoints, stack/scopes/variables, evaluate, resume/pause/step (session runtime unverified) | `ops::debug` |
 | Terminal | working VT screen | Zed `terminal` + `ops::term` |
-| Run | detected/user configurations, create and save user configurations to `.openidea/run.toml`, start/stop, output/exit status | `ops::run` |
+| Run | detected/user configurations, create/edit/delete user configurations in `.openidea/run.toml`, start/stop, output/exit status | `ops::run` |
 | Build | working | `ops::build` |
 
 Headless split/search smoke (real native window, real OpenIDEA host, Java file):
@@ -488,6 +488,14 @@ Run configuration save smoke:
 ```text
 run_status=Saved run configuration Smoke Config run_configs=1
 .openidea/run.toml: id="user:1795665278917" name="Smoke Config" command="echo" args=["hello"] env={SMOKE="1"}
+```
+
+Run configuration edit/delete smoke:
+
+```text
+run_status=Saved run configuration Edited run_configs=1
+run.toml name="Edited"
+run_status=Deleted run configuration DeleteMe run_configs=0
 ```
 
 Git smoke in a temporary `main` repository with one modified Java file:
@@ -950,8 +958,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   layer only supports re-keying untitled buffers, not renaming an existing file.
   Color preview covers hex literals only; `rgb()`/`hsl()` literals and a color
   picker are not implemented.
-  The Run panel can create shell configurations; edit/delete and type-specific
-  configuration dialogs are not implemented.
+  The Run panel can create/edit/delete shell configurations; type-specific
+  configuration dialogs and templates are not implemented.
   Analysis runs Locate Duplicates, structural search, structural replacement
   and Inspect Code. Replace uses the OpenIDEA document layer and saves files
   that were opened transiently; edits in already-open buffers stay dirty until

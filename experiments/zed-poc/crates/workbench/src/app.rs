@@ -782,6 +782,7 @@ pub struct Workbench {
     run_output: String,
     run_status: gpui::SharedString,
     run_editor_open: bool,
+    run_edit_id: Option<String>,
     run_name_input: Entity<TextInput>,
     run_command_input: Entity<TextInput>,
     run_args_input: Entity<TextInput>,
@@ -1691,6 +1692,7 @@ impl Workbench {
             run_output: String::new(),
             run_status,
             run_editor_open: false,
+            run_edit_id: None,
             run_name_input,
             run_command_input,
             run_args_input,
@@ -5222,6 +5224,95 @@ impl Workbench {
         .detach();
     }
 
+    fn new_run_config_editor(&mut self, cx: &mut Context<Self>) {
+        self.run_edit_id = None;
+        for input in [
+            &self.run_name_input,
+            &self.run_command_input,
+            &self.run_args_input,
+            &self.run_env_input,
+        ] {
+            input.update(cx, |input, cx| input.set_content("", cx));
+        }
+        let cwd = self.root.display().to_string();
+        self.run_cwd_input.update(cx, |input, cx| {
+            input.set_content(cwd, cx);
+        });
+        self.run_editor_open = true;
+        self.run_editor_status = "Fill the fields, then Save".into();
+        cx.notify();
+    }
+
+    fn edit_run_config_editor(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(config) = self.run_configs.get(index).cloned() else {
+            return;
+        };
+        if config.detected {
+            self.run_status = "Detected configurations cannot be edited here".into();
+            cx.notify();
+            return;
+        }
+        self.run_edit_id = Some(config.id.clone());
+        self.run_name_input.update(cx, |input, cx| {
+            input.set_content(config.name.clone(), cx);
+        });
+        self.run_command_input.update(cx, |input, cx| {
+            input.set_content(config.command.clone(), cx);
+        });
+        self.run_args_input.update(cx, |input, cx| {
+            input.set_content(config.args.join(" "), cx);
+        });
+        let cwd = config
+            .cwd
+            .as_ref()
+            .map(|path| path.0.display().to_string())
+            .unwrap_or_default();
+        self.run_cwd_input.update(cx, |input, cx| {
+            input.set_content(cwd, cx);
+        });
+        let env = config
+            .env
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.run_env_input.update(cx, |input, cx| {
+            input.set_content(env, cx);
+        });
+        self.run_editor_open = true;
+        self.run_editor_status = format!("Editing {}", config.name).into();
+        cx.notify();
+    }
+
+    fn delete_run_config(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(config) = self.run_configs.get(index).cloned() else {
+            return;
+        };
+        if config.detected {
+            self.run_status = "Detected configurations cannot be deleted here".into();
+            cx.notify();
+            return;
+        }
+        let remaining = self
+            .run_configs
+            .iter()
+            .filter(|item| !item.detected && item.id != config.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        match self.host.save_run_configs(&remaining, &[]) {
+            Ok(()) => {
+                self.run_configs = self.host.run_configs().unwrap_or_default();
+                self.selected_run = 0;
+                self.run_status = format!("Deleted run configuration {}", config.name).into();
+            }
+            Err(error) => {
+                self.run_status =
+                    format!("Run configuration delete failed: {}", error.message).into();
+            }
+        }
+        cx.notify();
+    }
+
     fn save_run_config_editor(&mut self, cx: &mut Context<Self>) {
         let name = self.run_name_input.read(cx).content().trim().to_owned();
         let command = self.run_command_input.read(cx).content().trim().to_owned();
@@ -5266,8 +5357,9 @@ impl Workbench {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_millis())
             .unwrap_or_default();
+        let edit_id = self.run_edit_id.clone();
         let config = ide_run::RunConfig {
-            id: format!("user:{stamp}"),
+            id: edit_id.clone().unwrap_or_else(|| format!("user:{stamp}")),
             name,
             kind: "shell".into(),
             command,
@@ -5286,7 +5378,13 @@ impl Workbench {
             .filter(|config| !config.detected)
             .cloned()
             .collect::<Vec<_>>();
-        user_configs.push(config.clone());
+        if let Some(edit_id) = &edit_id
+            && let Some(existing) = user_configs.iter_mut().find(|item| item.id == *edit_id)
+        {
+            *existing = config.clone();
+        } else {
+            user_configs.push(config.clone());
+        }
         match self.host.save_run_configs(&user_configs, &[]) {
             Ok(()) => {
                 if let Ok(configs) = self.host.run_configs() {
@@ -5298,6 +5396,7 @@ impl Workbench {
                 }
                 self.run_status = format!("Saved run configuration {}", config.name).into();
                 self.run_editor_open = false;
+                self.run_edit_id = None;
                 self.run_editor_status = gpui::SharedString::default();
                 for input in [
                     &self.run_name_input,
@@ -7864,6 +7963,28 @@ impl Workbench {
 
     pub fn run_config_count(&self) -> usize {
         self.run_configs.len()
+    }
+
+    pub fn smoke_edit_run_config(&mut self, name: String, cx: &mut Context<Self>) {
+        let index = self
+            .run_configs
+            .iter()
+            .position(|config| !config.detected)
+            .unwrap_or(0);
+        self.edit_run_config_editor(index, cx);
+        self.run_name_input.update(cx, |input, cx| {
+            input.set_content(name, cx);
+        });
+        self.save_run_config_editor(cx);
+    }
+
+    pub fn smoke_delete_run_config(&mut self, cx: &mut Context<Self>) {
+        let index = self
+            .run_configs
+            .iter()
+            .position(|config| !config.detected)
+            .unwrap_or(0);
+        self.delete_run_config(index, cx);
     }
 
     pub fn smoke_outline(&mut self, cx: &mut Context<Self>) {
@@ -16665,7 +16786,33 @@ impl Workbench {
                         this.selected_run = index;
                         cx.notify();
                     }))
-                    .child(config.name.clone()),
+                    .child(config.name.clone())
+                    .when(!config.detected, |row| {
+                        row.child(
+                            div()
+                                .id(("run-config-edit", index))
+                                .px_1()
+                                .text_size(px(8.5))
+                                .text_color(theme.accent)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.edit_run_config_editor(index, cx);
+                                }))
+                                .child("Edit"),
+                        )
+                        .child(
+                            div()
+                                .id(("run-config-delete", index))
+                                .px_1()
+                                .text_size(px(8.5))
+                                .text_color(theme.error)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.delete_run_config(index, cx);
+                                }))
+                                .child("×"),
+                        )
+                    }),
             );
         }
         let mut lines: Vec<String> = self.run_output.lines().map(str::to_owned).collect();
@@ -17176,12 +17323,7 @@ impl Workbench {
                                 .bg(theme.panel_alt)
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.run_editor_open = true;
-                                    this.run_editor_status = "Fill the fields, then Save".into();
-                                    let cwd = this.root.display().to_string();
-                                    this.run_cwd_input.update(cx, |input, cx| {
-                                        input.set_content(cwd, cx);
-                                    });
+                                    this.new_run_config_editor(cx);
                                     let focus = this.run_name_input.read(cx).focus_handle(cx);
                                     window.focus(&focus, cx);
                                     cx.notify();
