@@ -261,6 +261,23 @@ pub fn review_comments(root: &Path, number: u32) -> IdeResult<Vec<PrReviewCommen
     )?))
 }
 
+/// Submitted reviews of a pull request (every page).
+pub fn reviews(root: &Path, number: u32) -> IdeResult<Vec<PrReview>> {
+    let path = format!("repos/{{owner}}/{{repo}}/pulls/{number}/reviews?per_page=100");
+    parse(parse_reviews(&run(root, &["api", "--paginate", &path])?))
+}
+
+/// Dismisses review `review_id` with a message (`gh api -X PUT .../dismissals`).
+pub fn dismiss_review(root: &Path, number: u32, review_id: u64, message: &str) -> IdeResult<()> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(IdeError::invalid("the dismissal message is empty"));
+    }
+    let path = format!("repos/{{owner}}/{{repo}}/pulls/{number}/reviews/{review_id}/dismissals");
+    let field = format!("message={message}");
+    run(root, &["api", "--method", "PUT", &path, "-f", &field]).map(drop)
+}
+
 /// `gh pr checkout <n>`: creates / updates a local branch for the pull request and switches to it.
 pub fn checkout(
     root: &Path,
@@ -356,6 +373,101 @@ pub fn add_comment(root: &Path, number: u32, body: &str) -> IdeResult<()> {
     }
     let n = number.to_string();
     run(root, &["pr", "comment", &n, "--body", body]).map(drop)
+}
+
+fn reviewer_login(login: &str) -> IdeResult<&str> {
+    let login = login.trim().strip_prefix('@').unwrap_or(login.trim());
+    if login.is_empty() {
+        return Err(IdeError::invalid("the reviewer login is empty"));
+    }
+    if login.chars().any(char::is_whitespace) {
+        return Err(IdeError::invalid("the reviewer login contains whitespace"));
+    }
+    Ok(login)
+}
+
+/// Requests a review (`gh pr edit --add-reviewer`).
+pub fn request_reviewer(root: &Path, number: u32, login: &str) -> IdeResult<()> {
+    let login = reviewer_login(login)?;
+    let n = number.to_string();
+    run(root, &["pr", "edit", &n, "--add-reviewer", login]).map(drop)
+}
+
+/// Closes an open pull request (`gh pr close`).
+pub fn close(root: &Path, number: u32) -> IdeResult<()> {
+    let n = number.to_string();
+    run(root, &["pr", "close", &n]).map(drop)
+}
+
+/// Reopens a closed pull request (`gh pr reopen`).
+pub fn reopen(root: &Path, number: u32) -> IdeResult<()> {
+    let n = number.to_string();
+    run(root, &["pr", "reopen", &n]).map(drop)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+/// Merges a pull request (`gh pr merge`), optionally deleting its branch.
+pub fn merge(root: &Path, number: u32, method: MergeMethod, delete_branch: bool) -> IdeResult<()> {
+    let n = number.to_string();
+    let flag = match method {
+        MergeMethod::Merge => "--merge",
+        MergeMethod::Squash => "--squash",
+        MergeMethod::Rebase => "--rebase",
+    };
+    let mut args = vec!["pr", "merge", &n, flag];
+    if delete_branch {
+        args.push("--delete-branch");
+    }
+    run(root, &args).map(drop)
+}
+
+/// Adds an inline review comment on a diff line (`LEFT` base, `RIGHT` head).
+#[allow(clippy::too_many_arguments)]
+pub fn add_review_comment(
+    root: &Path,
+    number: u32,
+    commit_id: &str,
+    path: &str,
+    line: u32,
+    side: &str,
+    body: &str,
+) -> IdeResult<()> {
+    if body.trim().is_empty() {
+        return Err(IdeError::invalid("the review comment is empty"));
+    }
+    if line == 0 {
+        return Err(IdeError::invalid("the review comment line must be 1-based"));
+    }
+    if !matches!(side, "LEFT" | "RIGHT") {
+        return Err(IdeError::invalid(
+            "the review comment side must be LEFT or RIGHT",
+        ));
+    }
+    if commit_id.trim().is_empty() || path.trim().is_empty() {
+        return Err(IdeError::invalid(
+            "the review comment needs a commit and path",
+        ));
+    }
+    let body = serde_json::json!({
+        "commit_id": commit_id,
+        "path": path,
+        "line": line,
+        "side": side,
+        "body": body,
+    });
+    let request = GhApiRequest {
+        method: "POST".into(),
+        endpoint: format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments"),
+        body: Some(body.to_string()),
+        paginate: false,
+    };
+    api(root, &request).map(drop)
 }
 
 /// A GitHub API call through `gh api`: GraphQL (`endpoint` `graphql`, `body`
@@ -472,4 +584,18 @@ pub fn prepare_diff(
         files,
         root: ide_core::IpcPath(repo.root().to_path_buf()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reviewer_login;
+
+    #[test]
+    fn reviewer_login_strips_at_sign_and_rejects_empty_or_whitespace() {
+        assert_eq!(reviewer_login("@octocat").unwrap(), "octocat");
+        assert_eq!(reviewer_login("  octocat  ").unwrap(), "octocat");
+        assert!(reviewer_login("").is_err());
+        assert!(reviewer_login("@").is_err());
+        assert!(reviewer_login("octo cat").is_err());
+    }
 }

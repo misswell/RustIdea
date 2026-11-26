@@ -195,6 +195,19 @@ pub struct PrReviewComment {
     pub diff_hunk: String,
 }
 
+/// A submitted review of a pull request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrReview {
+    pub id: u64,
+    pub author: String,
+    /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED`, or `PENDING`.
+    pub state: String,
+    pub body: String,
+    pub submitted_at: String,
+    pub url: String,
+}
+
 // ---- raw gh shapes ----
 
 #[derive(Deserialize, Default)]
@@ -556,6 +569,17 @@ struct RawReviewComment {
     diff_hunk: String,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct RawApiReview {
+    id: u64,
+    user: Option<RawActor>,
+    state: String,
+    body: String,
+    submitted_at: String,
+    html_url: String,
+}
+
 /// `gh api repos/{owner}/{repo}/pulls/<n>/comments --paginate`: one JSON array per page,
 /// concatenated (or an array of pages with `--slurp`).
 pub fn parse_review_comments(text: &str) -> serde_json::Result<Vec<PrReviewComment>> {
@@ -591,6 +615,42 @@ pub fn parse_review_comments(text: &str) -> serde_json::Result<Vec<PrReviewComme
         })
         .collect();
     out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(out)
+}
+
+/// `gh api repos/{owner}/{repo}/pulls/<n>/reviews --paginate`: one JSON array per page,
+/// concatenated (or an array of pages with `--slurp`).
+pub fn parse_reviews(text: &str) -> serde_json::Result<Vec<PrReview>> {
+    let mut raw: Vec<RawApiReview> = Vec::new();
+    for value in serde_json::Deserializer::from_str(text).into_iter::<serde_json::Value>() {
+        let value = value?;
+        let pages = match value {
+            serde_json::Value::Array(items)
+                if items.iter().all(|i| i.is_array()) && !items.is_empty() =>
+            {
+                items
+            }
+            other => vec![other],
+        };
+        for page in pages {
+            raw.extend(serde_json::from_value::<Vec<RawApiReview>>(page)?);
+        }
+    }
+    let mut out: Vec<PrReview> = raw
+        .into_iter()
+        .map(|review| PrReview {
+            id: review.id,
+            author: review
+                .user
+                .map(|user| user.login)
+                .unwrap_or_else(|| "ghost".into()),
+            state: review.state,
+            body: review.body,
+            submitted_at: review.submitted_at,
+            url: review.html_url,
+        })
+        .collect();
+    out.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at));
     Ok(out)
 }
 
@@ -753,5 +813,20 @@ mod tests {
                 ("core", "REQUESTED")
             ]
         );
+    }
+
+    #[test]
+    fn parses_reviews_with_ids_and_dismissed_state() {
+        let text = r#"[
+          {"id": 11, "user": {"login": "ann"}, "state": "APPROVED", "body": "ship it",
+           "submitted_at": "2026-01-01T00:00:00Z", "html_url": "https://github.example/11"},
+          {"id": 12, "user": {"login": "bob"}, "state": "DISMISSED", "body": "stale",
+           "submitted_at": "2026-01-02T00:00:00Z", "html_url": "https://github.example/12"}
+        ]"#;
+        let reviews = parse_reviews(text).unwrap();
+        assert_eq!(reviews.len(), 2);
+        assert_eq!(reviews[0].id, 11);
+        assert_eq!(reviews[0].author, "ann");
+        assert_eq!(reviews[1].state, "DISMISSED");
     }
 }
