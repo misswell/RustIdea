@@ -1,0 +1,347 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 5ddb62e..b18dab1 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -948,7 +948,7 @@ tokio-rustls = { version = "0.26", default-features = false }
+ toml = { version = "0.9", default-features = false, features = ["std", "serde", "parse"] }
+ toml_edit = { version = "0.22", default-features = false, features = ["parse"] }
+ tower-http = "0.4.4"
+-tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "cf5d3a63f9fa069fc32b9a73dc28830e427d5ee0" }
++tree-sitter = "0.25.10"
+ tracing = "0.1.40"
+ tracing-subscriber = "0.3"
+ tree-sitter-bash = "0.25.1"
+diff --git a/crates/edit_prediction_context/src/fake_definition_lsp.rs b/crates/edit_prediction_context/src/fake_definition_lsp.rs
+index 837d083..7aeeb62 100644
+--- a/crates/edit_prediction_context/src/fake_definition_lsp.rs
++++ b/crates/edit_prediction_context/src/fake_definition_lsp.rs
+@@ -442,7 +442,7 @@ fn extract_declarations_from_tree(
+         let mut name_range: Option<Range<usize>> = None;
+         let mut has_item_range = false;
+
+-        for capture in query_match.captures() {
++        for capture in query_match.captures {
+             let range = capture.node.byte_range();
+             if capture.index == outline_config.name_capture_ix {
+                 name_range = Some(range);
+diff --git a/crates/editor/src/completions.rs b/crates/editor/src/completions.rs
+index bfed8e4..53d0b30 100644
+--- a/crates/editor/src/completions.rs
++++ b/crates/editor/src/completions.rs
+@@ -46,6 +46,11 @@ impl Editor {
+         self.open_or_update_completions_menu(None, None, false, window, cx);
+     }
+ 
++    /// Integration entry point for hosts that own their own completion source.
++    pub fn open_completions_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        self.open_or_update_completions_menu(None, None, false, window, cx);
++    }
++
+     pub fn confirm_completion(
+         &mut self,
+         action: &ConfirmCompletion,
+diff --git a/crates/editor/src/editor.rs b/crates/editor/src/editor.rs
+index afaa963..d80e75a 100644
+--- a/crates/editor/src/editor.rs
++++ b/crates/editor/src/editor.rs
+@@ -1616,6 +1616,16 @@ pub struct RenameTarget {
+     language_server_id: Option<LanguageServerId>,
+ }
+ 
++impl RenameTarget {
++    /// Integration constructor for hosts that provide rename metadata.
++    pub fn new(range: Range<text::Anchor>, language_server_id: Option<LanguageServerId>) -> Self {
++        Self {
++            range,
++            language_server_id,
++        }
++    }
++}
++
+ #[doc(hidden)]
+ pub struct RenameState {
+     pub range: Range<Anchor>,
+@@ -3312,6 +3322,13 @@ impl Editor {
+         self.semantics_provider = provider;
+     }
+
++    pub fn set_code_action_provider(&mut self, provider: Option<Rc<dyn CodeActionProvider>>) {
++        self.code_action_providers.clear();
++        if let Some(provider) = provider {
++            self.code_action_providers.push(provider);
++        }
++    }
++
+     pub fn placeholder_text(&self, cx: &mut App) -> Option<String> {
+         self.placeholder_display_map
+             .as_ref()
+diff --git a/crates/editor/src/jsx_tag_auto_close.rs b/crates/editor/src/jsx_tag_auto_close.rs
+index b6f79cc..8866fe6 100644
+--- a/crates/editor/src/jsx_tag_auto_close.rs
++++ b/crates/editor/src/jsx_tag_auto_close.rs
+@@ -19,7 +19,7 @@ pub struct JsxTagCompletionState {
+ /// that corresponds to the tag name
+ /// Note that this is not configurable, i.e. we assume the first
+ /// named child of a tag node is the tag name
+-const TS_NODE_TAG_NAME_CHILD_INDEX: u32 = 0;
++const TS_NODE_TAG_NAME_CHILD_INDEX: usize = 0;
+ 
+ /// Maximum number of parent elements to walk back when checking if an open tag
+ /// is already closed.
+diff --git a/crates/language/src/language.rs b/crates/language/src/language.rs
+index d7a5cff..18273a6 100644
+--- a/crates/language/src/language.rs
++++ b/crates/language/src/language.rs
+@@ -110,7 +110,7 @@ pub use buffer::*;
+ pub use diagnostic::{
+     Diagnostic, DiagnosticMessage, DiagnosticSourceKind, RelatedInformation, RelatedLocation,
+ };
+-pub use diagnostic_set::{DiagnosticEntry, DiagnosticEntryRef, DiagnosticGroup};
++pub use diagnostic_set::{DiagnosticEntry, DiagnosticEntryRef, DiagnosticGroup, DiagnosticSet};
+ pub use language_registry::{
+     BinaryStatus, LanguageNotFound, LanguageQueries, LanguageRegistry, QueryFile,
+     QueryFileContents, QueryFiles,
+@@ -1210,7 +1210,7 @@ impl Language {
+             let mut captures = cursor.captures(query, tree.root_node(), text.text_provider());
+             let capture_refs = iter::from_fn(move || {
+                 let (query_match, capture_index) = captures.next()?;
+-                let capture = query_match.captures()[*capture_index];
++                let capture = query_match.captures[*capture_index];
+                 Some((
+                     capture.node.byte_range(),
+                     HighlightCaptureRef {
+diff --git a/crates/language/src/syntax_map.rs b/crates/language/src/syntax_map.rs
+index 41232cf..77ddcf5 100644
+--- a/crates/language/src/syntax_map.rs
++++ b/crates/language/src/syntax_map.rs
+@@ -15,7 +15,7 @@ use std::{
+     cmp::{self, Ordering, Reverse},
+     collections::BinaryHeap,
+     fmt, iter,
+-    ops::{ControlFlow, Deref, DerefMut, Range},
++    ops::{Deref, DerefMut, Range},
+     sync::{Arc, LazyLock},
+     time::{Duration, Instant},
+ };
+@@ -171,7 +171,7 @@ pub struct SyntaxMapMatch<'a> {
+ 
+ struct SyntaxMapCapturesLayer<'a> {
+     depth: usize,
+-    captures: QueryCaptures<'a, 'a, 'static, TextProvider<'a>, &'a [u8]>,
++    captures: QueryCaptures<'a, 'a, TextProvider<'a>, &'a [u8]>,
+     next_capture: Option<QueryCapture<'a>>,
+     grammar_index: usize,
+     _query_cursor: QueryCursorHandle,
+@@ -183,7 +183,7 @@ struct SyntaxMapMatchesLayer<'a> {
+     next_pattern_index: usize,
+     next_captures: Vec<QueryCapture<'a>>,
+     has_next: bool,
+-    matches: QueryMatches<'a, 'a, 'static, TextProvider<'a>, &'a [u8]>,
++    matches: QueryMatches<'a, 'a, TextProvider<'a>, &'a [u8]>,
+     query: &'a Query,
+     grammar_index: usize,
+     _query_cursor: QueryCursorHandle,
+@@ -1365,7 +1365,7 @@ impl<'a> SyntaxMapMatches<'a> {
+                 let containing_range_start = midpoint.saturating_sub(max_bytes_to_query / 2);
+                 let containing_range_end =
+                     containing_range_start.saturating_add(max_bytes_to_query);
+-                cursor.set_containing_byte_range(containing_range_start..containing_range_end);
++                cursor.set_byte_range(containing_range_start..containing_range_end);
+             }
+ 
+             cursor.set_byte_range(range.clone());
+@@ -1466,7 +1466,7 @@ impl<'a> SyntaxMapMatches<'a> {
+ 
+ impl SyntaxMapCapturesLayer<'_> {
+     fn advance(&mut self) {
+-        self.next_capture = self.captures.next().map(|(mat, ix)| mat.captures()[*ix]);
++        self.next_capture = self.captures.next().map(|(mat, ix)| mat.captures[*ix]);
+     }
+ 
+     fn sort_key(&self) -> (usize, Reverse<usize>, usize) {
+@@ -1487,7 +1487,7 @@ impl SyntaxMapMatchesLayer<'_> {
+                     continue;
+                 }
+                 self.next_captures.clear();
+-                self.next_captures.extend_from_slice(mat.captures());
++                self.next_captures.extend_from_slice(mat.captures);
+                 self.next_pattern_index = mat.pattern_index;
+                 self.has_next = true;
+                 return;
+@@ -1546,7 +1546,7 @@ fn has_parent(args: &[QueryPredicateArg], mat: &QueryMatch) -> bool {
+         return false;
+     };
+ 
+-    let Some(capture) = mat.captures().iter().find(|c| c.index == *capture_ix) else {
++    let Some(capture) = mat.captures.iter().find(|c| c.index == *capture_ix) else {
+         return false;
+     };
+ 
+@@ -1617,9 +1617,9 @@ fn parse_text(
+                 let elapsed = now.elapsed();
+                 if elapsed > budget {
+                     *timed_out = true;
+-                    ControlFlow::Break(())
++                    false
+                 } else {
+-                    ControlFlow::Continue(())
++                    true
+                 }
+             }
+         });
+@@ -1994,7 +1994,7 @@ impl<'a> SyntaxLayer<'a> {
+ 
+         let mut query_cursor = QueryCursorHandle::new();
+         query_cursor.set_byte_range(offset.saturating_sub(1)..offset.saturating_add(1));
+-        query_cursor.set_containing_byte_range(
++        query_cursor.set_byte_range(
+             offset.saturating_sub(MAX_BYTES_TO_QUERY / 2)
+                 ..offset.saturating_add(MAX_BYTES_TO_QUERY / 2),
+         );
+@@ -2002,7 +2002,7 @@ impl<'a> SyntaxLayer<'a> {
+         let mut smallest_match: Option<(u32, Range<usize>)> = None;
+         let mut matches = query_cursor.matches(&config.query, self.node(), text);
+         while let Some(mat) = matches.next() {
+-            for capture in mat.captures() {
++            for capture in mat.captures {
+                 let Some(override_entry) = config.values.get(&capture.index) else {
+                     continue;
+                 };
+@@ -2272,8 +2272,8 @@ impl Drop for QueryCursorHandle {
+         let mut cursor = self.0.take().unwrap();
+         cursor.set_byte_range(0..usize::MAX);
+         cursor.set_point_range(Point::zero().to_ts_point()..Point::MAX.to_ts_point());
+-        cursor.set_containing_byte_range(0..usize::MAX);
+-        cursor.set_containing_point_range(Point::zero().to_ts_point()..Point::MAX.to_ts_point());
++        cursor.set_byte_range(0..usize::MAX);
++        cursor.set_point_range(Point::zero().to_ts_point()..Point::MAX.to_ts_point());
+         cursor.set_max_start_depth(None);
+         QUERY_CURSORS.lock().push(cursor)
+     }
+diff --git a/crates/language/src/syntax_map/syntax_map_tests.rs b/crates/language/src/syntax_map/syntax_map_tests.rs
+index d51682c..57c1b27 100644
+--- a/crates/language/src/syntax_map/syntax_map_tests.rs
++++ b/crates/language/src/syntax_map/syntax_map_tests.rs
+@@ -80,7 +80,7 @@ fn test_query_text_inside_multibyte_character() -> anyhow::Result<()> {
+             let mut cursor = QueryCursor::new();
+             let mut matches = cursor.matches(&query, tree.root_node(), TextProvider(&text));
+             let query_match = matches.next().expect("predicate matches the error node");
+-            let node = query_match.captures().first().expect("error capture").node;
++            let node = query_match.captures.first().expect("error capture").node;
+             assert_eq!(node.start_byte(), range.start_byte);
+             assert!(!source.is_char_boundary(node.start_byte()));
+             assert_eq!(
+diff --git a/crates/languages/src/c.rs b/crates/languages/src/c.rs
+index 85ae85e..fbe26b4 100644
+--- a/crates/languages/src/c.rs
++++ b/crates/languages/src/c.rs
+@@ -762,7 +762,7 @@ mod tests {
+         let mut captures = Vec::new();
+ 
+         while let Some(query_match) = matches.next() {
+-            for capture in query_match.captures() {
++            for capture in query_match.captures {
+                 let capture_name = query.capture_names()[capture.index as usize];
+                 let captured_text = &source[capture.node.byte_range()];
+ 
+diff --git a/crates/languages/src/cpp.rs b/crates/languages/src/cpp.rs
+index 08a80fe..6892d5f 100644
+--- a/crates/languages/src/cpp.rs
++++ b/crates/languages/src/cpp.rs
+@@ -679,7 +679,7 @@ mod tests {
+         let mut captures = Vec::new();
+ 
+         while let Some(query_match) = matches.next() {
+-            for capture in query_match.captures() {
++            for capture in query_match.captures {
+                 let capture_name = query.capture_names()[capture.index as usize];
+                 let captured_text = &source[capture.node.byte_range()];
+ 
+@@ -718,7 +718,7 @@ mod tests {
+         let mut captures = Vec::new();
+ 
+         while let Some(query_match) = matches.next() {
+-            for capture in query_match.captures() {
++            for capture in query_match.captures {
+                 let capture_name = query.capture_names()[capture.index as usize];
+                 let captured_text = &source[capture.node.byte_range()];
+ 
+diff --git a/crates/settings_json/src/settings_json.rs b/crates/settings_json/src/settings_json.rs
+index c56ad0a..6283942 100644
+--- a/crates/settings_json/src/settings_json.rs
++++ b/crates/settings_json/src/settings_json.rs
+@@ -133,12 +133,12 @@ pub fn replace_value_in_json_text<T: AsRef<str>>(
+ 
+     let mut matches = cursor.matches(&PAIR_QUERY, syntax_tree.root_node(), text.as_bytes());
+     while let Some(mat) = matches.next() {
+-        if mat.captures().len() != 2 {
++        if mat.captures.len() != 2 {
+             continue;
+         }
+ 
+-        let key_range = mat.captures()[0].node.byte_range();
+-        let value_range = mat.captures()[1].node.byte_range();
++        let key_range = mat.captures[0].node.byte_range();
++        let value_range = mat.captures[1].node.byte_range();
+ 
+         // Don't enter sub objects until we find an exact
+         // match for the current keypath
+@@ -176,8 +176,8 @@ pub fn replace_value_in_json_text<T: AsRef<str>>(
+             }
+ 
+             if let Some(array_replacement) = handle_possible_array_value(
+-                &mat.captures()[0].node,
+-                &mat.captures()[1].node,
++                &mat.captures[0].node,
++                &mat.captures[1].node,
+                 text,
+                 &key_path[depth..],
+                 new_value,
+diff --git a/crates/tasks_ui/src/tasks_ui.rs b/crates/tasks_ui/src/tasks_ui.rs
+index a50f175..c30d72a 100644
+--- a/crates/tasks_ui/src/tasks_ui.rs
++++ b/crates/tasks_ui/src/tasks_ui.rs
+@@ -57,7 +57,7 @@ pub fn insert_task_json_into_editor(
+ 
+     let mut last_offset = None;
+     while let Some(mat) = matches.next() {
+-        if let Some(pos) = mat.captures().first().map(|m| m.node.byte_range().end) {
++        if let Some(pos) = mat.captures.first().map(|m| m.node.byte_range().end) {
+             last_offset = Some(MultiBufferOffset(pos))
+         }
+     }
+@@ -75,7 +75,7 @@ pub fn insert_task_json_into_editor(
+         );
+ 
+         if let Some(mat) = matches.next() {
+-            if let Some(pos) = mat.captures().first().map(|m| m.node.byte_range().end - 1) {
++            if let Some(pos) = mat.captures.first().map(|m| m.node.byte_range().end - 1) {
+                 edits.push((
+                     MultiBufferOffset(pos)..MultiBufferOffset(pos),
+                     format!("\n{new_task}\n"),
+diff --git a/crates/terminal/src/mappings/keys.rs b/crates/terminal/src/mappings/keys.rs
+index b67d0ad..8864125 100644
+--- a/crates/terminal/src/mappings/keys.rs
++++ b/crates/terminal/src/mappings/keys.rs
+@@ -44,7 +44,7 @@ impl TerminalModifiers {
+     }
+ }
+ 
+-pub(crate) fn to_esc_str(
++pub fn to_esc_str(
+     keystroke: &Keystroke,
+     mode: Modes,
+     option_as_meta: bool,
+diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
+index a2c7c3f..7d0abe9 100644
+--- a/crates/terminal/src/terminal.rs
++++ b/crates/terminal/src/terminal.rs
+@@ -73,7 +73,7 @@ use crate::alacritty::{
+     vi_motion,
+ };
+ use crate::mappings::colors::to_vte_rgb;
+-use crate::mappings::keys::to_esc_str;
++pub use crate::mappings::keys::to_esc_str;
+ 
+ /// Process-wide flag set by headless hosts (e.g. the eval CLI) that have no
+ /// controlling TTY. In such sandboxes PTY allocation and acquiring a

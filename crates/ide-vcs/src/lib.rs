@@ -1317,6 +1317,41 @@ impl Repo {
         Ok(out.stdout_str())
     }
 
+    /// Unified diff between two revisions, optionally limited to repository-relative
+    /// paths. Bounded and cancellable.
+    pub fn revision_patch(
+        &self,
+        from: &str,
+        to: &str,
+        paths: &[String],
+        max_bytes: usize,
+        cancel: &CancellationToken,
+    ) -> IdeResult<String> {
+        let _scope = crate::ExecutionScope::enter(
+            self.execution_allowed
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
+        for rev in [from, to] {
+            if rev.is_empty() || rev.starts_with('-') || rev.contains('\0') {
+                return Err(ide_core::IdeError::invalid("invalid revision"));
+            }
+        }
+        let overrides = cli::filter_overrides(self.root(), cancel)?;
+        let mut args: Vec<&str> = overrides.iter().map(String::as_str).collect();
+        args.extend([
+            "--literal-pathspecs",
+            "--no-pager",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+        ]);
+        args.extend_from_slice(cli::submodule_guards());
+        args.extend([from, to, "--"]);
+        args.extend(paths.iter().map(String::as_str));
+        let out = cli::run_bounded(self.root(), &args, cancel, max_bytes)?;
+        Ok(out.stdout_str())
+    }
+
     /// Unified diff of a file: index↔worktree (`staged == false`, untracked files diff
     /// against /dev/null) or HEAD↔index (`staged == true`). Empty when unchanged.
     pub fn diff_text(
