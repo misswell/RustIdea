@@ -1,11 +1,13 @@
 # macOS release checklist
 
-Status: `0.2.0` stability release preparation. The previous 0.1.2 universal app
-is Developer ID signed, notarized (`Accepted`), stapled and `spctl` accepted;
-the current stability changes still require the final three-platform CI run,
-rebuild/notarization and a new immutable tag. Interactive Phase 2 acceptance
-and comparative UI performance remain open because the macOS console is
-screen-locked.
+Status: `0.2.0` released as immutable tag `v0.2.0` at commit `0678891`.
+The universal app is Developer ID signed, notarized (`Accepted`, submission
+`0ee3c7d4-1dfb-417d-a8cd-3d2e1b5681cf`), stapled and `spctl` accepted. The
+GitHub Release asset SHA-256 is
+`02c1da12a7ff53d290988afed16c6d7b6a47ba834d2aefa9336f68471a4d97e5`.
+The three-platform CI matrix was stopped at the release owner's request and is
+not claimed green. Interactive Phase 2 acceptance and comparative UI
+performance remain open because the macOS console is screen-locked.
 
 1. Keep `RUSTIDEA_MIGRATION_AUDIT.md`, `RUSTIDEA_FEATURE_PARITY.md` and
    `RUSTIDEA_ARCHITECTURE.md` accurate. Do not describe placeholders as

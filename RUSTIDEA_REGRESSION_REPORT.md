@@ -2,7 +2,7 @@
 
 ## Scope
 
-Version: `0.2.0` (working tree before final release commit).  
+Version: `0.2.0` (release commit `0678891`).  
 Host: macOS 27.2.1, Apple M5, arm64.  
 Rust: 1.98.1, edition 2024.  
 Architecture: GPUI native application with reused Apache-2.0 `ide-*` backend
@@ -53,18 +53,23 @@ This is a test-harness safety fix, not a product behavior change.
 
 ## Release build, signature and notarization
 
-Status: **passed** for commit `45a02d36cc255170d76faf6f29e25f1caa3b796a`.
+Status: **passed** for commit `0678891`.
 
 - Universal executable: `x86_64 arm64`.
 - Signature: Developer ID Application `Guofeng Liu (U8U443D7ZL)`, hardened
   runtime, secure timestamp `2026-11-24 18:29:55`.
-- Notary submission `9bf898c6-a891-4b42-9f47-7aff034aea5b`: `Accepted`.
+- Notary submission `0ee3c7d4-1dfb-417d-a8cd-3d2e1b5681cf`: `Accepted`.
 - Stapler validation and `spctl --assess --type execute`: accepted
   (`source=Notarized Developer ID`).
 - `otool -L` on the universal executable: no WebKit, WebView, JavaScriptCore,
   Tauri or Wry framework.
 - Universal zip SHA-256:
-  `4072f5c4adbe192d19ce47291139dd7067c718852a8159a14ecfe0d2ed116a8c`.
+  `02c1da12a7ff53d290988afed16c6d7b6a47ba834d2aefa9336f68471a4d97e5`.
+
+The three-platform GitHub Actions matrix was stopped at the release owner's
+request before completion; it is not claimed as green for this release. Local
+formatting, targeted Clippy, release build, signature, notarization and
+Gatekeeper checks passed.
 
 ## Interactive acceptance still open
 
