@@ -562,6 +562,13 @@ impl NativeHost {
         ide_host::ops::db::connected(&self.host, MAIN_WINDOW)
     }
 
+    pub async fn db_save_sources(&self, sources: Vec<ide_db::DataSource>) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::db::save_sources(&host, MAIN_WINDOW, sources).await
+        })
+        .await
+    }
+
     pub async fn db_schemas(&self, id: String) -> IdeResult<Vec<String>> {
         self.run(
             move |host| async move { ide_host::ops::db::schemas(&host, MAIN_WINDOW, &id).await },

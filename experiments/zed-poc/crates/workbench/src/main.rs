@@ -304,6 +304,8 @@ fn main() {
                 let smoke_db_console =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_DB_CONSOLE").is_some();
                 let smoke_db_query = std::env::var("RUSTIDEA_ZED_SMOKE_DB_QUERY").ok();
+                let smoke_db_add_sqlite =
+                    std::env::var("RUSTIDEA_ZED_SMOKE_DB_ADD_SQLITE").ok();
                 let smoke_remote = std::env::var_os("RUSTIDEA_ZED_SMOKE_REMOTE").is_some();
                 let smoke_agents = std::env::var_os("RUSTIDEA_ZED_SMOKE_AGENTS").is_some();
                 let smoke_tools = std::env::var_os("RUSTIDEA_ZED_SMOKE_TOOLS").is_some();
@@ -460,6 +462,15 @@ fn main() {
                                 }
                                 if let Some(sql) = &smoke_db_query {
                                     app.smoke_prepare_db_query(sql.clone(), cx);
+                                }
+                                if let Some(spec) = &smoke_db_add_sqlite
+                                    && let Some((name, file)) = spec.split_once('|')
+                                {
+                                    app.smoke_add_sqlite_source(
+                                        name.to_owned(),
+                                        file.to_owned(),
+                                        cx,
+                                    );
                                 }
                                 if smoke_remote {
                                     app.smoke_remote(cx);
@@ -850,7 +861,8 @@ fn main() {
                                     app.smoke_active_text(cx).lines().next().unwrap_or_default()
                                 );
                                 eprintln!(
-                                    "WORKBENCH_DB_UI schemas={} tables={} status={:?} console={:?} output={:?}",
+                                    "WORKBENCH_DB_UI sources={} schemas={} tables={} status={:?} console={:?} output={:?}",
+                                    app.db_source_count(),
                                     app.db_schema_count(),
                                     app.db_table_count(),
                                     app.db_tables_status_text(),

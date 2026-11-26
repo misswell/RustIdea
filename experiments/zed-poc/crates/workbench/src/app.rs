@@ -981,6 +981,10 @@ pub struct Workbench {
     db_table_selected: usize,
     db_console_path: Option<PathBuf>,
     db_busy: bool,
+    db_source_editor_open: bool,
+    db_source_name_input: Entity<TextInput>,
+    db_source_file_input: Entity<TextInput>,
+    db_source_editor_status: gpui::SharedString,
     db_status: gpui::SharedString,
     db_output: String,
     ssh_configs: Vec<ide_core::remote_settings::SshConfiguration>,
@@ -1593,6 +1597,26 @@ impl Workbench {
                 cx,
             )
         });
+        let db_source_name_input = cx.new(|cx| {
+            TextInput::new(
+                "Data source name",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let db_source_file_input = cx.new(|cx| {
+            TextInput::new(
+                "SQLite file (relative to the project, e.g. app.db)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
         let scratch_name_input = cx.new(|cx| {
             TextInput::new(
                 "Scratch file name (notes, Main.java…) then Enter",
@@ -1909,6 +1933,10 @@ impl Workbench {
             db_table_selected: 0,
             db_console_path: None,
             db_busy: false,
+            db_source_editor_open: false,
+            db_source_name_input,
+            db_source_file_input,
+            db_source_editor_status: gpui::SharedString::default(),
             db_status: "Select DATABASE to load data sources".into(),
             db_output: String::new(),
             ssh_configs: Vec::new(),
@@ -2759,6 +2787,110 @@ impl Workbench {
                         },
                         Err(error) => {
                             app.db_status = format!("Console failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_db_source_editor(&mut self, cx: &mut Context<Self>) {
+        self.db_source_editor_open = true;
+        self.db_source_name_input.update(cx, |input, cx| {
+            input.set_content("Local SQLite", cx);
+        });
+        self.db_source_file_input.update(cx, |input, cx| {
+            input.set_content("app.db", cx);
+        });
+        self.db_source_editor_status =
+            "Creates a project data source in .openidea/data-sources.toml".into();
+        cx.notify();
+    }
+
+    fn close_db_source_editor(&mut self, cx: &mut Context<Self>) {
+        self.db_source_editor_open = false;
+        self.db_source_editor_status = gpui::SharedString::default();
+        cx.notify();
+    }
+
+    fn create_db_source(&mut self, cx: &mut Context<Self>) {
+        let name = self
+            .db_source_name_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let file = self
+            .db_source_file_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if name.is_empty() || file.is_empty() {
+            self.db_source_editor_status = "Name and SQLite file are required".into();
+            cx.notify();
+            return;
+        }
+        self.add_sqlite_source(name, file, cx);
+    }
+
+    fn add_sqlite_source(&mut self, name: String, file: String, cx: &mut Context<Self>) {
+        let path = PathBuf::from(&file);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.root.join(path)
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let source = ide_db::DataSource {
+            id: format!("sqlite-{stamp}"),
+            name,
+            driver: ide_db::DbDriver::Sqlite,
+            file: Some(path.into()),
+            ..Default::default()
+        };
+        let mut sources = self.db_sources.clone();
+        sources.push(source.clone());
+        let host = self.host.clone();
+        self.db_busy = true;
+        self.db_status = format!("Adding {}…", source.name).into();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_save_sources(sources).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.db_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.db_source_editor_open = false;
+                            app.db_source_editor_status = gpui::SharedString::default();
+                            app.db_source_name_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                            app.db_source_file_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                            app.refresh_db(cx);
+                            if let Some(index) =
+                                app.db_sources.iter().position(|item| item.id == source.id)
+                            {
+                                app.db_selected = index;
+                                app.refresh_db_browser(cx);
+                            }
+                            app.db_status = format!("Added data source {}", source.name).into();
+                        }
+                        Err(error) => {
+                            app.db_status =
+                                format!("Add data source failed: {}", error.message).into();
+                            app.db_source_editor_status = app.db_status.clone();
                         }
                     }
                     cx.notify();
@@ -8489,8 +8621,18 @@ impl Workbench {
         cx.notify();
     }
 
+    pub fn smoke_add_sqlite_source(&mut self, name: String, file: String, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Database, cx);
+        self.refresh_db(cx);
+        self.add_sqlite_source(name, file, cx);
+    }
+
     pub fn smoke_run_db_query(&mut self, cx: &mut Context<Self>) {
         self.run_selected_db_sql(cx);
+    }
+
+    pub fn db_source_count(&self) -> usize {
+        self.db_sources.len()
     }
 
     pub fn db_schema_count(&self) -> usize {
@@ -11311,9 +11453,11 @@ impl Workbench {
             .flex_col()
             .child(
                 div()
-                    .h(px(28.))
+                    .min_h(px(28.))
                     .px_2()
+                    .py(px(2.))
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .border_b_1()
@@ -11513,15 +11657,87 @@ impl Workbench {
                 )
             })
             .children(lines.into_iter().map(|line| div().child(line)));
+        let source_form = div()
+            .px_2()
+            .py_1()
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(24.))
+                            .child(self.db_source_name_input.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(24.))
+                            .child(self.db_source_file_input.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child(self.db_source_editor_status.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("db-source-create")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.create_db_source(cx);
+                            }))
+                            .child("Create"),
+                    )
+                    .child(
+                        div()
+                            .id("db-source-cancel")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.muted)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.close_db_source_editor(cx);
+                            }))
+                            .child("Cancel"),
+                    ),
+            );
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(
                 div()
-                    .h(px(28.))
+                    .min_h(px(28.))
                     .px_2()
+                    .py(px(2.))
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .border_b_1()
@@ -11569,6 +11785,21 @@ impl Workbench {
                                 this.open_db_console(false, cx);
                             }))
                             .child("Console"),
+                    )
+                    .child(
+                        div()
+                            .id("db-add-source")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.open_db_source_editor(cx);
+                            }))
+                            .child("Add DB"),
                     )
                     .child(
                         div()
@@ -11623,6 +11854,7 @@ impl Workbench {
                             .child(self.db_status.clone()),
                     ),
             )
+            .when(self.db_source_editor_open, |view| view.child(source_form))
             .child(sources)
             .child(
                 div()
