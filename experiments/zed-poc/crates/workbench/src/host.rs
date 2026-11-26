@@ -1596,6 +1596,18 @@ impl NativeHost {
         .await
     }
 
+    pub async fn heap_compare(
+        &self,
+        base: ide_host::ops::heap::HeapSnapshotId,
+        current: ide_host::ops::heap::HeapSnapshotId,
+    ) -> IdeResult<Vec<ide_host::ops::heap::HeapClassDiff>> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            ide_host::ops::heap::debug_heap_compare(&host, MAIN_WINDOW, base, current).await
+        })
+        .await
+    }
+
     pub async fn heap_dominators(
         &self,
         snapshot: ide_host::ops::heap::HeapSnapshotId,

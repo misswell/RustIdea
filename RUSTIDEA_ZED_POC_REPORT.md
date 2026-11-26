@@ -440,7 +440,7 @@ Panel coverage at this commit:
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers, container log viewer (tail 500), pull images, prune per-object | `ide-docker` |
 | GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, conversation and inline diff comments, close/reopen, merge (merge/squash/rebase with two-click confirmation), open in browser | `ide-github`, `ide-vcs` |
-| Heap | import `.hprof`, class table, class object pages, GC-root path | `ops::heap::debug_heap_open/classes/dominators/path` |
+| Heap | import `.hprof`, class table, class object pages, GC-root path, class-by-class two-snapshot comparison | `ops::heap::debug_heap_open/classes/dominators/path/compare` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, call tree, source navigation | `ide-profiler` |
 | Logcat | adb devices, streaming threadtime log, level/text filters, Android Studio `tag:`/`level:`/`package:`/`message:` query grammar, persisted filter history, log export | `adb` process |
 | Scratch | list/create/edit scratch files and Java/Python/Rust/JS/Markdown templates in the app data directory | local workspace + `ops::doc` |
@@ -754,6 +754,13 @@ heap_status=rustidea-heap-sample.hprof · 8 objects · 7 classes
 heap_first="java.lang.Class · 7"
 ```
 
+Heap comparison smoke (same sample opened as base and current):
+
+```text
+heap_classes=6 heap_status=rustidea-heap-sample2.hprof · 8 objects · 7 classes
+heap_compare=6 heap_compare_status=6 classes · rustidea-heap-sample.hprof → rustidea-heap-sample2.hprof
+```
+
 Heap class object page smoke:
 
 ```text
@@ -911,8 +918,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   diff, submits reviews, conversation comments, inline diff comments,
   closes/reopens and merges pull requests (two-click confirmation). Heap
   imports and lists
-  classes and object pages with GC-root paths, but capture from a live JVM,
-  snapshot comparison and richer instance/field detail are missing. Profiler
+  classes and object pages with GC-root paths and compares two snapshots
+  class-by-class, but capture from a live JVM and richer instance/field detail are missing. Profiler
   imports Node CPU profiles, lists methods and shows a call tree, but
   recording new profiles and Python/JVM/perf formats are missing. Logcat lists devices, streams, filters threadtime output,
   supports the Android Studio query grammar, persists filter history and exports logs. The

@@ -569,6 +569,17 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn format_signed_bytes(delta: i64) -> String {
+    let sign = if delta > 0 {
+        "+"
+    } else if delta < 0 {
+        "−"
+    } else {
+        ""
+    };
+    format!("{sign}{}", format_bytes(delta.unsigned_abs()))
+}
+
 fn short_log_time(time: &str) -> &str {
     if time.len() > 12 {
         &time[time.len() - 12..]
@@ -853,6 +864,10 @@ pub struct Workbench {
     github_inline_status: gpui::SharedString,
     github_merge_confirm: Option<ide_github::MergeMethod>,
     heap_info: Option<ide_host::ops::heap::HeapSnapshotInfo>,
+    heap_base_info: Option<ide_host::ops::heap::HeapSnapshotInfo>,
+    heap_compare: Vec<ide_host::ops::heap::HeapClassDiff>,
+    heap_compare_status: gpui::SharedString,
+    heap_compare_busy: bool,
     heap_classes: Vec<ide_host::ops::heap::HeapClassRow>,
     heap_path_input: Entity<TextInput>,
     heap_status: gpui::SharedString,
@@ -1701,6 +1716,10 @@ impl Workbench {
             github_inline_status: gpui::SharedString::default(),
             github_merge_confirm: None,
             heap_info: None,
+            heap_base_info: None,
+            heap_compare: Vec::new(),
+            heap_compare_status: gpui::SharedString::default(),
+            heap_compare_busy: false,
             heap_classes: Vec::new(),
             heap_path_input,
             heap_status: "Import an .hprof heap snapshot".into(),
@@ -6439,16 +6458,13 @@ impl Workbench {
         } else {
             self.root.join(path)
         };
-        let previous = self.heap_info.as_ref().map(|info| info.id);
+        let previous_base = self.heap_base_info.as_ref().map(|info| info.id);
         let host = self.host.clone();
         self.heap_busy = true;
         self.heap_status = format!("Analyzing {}…", path.display()).into();
         cx.spawn(async move |this, cx| {
-            let mut previous_error = None;
-            if let Some(previous) = previous
-                && let Err(error) = host.heap_close(previous).await
-            {
-                previous_error = Some(error.message);
+            if let Some(previous_base) = previous_base {
+                let _ = host.heap_close(previous_base).await;
             }
             let result = host.heap_open(path).await;
             let result = match result {
@@ -6480,27 +6496,85 @@ impl Workbench {
                             )
                             .into();
                             app.heap_classes = classes;
+                            app.heap_base_info = app.heap_info.take();
                             app.heap_info = Some(snapshot);
+                            app.heap_compare.clear();
+                            app.heap_compare_status = app
+                                .heap_base_info
+                                .as_ref()
+                                .map(|base| format!("Base: {}", base.label))
+                                .unwrap_or_else(|| "Open another snapshot to compare".into())
+                                .into();
                         }
                         Ok((snapshot, Err(error))) => {
                             app.heap_status =
                                 format!("Heap classes failed: {}", error.message).into();
                             app.heap_classes.clear();
+                            app.heap_base_info = app.heap_info.take();
                             app.heap_info = Some(snapshot);
+                            app.heap_compare.clear();
+                            app.heap_compare_status = app
+                                .heap_base_info
+                                .as_ref()
+                                .map(|base| format!("Base: {}", base.label))
+                                .unwrap_or_else(|| "Open another snapshot to compare".into())
+                                .into();
                         }
                         Err(message) => {
-                            app.heap_status = format!(
-                                "{}{}",
-                                previous_error
-                                    .map(|error| format!(
-                                        "Close previous snapshot failed: {error}; "
-                                    ))
-                                    .unwrap_or_default(),
-                                message
+                            app.heap_status = message.into();
+                            app.heap_base_info = None;
+                            app.heap_compare_status =
+                                "Snapshot open failed; current snapshot kept".into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn compare_heap_snapshots(&mut self, cx: &mut Context<Self>) {
+        if self.heap_compare_busy {
+            return;
+        }
+        let Some(base) = self.heap_base_info.as_ref().cloned() else {
+            self.heap_compare_status = "Open a second snapshot to compare".into();
+            cx.notify();
+            return;
+        };
+        let Some(current) = self.heap_info.as_ref().cloned() else {
+            self.heap_compare_status = "Open a snapshot first".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        self.heap_compare_busy = true;
+        self.heap_compare_status = "Comparing snapshots…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.heap_compare(base.id, current.id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.heap_compare_busy = false;
+                    match result {
+                        Ok(compare) => {
+                            app.heap_compare_status = format!(
+                                "{} classes · {} → {}",
+                                compare.len(),
+                                base.label,
+                                current.label
                             )
                             .into();
-                            app.heap_classes.clear();
-                            app.heap_info = None;
+                            app.heap_compare = compare;
+                        }
+                        Err(error) => {
+                            app.heap_compare.clear();
+                            app.heap_compare_status =
+                                format!("Heap compare failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -8380,6 +8454,102 @@ impl Workbench {
             .first()
             .map(|object| format!("{} {}", object.class_name, object.address))
             .unwrap_or_default()
+    }
+
+    pub fn smoke_heap_compare(
+        &mut self,
+        base_path: String,
+        current_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        let base_path = self.root.join(base_path);
+        let current_path = self.root.join(current_path);
+        let host = self.host.clone();
+        self.heap_compare_busy = true;
+        self.heap_compare_status = "Opening two snapshots…".into();
+        cx.spawn(async move |this, cx| {
+            let base = match host.heap_open(base_path).await {
+                Ok(ide_host::ops::heap::HeapOpenResult::Ready { snapshot }) => Ok(snapshot),
+                Ok(ide_host::ops::heap::HeapOpenResult::NotEnoughDiskSpace {
+                    needed,
+                    available,
+                }) => Err(format!(
+                    "Not enough disk space: need {}, have {}",
+                    format_bytes(needed),
+                    format_bytes(available)
+                )),
+                Ok(ide_host::ops::heap::HeapOpenResult::Cancelled) => {
+                    Err("Heap analysis cancelled".to_owned())
+                }
+                Err(error) => Err(error.message),
+            };
+            let current = match host.heap_open(current_path).await {
+                Ok(ide_host::ops::heap::HeapOpenResult::Ready { snapshot }) => Ok(snapshot),
+                Ok(ide_host::ops::heap::HeapOpenResult::NotEnoughDiskSpace {
+                    needed,
+                    available,
+                }) => Err(format!(
+                    "Not enough disk space: need {}, have {}",
+                    format_bytes(needed),
+                    format_bytes(available)
+                )),
+                Ok(ide_host::ops::heap::HeapOpenResult::Cancelled) => {
+                    Err("Heap analysis cancelled".to_owned())
+                }
+                Err(error) => Err(error.message),
+            };
+            let result = match (base, current) {
+                (Ok(base), Ok(current)) => {
+                    let classes = host.heap_classes(current.id).await.unwrap_or_default();
+                    let compare = host.heap_compare(base.id, current.id).await;
+                    compare.map(|compare| (base, current, classes, compare))
+                }
+                (Err(error), _) | (_, Err(error)) => Err(ide_core::IdeError::invalid(error)),
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.heap_compare_busy = false;
+                    match result {
+                        Ok((base, current, classes, compare)) => {
+                            app.heap_status = format!(
+                                "{} · {} objects · {} classes",
+                                current.label, current.summary.objects, current.summary.classes
+                            )
+                            .into();
+                            app.heap_compare_status = format!(
+                                "{} classes · {} → {}",
+                                compare.len(),
+                                base.label,
+                                current.label
+                            )
+                            .into();
+                            app.heap_base_info = Some(base);
+                            app.heap_info = Some(current);
+                            app.heap_classes = classes;
+                            app.heap_compare = compare;
+                        }
+                        Err(error) => {
+                            app.heap_compare_status =
+                                format!("Heap compare failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn heap_compare_count(&self) -> usize {
+        self.heap_compare.len()
+    }
+
+    pub fn heap_compare_status_text(&self) -> String {
+        self.heap_compare_status.to_string()
     }
 
     pub fn smoke_profile(&mut self, dir: String, cx: &mut Context<Self>) {
@@ -13418,6 +13588,64 @@ impl Workbench {
                     ),
             );
         }
+        if !self.heap_compare.is_empty() {
+            rows = rows.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .bg(theme.panel_alt)
+                    .text_size(px(9.5))
+                    .text_color(theme.accent)
+                    .child(self.heap_compare_status.clone()),
+            );
+            for (index, diff) in self.heap_compare.iter().take(500).enumerate() {
+                let count_delta = diff.count as i64 - diff.base_count as i64;
+                let shallow_delta = diff.shallow as i64 - diff.base_shallow as i64;
+                let retained_delta = diff.retained as i64 - diff.base_retained as i64;
+                let color = if retained_delta > 0 {
+                    theme.warning
+                } else {
+                    theme.accent
+                };
+                rows = rows.child(
+                    div()
+                        .id(("heap-diff", index))
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .text_size(px(9.5))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_color(theme.text)
+                                        .child(diff.name.clone()),
+                                )
+                                .child(div().text_size(px(8.5)).text_color(theme.faint).child(
+                                    format!(
+                                        "count {:+} · shallow {}",
+                                        count_delta,
+                                        format_signed_bytes(shallow_delta)
+                                    ),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_color(color)
+                                .child(format_signed_bytes(retained_delta)),
+                        ),
+                );
+            }
+        }
         div()
             .size_full()
             .flex()
@@ -13467,6 +13695,28 @@ impl Workbench {
                                 this.close_heap_snapshot(cx);
                             }))
                             .child("Close"),
+                    )
+                    .child(
+                        div()
+                            .id("heap-compare")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.5))
+                            .text_color(if self.heap_base_info.is_some() {
+                                theme.accent
+                            } else {
+                                theme.faint
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.compare_heap_snapshots(cx);
+                            }))
+                            .child(if self.heap_compare_busy {
+                                "Comparing…"
+                            } else {
+                                "Compare"
+                            }),
                     )
                     .child(div().flex_1())
                     .child(
