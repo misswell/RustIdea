@@ -347,6 +347,8 @@ fn main() {
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK_ADD").is_some();
                 let smoke_notebook_clear_outputs =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NOTEBOOK_CLEAR_OUTPUTS").is_some();
+                let smoke_notebook_outputs =
+                    std::env::var("RUSTIDEA_ZED_SMOKE_NOTEBOOK_OUTPUTS").ok();
                 let smoke_search = std::env::var("RUSTIDEA_ZED_SMOKE_SEARCH").ok();
                 let smoke_replace = std::env::var("RUSTIDEA_ZED_SMOKE_REPLACE").ok();
                 let smoke_todo = std::env::var_os("RUSTIDEA_ZED_SMOKE_TODO").is_some();
@@ -668,6 +670,9 @@ fn main() {
                                 }
                                 if smoke_notebook_clear_outputs {
                                     app.smoke_notebook_clear_outputs(cx);
+                                }
+                                if let Some(json) = &smoke_notebook_outputs {
+                                    app.smoke_notebook_set_outputs(json.clone(), cx);
                                 }
                                 if smoke_debug_attach {
                                     app.smoke_debug_attach(cx);

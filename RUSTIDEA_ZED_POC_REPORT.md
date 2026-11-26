@@ -423,8 +423,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   source editing, and Commit uses `NotebookEdit::SetSource` followed by
   `ops::notebook::save`; the panel also inserts code/markdown cells, deletes
   cells and toggles code↔markdown through `NotebookEdit`; explicit Save and Run
-  all are in the panel header, and per-cell Clear Output uses
-  `NotebookEdit::SetOutputs` followed by save;
+  all are in the panel header; per-cell Clear Output and Edit Outputs use
+  `NotebookEdit::SetOutputs` followed by save, with outputs edited as a JSON
+  array in a Zed-Editor modal;
 - buffer edits are sent incrementally to
   `ide_host::ops::doc::edit`; saves use `ide_host::ops::doc::save`; external
   `DocPatched` events and diagnostics are applied back to Zed buffers;
@@ -464,7 +465,7 @@ Panel coverage at this commit:
 | Database | working (source/connect/query) | `ops::db` |
 | HTTP Client | file parse/run/response, environment selector, persisted response history with reopen/clear, plus unsaved multiline request editor with Send | `ide_http::run`, `ide_http::env`, `Project::http_history` |
 | Remote Host | SSH terminal, SFTP browse/preview/edit | `ops::term::spawn_ssh`, `SshManager` |
-| Notebook | viewer + cell edit/insert/delete/type + save/run all | `ops::notebook` |
+| Notebook | viewer + cell edit/insert/delete/type + output JSON edit/clear + save/run all | `ops::notebook` |
 | Agents | working (providers/tasks/timeline/prompt/cancel) | `ops::agent` |
 | MCP | list/toggle/add/update/remove stdio/HTTP/SSE servers | `ops::agent::mcp_*` |
 | Tools | list/install | `ops::tools` |
@@ -599,6 +600,15 @@ notebook_cells=2 notebook_outputs=0
 
 The saved `.ipynb` had the executed cell's `outputs` emptied and
 `execution_count` reset to null.
+
+Notebook output-edit smoke (JSON array replaced through
+`NotebookEdit::SetOutputs`):
+
+```text
+notebook_cells=2 notebook_outputs=1
+disk: execution_count=7
+disk: outputs=[{"output_type":"stream","name":"stdout","text":["hello from outputs\n"]}]
+```
 
 Quick-open smoke:
 
@@ -1024,7 +1034,8 @@ ide-github reviewer-login: 1 passed; 0 failed
   ignores backend patches for the document it owns).
 - Process-tree memory/performance comparison and three-platform CI.
 - Plugin live UI contributions, conditioned breakpoints/logpoints and Java/
-  Unity attach, richer notebook output editing (clear is implemented), live
+  Unity attach, rich notebook output rendering (JSON edit/clear is implemented,
+  but HTML/images/plots are shown as text), live
   remote-write verification (UI path exists), structured question/form widgets
   and live subagent/form verification
   are not yet integrated. MCP add/update/remove is wired for stdio, HTTP and

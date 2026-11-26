@@ -1061,6 +1061,8 @@ pub struct Workbench {
     notebook_edit_cell: Option<String>,
     notebook_editor: Option<Entity<Editor>>,
     notebook_edit_buffer: Option<Entity<Buffer>>,
+    notebook_edit_outputs: bool,
+    notebook_edit_execution_count: Option<u32>,
     notebook_edit_status: gpui::SharedString,
     agents: Vec<ide_agent::AgentProvider>,
     agents_status: gpui::SharedString,
@@ -2036,6 +2038,8 @@ impl Workbench {
             notebook_edit_cell: None,
             notebook_editor: None,
             notebook_edit_buffer: None,
+            notebook_edit_outputs: false,
+            notebook_edit_execution_count: None,
             notebook_edit_status: "Edit cell source".into(),
             agents: Vec::new(),
             agents_status: "Select AGENTS to load providers".into(),
@@ -3467,6 +3471,36 @@ impl Workbench {
         );
     }
 
+    fn set_notebook_outputs_json(&mut self, json: String, cx: &mut Context<Self>) {
+        let outputs = match serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                self.notebook_status = format!("Outputs must be a JSON array: {error}").into();
+                cx.notify();
+                return;
+            }
+        };
+        let Some(cell) = self
+            .notebook
+            .as_ref()
+            .and_then(|notebook| notebook.cells.iter().find(|cell| cell.cell_type == "code"))
+            .map(|cell| cell.id.clone())
+        else {
+            self.notebook_status = "No code cell to update".into();
+            cx.notify();
+            return;
+        };
+        self.apply_notebook_edit(
+            ide_notebook::NotebookEdit::SetOutputs {
+                cell,
+                outputs,
+                execution_count: Some(7),
+            },
+            "Setting smoke outputs…",
+            cx,
+        );
+    }
+
     fn open_notebook_cell_editor(
         &mut self,
         cell: String,
@@ -3481,62 +3515,83 @@ impl Workbench {
         self.notebook_edit_cell = Some(cell);
         self.notebook_edit_buffer = Some(buffer);
         self.notebook_editor = Some(editor);
+        self.notebook_edit_outputs = false;
+        self.notebook_edit_execution_count = None;
         self.notebook_edit_status = "Edit cell source; Commit writes through OpenIDEA".into();
         cx.notify();
     }
 
-    fn commit_notebook_cell_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(cell) = self.notebook_edit_cell.take() else {
-            return;
-        };
-        let Some(buffer) = self.notebook_edit_buffer.take() else {
-            return;
-        };
-        self.notebook_editor = None;
-        let source = buffer.read(cx).snapshot().text();
-        let Some(notebook) = self.notebook.clone() else {
-            self.notebook_status = "Notebook is not open".into();
-            cx.notify();
-            return;
-        };
-        let host = self.host.clone();
-        let id = notebook.id.clone();
-        let version = notebook.version;
-        self.notebook_status = "Updating cell…".into();
-        cx.spawn(async move |this, cx| {
-            let result = host
-                .notebook_edit(
-                    id.clone(),
-                    version,
-                    ide_notebook::NotebookEdit::SetSource { cell, source },
-                )
-                .await;
-            let result = match result {
-                Ok(_) => host.notebook_save(id).await,
-                Err(error) => Err(error),
-            };
-            let handle = this
-                .update(cx, |app, cx| {
-                    match result {
-                        Ok(notebook) => {
-                            app.notebook_status =
-                                format!("Cell updated · version {}", notebook.version).into();
-                            app.notebook = Some(notebook);
-                        }
-                        Err(error) => {
-                            app.notebook_status =
-                                format!("Cell update failed: {}", error.message).into();
-                        }
-                    }
-                    cx.notify();
-                    app.window_handle
-                })
-                .ok()
-                .flatten();
-            refresh_window(handle, cx);
-        })
-        .detach();
+    fn open_notebook_output_editor(
+        &mut self,
+        cell: String,
+        outputs: &[serde_json::Value],
+        execution_count: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let json =
+            serde_json::to_string_pretty(outputs).unwrap_or_else(|error| format!("[] // {error}"));
+        let buffer = cx.new(|cx| Buffer::local(json, cx));
+        let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.notebook_edit_cell = Some(cell);
+        self.notebook_edit_buffer = Some(buffer);
+        self.notebook_editor = Some(editor);
+        self.notebook_edit_outputs = true;
+        self.notebook_edit_execution_count = execution_count;
+        self.notebook_edit_status =
+            "Edit outputs as a JSON array; Commit writes through OpenIDEA".into();
         cx.notify();
+    }
+
+    fn commit_notebook_cell_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(cell) = self.notebook_edit_cell.clone() else {
+            return;
+        };
+        let Some(buffer) = self.notebook_edit_buffer.clone() else {
+            return;
+        };
+        let text = buffer.read(cx).snapshot().text();
+        let outputs = if self.notebook_edit_outputs {
+            match serde_json::from_str::<Vec<serde_json::Value>>(&text) {
+                Ok(outputs) => Some(outputs),
+                Err(error) => {
+                    self.notebook_edit_status =
+                        format!("Outputs must be a JSON array: {error}").into();
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let execution_count = self.notebook_edit_execution_count;
+        self.notebook_edit_cell = None;
+        self.notebook_edit_buffer = None;
+        self.notebook_editor = None;
+        self.notebook_edit_outputs = false;
+        self.notebook_edit_execution_count = None;
+        match outputs {
+            Some(outputs) => {
+                self.apply_notebook_edit(
+                    ide_notebook::NotebookEdit::SetOutputs {
+                        cell,
+                        outputs,
+                        execution_count,
+                    },
+                    "Updating cell outputs…",
+                    cx,
+                );
+            }
+            None => {
+                self.apply_notebook_edit(
+                    ide_notebook::NotebookEdit::SetSource { cell, source: text },
+                    "Updating cell…",
+                    cx,
+                );
+            }
+        }
     }
 
     fn open_ssh_terminal(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -9319,6 +9374,10 @@ impl Workbench {
         self.clear_notebook_outputs(cell, cx);
     }
 
+    pub fn smoke_notebook_set_outputs(&mut self, json: String, cx: &mut Context<Self>) {
+        self.set_notebook_outputs_json(json, cx);
+    }
+
     pub fn notebook_output_count(&self) -> usize {
         self.notebook
             .as_ref()
@@ -11395,6 +11454,8 @@ impl Workbench {
                                 this.notebook_editor = None;
                                 this.notebook_edit_buffer = None;
                                 this.notebook_edit_cell = None;
+                                this.notebook_edit_outputs = false;
+                                this.notebook_edit_execution_count = None;
                                 cx.notify();
                             }))
                             .child("Cancel"),
@@ -12498,7 +12559,11 @@ impl Workbench {
                 let type_id = cell.id.clone();
                 let delete_id = cell.id.clone();
                 let clear_id = cell.id.clone();
+                let outputs_id = cell.id.clone();
+                let outputs = cell.outputs.clone();
+                let execution_count = cell.execution_count;
                 let cell_type = cell.cell_type.clone();
+                let output_cell_type = cell_type.clone();
                 let source = cell.source.clone();
                 let mut body = div()
                     .id(("notebook-cell", index))
@@ -12580,6 +12645,28 @@ impl Workbench {
                                             },
                                         ))
                                         .child("clear output"),
+                                )
+                            })
+                            .when(output_cell_type == "code", |row| {
+                                row.child(
+                                    div()
+                                        .id(("notebook-edit-outputs", index))
+                                        .px_1()
+                                        .text_size(px(9.))
+                                        .text_color(theme.muted)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, window, cx| {
+                                                this.open_notebook_output_editor(
+                                                    outputs_id.clone(),
+                                                    &outputs,
+                                                    execution_count,
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        ))
+                                        .child("outputs"),
                                 )
                             })
                             .child(
