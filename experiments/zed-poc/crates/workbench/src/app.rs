@@ -3167,8 +3167,7 @@ impl Workbench {
                         Ok(consoles) => match consoles.last() {
                             Some(path) => {
                                 if let Err(error) = std::fs::write(&path.0, sql) {
-                                    app.db_status =
-                                        format!("Console write failed: {error}").into();
+                                    app.db_status = format!("Console write failed: {error}").into();
                                 } else {
                                     app.db_console_path = Some(path.0.clone());
                                     app.db_status =
@@ -3183,8 +3182,7 @@ impl Workbench {
                             }
                         },
                         Err(error) => {
-                            app.db_status =
-                                format!("Console failed: {}", error.message).into();
+                            app.db_status = format!("Console failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -6224,8 +6222,7 @@ impl Workbench {
         };
         if !force && document.disk_changed() {
             if let Some(document) = self.documents.get_mut(&doc_id) {
-                document.conflict =
-                    Some("File changed on disk since it was opened".into());
+                document.conflict = Some("File changed on disk since it was opened".into());
             }
             self.status = "File changed on disk; reload or overwrite".into();
             cx.notify();
@@ -7716,8 +7713,7 @@ impl Workbench {
 
     fn request_github_review_dismiss(&mut self, review_id: u64, cx: &mut Context<Self>) {
         self.github_review_dismiss_confirm = Some(review_id);
-        self.github_review_status =
-            "Write a dismissal message, then press Dismiss again".into();
+        self.github_review_status = "Write a dismissal message, then press Dismiss again".into();
         cx.notify();
     }
 
@@ -10990,8 +10986,7 @@ impl Workbench {
                 }
                 for doc_id in conflicts {
                     if let Some(document) = self.documents.get_mut(&doc_id) {
-                        document.conflict =
-                            Some("File changed on disk since it was opened".into());
+                        document.conflict = Some("File changed on disk since it was opened".into());
                     }
                 }
                 if !reloads.is_empty() {
@@ -15770,8 +15765,7 @@ impl Workbench {
                             .child("Submitted reviews")
                             .children(self.github_reviews.iter().take(20).map(|review| {
                                 let review_id = review.id;
-                                let confirm =
-                                    self.github_review_dismiss_confirm == Some(review_id);
+                                let confirm = self.github_review_dismiss_confirm == Some(review_id);
                                 div()
                                     .flex()
                                     .flex_col()
@@ -20211,7 +20205,7 @@ impl Render for Workbench {
                                                     ))
                                                     .child("Overwrite"),
                                             )
-                                        })
+                                        }),
                                 )
                             })
                             .child(

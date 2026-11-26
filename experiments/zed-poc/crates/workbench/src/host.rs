@@ -648,17 +648,13 @@ impl NativeHost {
     }
 
     pub async fn db_history(&self, id: String) -> IdeResult<Vec<ide_db::HistoryEntry>> {
-        self.run(move |host| async move {
-            ide_host::ops::db::history(&host, MAIN_WINDOW, &id).await
-        })
+        self.run(
+            move |host| async move { ide_host::ops::db::history(&host, MAIN_WINDOW, &id).await },
+        )
         .await
     }
 
-    pub async fn db_remove_history(
-        &self,
-        id: String,
-        texts: Option<Vec<String>>,
-    ) -> IdeResult<()> {
+    pub async fn db_remove_history(&self, id: String, texts: Option<Vec<String>>) -> IdeResult<()> {
         self.run(move |host| async move {
             ide_host::ops::db::remove_history(&host, MAIN_WINDOW, &id, texts).await
         })
@@ -2156,6 +2152,10 @@ mod tests {
         collect_http_files(root, 0, &mut files);
         files.sort();
         assert_eq!(files.len(), 2);
-        assert!(files.iter().all(|path| !path.starts_with(root.join("target"))));
+        assert!(
+            files
+                .iter()
+                .all(|path| !path.starts_with(root.join("target")))
+        );
     }
 }

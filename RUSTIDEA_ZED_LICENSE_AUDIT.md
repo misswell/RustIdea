@@ -1,7 +1,7 @@
 # RustIdea Zed license audit
 
-Status: review required before any binary containing Zed is distributed.
-No Zed-linked binary has been released from this repository.
+Status: approved for a GPL-3.0-or-later Preview distribution only.
+The integration branch is still not the Apache-2.0 production `main` binary.
 
 ## Components
 
@@ -47,15 +47,25 @@ Therefore:
 6. The maintained `v0.2.0` GPUI release must not be retroactively described as
    a Zed build.
 
-## Decision gate
+## Preview distribution decision
 
-Maintainer approval is required for:
+The release owner approved publishing the integration branch as an explicit
+Preview, not as a replacement for the stable GPUI product. The Preview:
 
-- relicensing the combined RustIdea application as GPL-3.0-or-later;
-- publishing any Zed-linked macOS, Windows or Linux binary;
-- replacing the production editor entry in `main`.
+- is named `RustIdea Zed Preview` and uses bundle identifier
+  `com.guofeng.rustidea.zedpreview`;
+- is marked as a GitHub pre-release and carries `GPL-3.0-or-later` notices;
+- ships Zed's GPL text, Zed's Apache-2.0 text, RustIdea's Apache-2.0 text,
+  `NOTICE`, third-party notices and the pinned-source instructions;
+- records the exact RustIdea commit and Zed revision in
+  `Contents/Resources/SOURCE_CODE.txt`;
+- remains arm64-only for this first Preview build;
+- does not change the root `LICENSE`, does not merge the experiment into
+  `main`, and does not replace the stable editor entry.
 
-Until approval, `integration/zed-workbench` is an evaluation branch only.
+The full production integration, universal build, interactive IME acceptance
+and OpenIDEA parity remain separate release gates. A Preview distribution is
+not evidence that those gates passed.
 
 ## Verification commands
 

@@ -1082,10 +1082,27 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
 ide-github: 12 passed; 0 failed
 ```
 
+## Preview distribution
+
+The integration branch now has a dedicated macOS Preview packaging path:
+
+```sh
+scripts/release-zed-preview-macos.sh
+```
+
+The resulting `RustIdea Zed Preview` app is arm64-only and explicitly marked
+as a GPL-3.0-or-later combined-work pre-release. It bundles Zed's GPL and
+Apache-2.0 texts, RustIdea's Apache-2.0 text, `NOTICE`, third-party license
+inventories, `THIRD_PARTY_SOURCES`, the complete Zed assets license tree, the
+pinned `fetch-zed.sh`, and a `SOURCE_CODE.txt` containing the exact RustIdea
+commit and Zed revision.
+
+The root repository license and the stable `main` product remain Apache-2.0.
+The Preview is not a claim of production parity, is not merged into `main`,
+and does not replace the stable GPUI editor entry.
+
 ## Not yet done
 
-- License confirmation and the repository license change to
-  GPL-3.0-or-later. No GPL release is produced from this branch.
 - Replacing the existing RustIdea `Editor`/`DocumentBuffer` workbench entry with
   the Zed entity across tabs and splits.
 - Real window keyboard, Chinese IME, clipboard and visual verification on an

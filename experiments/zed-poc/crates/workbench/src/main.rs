@@ -52,10 +52,20 @@ actions!(
 );
 
 fn main() {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let root = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        .or_else(|| std::env::var_os("RUSTIDEA_ZED_PROJECT").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            if current_dir == std::path::Path::new("/") {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or(current_dir)
+            } else {
+                current_dir
+            }
+        });
     let initial_file = std::env::args().nth(2).map(PathBuf::from);
     let host = NativeHost::start().unwrap_or_else(|error| {
         panic!("start OpenIDEA backend: {error:#}");

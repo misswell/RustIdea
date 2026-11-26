@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash as _, Hasher as _};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::{AppContext as _, Context, Entity};

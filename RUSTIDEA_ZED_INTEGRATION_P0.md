@@ -1,7 +1,8 @@
 # RustIdea Zed integration P0
 
-Status: integration branch created and Zed POC merged for evaluation only.
-The branch is not merged into `main` and is not released.
+Status: integration branch created, Zed POC merged, and P1 external-change
+protection implemented. The branch is not merged into `main`; it is distributed
+only as a GPL-3.0-or-later Preview.
 
 ## Baseline
 
@@ -76,7 +77,7 @@ produce `third_party/zed/.rustidea-zed-rev` containing the pinned Zed SHA.
 ## Current evidence
 
 - `cargo check -p rustidea-zed-workbench`: pass in the integrating worktree.
-- `cargo test -p rustidea-zed-workbench`: 66 passed, 0 failed.
+- `cargo test -p rustidea-zed-workbench`: 67 passed, 0 failed.
 - `cargo clippy -p rustidea-zed-workbench --all-targets -- -D warnings`: pass.
 - `cargo tree`: one `gpui` source and one tree-sitter version.
 - `scripts/fetch-zed.sh`: recreates the pinned checkout and applies the patch.
@@ -84,19 +85,23 @@ produce `third_party/zed/.rustidea-zed-rev` containing the pinned Zed SHA.
   - `scripts/fetch-zed.sh` recreated Zed at `2664a0a…` and applied the patch.
   - `cargo metadata --locked` resolved 1534 packages and one Zed path source.
   - `cargo check --locked -p rustidea-zed-workbench` passed.
-  - `cargo test --locked -p rustidea-zed-workbench` passed: 66 tests.
+  - `cargo test --locked -p rustidea-zed-workbench` passed: 66 tests at the
+    clean-clone checkpoint; the later external-change guard adds one test.
   - The clean build used `CARGO_PROFILE_DEV_DEBUG=0`,
     `CARGO_INCREMENTAL=0` and `RUSTFLAGS=-C debuginfo=0` to fit the review
     machine's disk budget.
 - CI reproducibility gate: `.github/workflows/zed-integration.yml` runs the
   same fetch/check/test/Clippy path on macOS. Run `45810060881` for
   `e000a919cd289d01acb52b5b5ff3f317c6c9d435` completed successfully:
-  fetch, check, 66 tests and Clippy all passed.
+  fetch, check, 66 tests and Clippy all passed. Run `45818810715` for
+  `f96122d32870864acca6b85257acd5832111659e` also completed successfully
+  after the P1 conflict guard.
 
-## Open gates before P1
+## Open gates after the Preview
 
-- Maintainer must approve the GPL-3.0-or-later combined distribution.
+- The release owner approved only the explicitly labelled GPL Preview; a
+  production replacement still requires a final licensing and support review.
 - The Zed workbench must be wired into the formal RustIdea workspace rather
-  than remaining an isolated POC binary.
+  than remaining an isolated Preview binary.
 - Interactive macOS acceptance, Chinese IME and real Maven project workflow
   remain to be completed.
