@@ -64,6 +64,44 @@ fn table_query(schema: &str, table: &str) -> String {
     format!("SELECT * FROM {qualified} LIMIT 200;\n")
 }
 
+fn http_exchange_status(exchange: &ide_http::HttpExchange) -> String {
+    match &exchange.response {
+        Some(response) => format!(
+            "{} {} · {} bytes · {:.1} ms",
+            response.status, response.status_text, response.size, response.total_ms
+        ),
+        None => exchange
+            .entry
+            .error
+            .clone()
+            .unwrap_or_else(|| "Request failed".into()),
+    }
+}
+
+fn http_exchange_output(exchange: &ide_http::HttpExchange) -> String {
+    let Some(response) = &exchange.response else {
+        return String::new();
+    };
+    let mut output = format!(
+        "{} {} {}\n",
+        response.version, response.status, response.status_text
+    );
+    for (name, value) in &response.headers {
+        output.push_str(&format!("{name}: {value}\n"));
+    }
+    output.push('\n');
+    match &response.body {
+        Some(body) => {
+            output.push_str(body);
+            if response.truncated {
+                output.push_str("\n… body truncated");
+            }
+        }
+        None => output.push_str("(binary body)"),
+    }
+    output
+}
+
 fn coverage_runs(lines: &[ide_coverage::LineCoverage]) -> Vec<(CoverageState, (u32, u32))> {
     let mut runs = Vec::new();
     let mut current: Option<(CoverageState, u32, u32)> = None;
@@ -973,6 +1011,11 @@ pub struct Workbench {
     http_editor: Option<Entity<Editor>>,
     http_editor_buffer: Option<Entity<Buffer>>,
     http_editor_status: gpui::SharedString,
+    http_environments: Vec<String>,
+    http_env: Option<String>,
+    http_history: Vec<ide_http::HistoryEntry>,
+    http_history_open: bool,
+    http_history_status: gpui::SharedString,
     db_sources: Vec<ide_db::DataSource>,
     db_connected: Vec<String>,
     db_selected: usize,
@@ -1943,6 +1986,11 @@ impl Workbench {
             http_editor: None,
             http_editor_buffer: None,
             http_editor_status: gpui::SharedString::default(),
+            http_environments: Vec::new(),
+            http_env: None,
+            http_history: Vec::new(),
+            http_history_open: false,
+            http_history_status: "No HTTP history loaded".into(),
             db_sources: Vec::new(),
             db_connected: Vec::new(),
             db_selected: 0,
@@ -2343,6 +2391,94 @@ impl Workbench {
         } else {
             format!("{} requests", self.http_blocks.len()).into()
         };
+        let path = document.path.clone();
+        match self.host.http_environments(Some(&path)) {
+            Ok(environments) => {
+                self.http_environments = environments;
+                if self
+                    .http_env
+                    .as_ref()
+                    .is_some_and(|env| !self.http_environments.contains(env))
+                {
+                    self.http_env = None;
+                }
+            }
+            Err(error) => {
+                self.http_environments.clear();
+                self.http_env = None;
+                self.http_history_status = format!("Environments failed: {}", error.message).into();
+            }
+        }
+        self.refresh_http_history(cx);
+        cx.notify();
+    }
+
+    fn refresh_http_history(&mut self, cx: &mut Context<Self>) {
+        match self.host.http_history_list() {
+            Ok(history) => {
+                self.http_history = history;
+                self.http_history_status = if self.http_history.is_empty() {
+                    "No HTTP history".into()
+                } else {
+                    format!("{} HTTP history entries", self.http_history.len()).into()
+                };
+            }
+            Err(error) => {
+                self.http_history.clear();
+                self.http_history_status = format!("HTTP history failed: {}", error.message).into();
+            }
+        }
+        cx.notify();
+    }
+
+    fn select_http_env(&mut self, env: Option<String>, cx: &mut Context<Self>) {
+        self.http_env = env;
+        self.http_status = match &self.http_env {
+            Some(env) => format!("Environment: {env}").into(),
+            None => "No HTTP environment selected".into(),
+        };
+        cx.notify();
+    }
+
+    fn apply_http_exchange(&mut self, exchange: ide_http::HttpExchange) {
+        self.http_status = http_exchange_status(&exchange).into();
+        self.http_output = http_exchange_output(&exchange);
+        if self.http_output.len() > 2_000_000 {
+            let split = self.http_output.len().saturating_sub(1_800_000);
+            self.http_output.drain(..split);
+        }
+    }
+
+    fn open_http_history_entry(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(entry) = self.http_history.get(index).cloned() else {
+            return;
+        };
+        match self.host.http_history_get(&entry.id) {
+            Ok(exchange) => {
+                self.apply_http_exchange(exchange);
+                self.http_history_open = true;
+                self.http_status = format!("History: {} {}", entry.method, entry.url).into();
+            }
+            Err(error) => {
+                self.http_status = format!("History load failed: {}", error.message).into();
+                self.http_output.clear();
+            }
+        }
+        cx.notify();
+    }
+
+    fn clear_http_history(&mut self, cx: &mut Context<Self>) {
+        match self.host.http_history_clear() {
+            Ok(()) => {
+                self.http_history.clear();
+                self.http_history_status = "HTTP history cleared".into();
+                self.http_output.clear();
+            }
+            Err(error) => {
+                self.http_history_status =
+                    format!("HTTP history clear failed: {}", error.message).into();
+            }
+        }
         cx.notify();
     }
 
@@ -2372,53 +2508,17 @@ impl Workbench {
         let index = self.http_selected as u32;
         let root = self.root.clone();
         let host = self.host.clone();
+        let env = self.http_env.clone();
         self.http_status = format!("Running {method} {url}…").into();
         self.http_output.clear();
         cx.spawn(async move |this, cx| {
-            let result = host.run_http(text, index, Some(path), root).await;
+            let result = host.run_http(text, index, Some(path), root, env).await;
             let handle = this
                 .update(cx, |app, cx| {
                     match result {
                         Ok(exchange) => {
-                            if let Some(response) = &exchange.response {
-                                app.http_status = format!(
-                                    "{} {} · {} bytes · {:.1} ms",
-                                    response.status,
-                                    response.status_text,
-                                    response.size,
-                                    response.total_ms
-                                )
-                                .into();
-                                let mut output = format!(
-                                    "{} {} {}\n",
-                                    response.version, response.status, response.status_text
-                                );
-                                for (name, value) in &response.headers {
-                                    output.push_str(&format!("{name}: {value}\n"));
-                                }
-                                output.push('\n');
-                                if let Some(body) = &response.body {
-                                    output.push_str(body);
-                                    if response.truncated {
-                                        output.push_str("\n… body truncated");
-                                    }
-                                } else {
-                                    output.push_str("(binary body)");
-                                }
-                                app.http_output = output;
-                                if app.http_output.len() > 2_000_000 {
-                                    let split = app.http_output.len().saturating_sub(1_800_000);
-                                    app.http_output.drain(..split);
-                                }
-                            } else {
-                                app.http_status = exchange
-                                    .entry
-                                    .error
-                                    .clone()
-                                    .unwrap_or_else(|| "Request failed".into())
-                                    .into();
-                                app.http_output.clear();
-                            }
+                            app.apply_http_exchange(exchange);
+                            app.refresh_http_history(cx);
                         }
                         Err(error) => {
                             app.http_status = format!("HTTP failed: {}", error.message).into();
@@ -2480,43 +2580,18 @@ impl Workbench {
         let url = block.url.clone();
         let host = self.host.clone();
         let root = self.root.clone();
+        let env = self.http_env.clone();
         self.http_editor_status = format!("Running {method} {url}…").into();
         self.http_output.clear();
         cx.spawn(async move |this, cx| {
-            let result = host.run_http(text, 0, None, root).await;
+            let result = host.run_http(text, 0, None, root, env).await;
             let handle = this
                 .update(cx, |app, cx| {
                     match result {
                         Ok(exchange) => {
-                            if let Some(response) = &exchange.response {
-                                app.http_editor_status = format!(
-                                    "{} {} · {} bytes · {:.1} ms",
-                                    response.status,
-                                    response.status_text,
-                                    response.size,
-                                    response.total_ms
-                                )
-                                .into();
-                                let mut output = format!(
-                                    "{} {} {}\n",
-                                    response.version, response.status, response.status_text
-                                );
-                                for (name, value) in &response.headers {
-                                    output.push_str(&format!("{name}: {value}\n"));
-                                }
-                                output.push('\n');
-                                if let Some(body) = &response.body {
-                                    output.push_str(body);
-                                }
-                                app.http_output = output;
-                            } else {
-                                app.http_editor_status =
-                                    "Transport failed before a response".into();
-                                app.http_output = exchange
-                                    .entry
-                                    .error
-                                    .unwrap_or_else(|| "unknown transport error".into());
-                            }
+                            app.http_editor_status = http_exchange_status(&exchange).into();
+                            app.http_output = http_exchange_output(&exchange);
+                            app.refresh_http_history(cx);
                         }
                         Err(error) => {
                             app.http_editor_status =
@@ -8625,6 +8700,24 @@ impl Workbench {
         self.run_http_editor(cx);
     }
 
+    pub fn smoke_http_env(&mut self, env: String, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Http, cx);
+        self.refresh_http(cx);
+        self.select_http_env(Some(env), cx);
+    }
+
+    pub fn http_history_count(&self) -> usize {
+        self.http_history.len()
+    }
+
+    pub fn http_history_status_text(&self) -> String {
+        self.http_history_status.to_string()
+    }
+
+    pub fn http_env_text(&self) -> String {
+        self.http_env.clone().unwrap_or_default()
+    }
+
     pub fn http_editor_status_text(&self) -> String {
         self.http_editor_status.to_string()
     }
@@ -11507,6 +11600,123 @@ impl Workbench {
                     .child(format!("{} {}", block.method, block.url)),
             );
         }
+        let mut environments = div()
+            .id("http-environments")
+            .px_2()
+            .py(px(2.))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(div().text_size(px(9.)).text_color(theme.faint).child("ENV"))
+            .child(
+                div()
+                    .id("http-env-none")
+                    .px_1()
+                    .py(px(1.))
+                    .rounded_sm()
+                    .text_size(px(9.))
+                    .text_color(if self.http_env.is_none() {
+                        theme.text
+                    } else {
+                        theme.faint
+                    })
+                    .bg(if self.http_env.is_none() {
+                        theme.accent_muted
+                    } else {
+                        theme.panel_alt
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.select_http_env(None, cx);
+                    }))
+                    .child("none"),
+            );
+        for env in self.http_environments.iter().take(20) {
+            let selected = self.http_env.as_deref() == Some(env.as_str());
+            let name = env.clone();
+            environments = environments.child(
+                div()
+                    .id(SharedString::from(format!("http-env-{env}")))
+                    .px_1()
+                    .py(px(1.))
+                    .rounded_sm()
+                    .text_size(px(9.))
+                    .text_color(if selected { theme.text } else { theme.faint })
+                    .bg(if selected {
+                        theme.accent_muted
+                    } else {
+                        theme.panel_alt
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.select_http_env(Some(name.clone()), cx);
+                    }))
+                    .child(env.clone()),
+            );
+        }
+        let mut history_rows = div()
+            .id("http-history")
+            .flex_none()
+            .max_h(px(150.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.http_history.is_empty() {
+            history_rows = history_rows.child(
+                div()
+                    .px_2()
+                    .py_2()
+                    .text_size(px(10.))
+                    .text_color(theme.faint)
+                    .child(self.http_history_status.clone()),
+            );
+        }
+        for (index, entry) in self.http_history.iter().take(100).enumerate() {
+            let status = entry
+                .status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| entry.error.clone().unwrap_or_default());
+            history_rows = history_rows.child(
+                div()
+                    .id(("http-history-entry", index))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(9.5))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_http_history_entry(index, cx);
+                    }))
+                    .child(
+                        div()
+                            .w(px(42.))
+                            .text_color(theme.faint)
+                            .child(entry.method.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_color(theme.muted)
+                            .child(entry.url.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child(status),
+                    ),
+            );
+        }
         let mut lines: Vec<String> = self.http_output.lines().map(str::to_owned).collect();
         if lines.len() > 400 {
             lines.drain(..lines.len() - 400);
@@ -11590,6 +11800,42 @@ impl Workbench {
                             }))
                             .child("Send"),
                     )
+                    .child(
+                        div()
+                            .id("http-history-toggle")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.http_history_open = !this.http_history_open;
+                                this.refresh_http_history(cx);
+                            }))
+                            .child(if self.http_history_open {
+                                "Requests"
+                            } else {
+                                "History"
+                            }),
+                    )
+                    .when(self.http_history_open, |row| {
+                        row.child(
+                            div()
+                                .id("http-history-clear")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.))
+                                .text_color(theme.error)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.clear_http_history(cx);
+                                }))
+                                .child("Clear"),
+                        )
+                    })
                     .child(div().flex_1())
                     .child(
                         div()
@@ -11599,7 +11845,9 @@ impl Workbench {
                             .child(self.http_status.clone()),
                     ),
             )
-            .child(requests)
+            .child(environments)
+            .when(self.http_history_open, |view| view.child(history_rows))
+            .when(!self.http_history_open, |view| view.child(requests))
             .child(output)
             .into_any_element()
     }

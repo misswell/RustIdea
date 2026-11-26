@@ -534,24 +534,51 @@ impl NativeHost {
         index: u32,
         file: Option<PathBuf>,
         root: PathBuf,
+        env: Option<String>,
     ) -> IdeResult<ide_http::HttpExchange> {
+        let host = self.host.clone();
         self.runtime
             .spawn(async move {
                 let cancel = ide_core::CancellationToken::new();
-                ide_http::run(
+                let history = host
+                    .project(MAIN_WINDOW)
+                    .ok()
+                    .map(|project| project.http_history.clone());
+                let exchange = ide_http::run(
                     ide_http::RunInput {
                         text: &text,
                         index,
                         file: file.as_deref(),
                         root: Some(&root),
-                        env: None,
+                        env: env.as_deref(),
                     },
                     &cancel,
                 )
-                .await
+                .await?;
+                if let Some(history) = history {
+                    let _ = history.add(&exchange);
+                }
+                Ok(exchange)
             })
             .await
             .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+    }
+
+    pub fn http_environments(&self, file: Option<&Path>) -> IdeResult<Vec<String>> {
+        let project = self.host.project(MAIN_WINDOW)?;
+        ide_http::environments(file, Some(&project.root))
+    }
+
+    pub fn http_history_list(&self) -> IdeResult<Vec<ide_http::HistoryEntry>> {
+        Ok(self.host.project(MAIN_WINDOW)?.http_history.list())
+    }
+
+    pub fn http_history_get(&self, id: &str) -> IdeResult<ide_http::HttpExchange> {
+        self.host.project(MAIN_WINDOW)?.http_history.get(id)
+    }
+
+    pub fn http_history_clear(&self) -> IdeResult<()> {
+        self.host.project(MAIN_WINDOW)?.http_history.clear()
     }
 
     pub fn db_sources(&self) -> IdeResult<Vec<ide_db::DataSource>> {

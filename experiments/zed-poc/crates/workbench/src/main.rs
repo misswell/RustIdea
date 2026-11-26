@@ -294,6 +294,7 @@ fn main() {
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some();
                 let smoke_outline = std::env::var_os("RUSTIDEA_ZED_SMOKE_OUTLINE").is_some();
                 let smoke_http = std::env::var_os("RUSTIDEA_ZED_SMOKE_HTTP").is_some();
+                let smoke_http_env = std::env::var("RUSTIDEA_ZED_SMOKE_HTTP_ENV").ok();
                 let smoke_http_editor =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_HTTP_EDITOR").is_some();
                 let smoke_http_editor_run =
@@ -443,6 +444,9 @@ fn main() {
                                 }
                                 if smoke_outline {
                                     app.smoke_outline(cx);
+                                }
+                                if let Some(env) = &smoke_http_env {
+                                    app.smoke_http_env(env.clone(), cx);
                                 }
                                 if smoke_http {
                                     app.smoke_http(cx);
@@ -873,6 +877,12 @@ fn main() {
                                     app.db_tables_status_text(),
                                     app.db_console_path_text(),
                                     app.db_output_first()
+                                );
+                                eprintln!(
+                                    "WORKBENCH_HTTP_UI env={:?} history={} status={:?}",
+                                    app.http_env_text(),
+                                    app.http_history_count(),
+                                    app.http_history_status_text()
                                 );
                                 cx.quit();
                             })
