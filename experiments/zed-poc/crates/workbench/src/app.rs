@@ -96,6 +96,34 @@ fn push_run_chunk(output: &mut String, chunk: ide_run::OutputChunk) {
     }
 }
 
+fn profile_tree_rows(profile: &ide_profiler::Profile, limit: usize) -> Vec<(u32, usize)> {
+    fn walk(
+        profile: &ide_profiler::Profile,
+        node: u32,
+        depth: usize,
+        rows: &mut Vec<(u32, usize)>,
+        limit: usize,
+    ) {
+        if rows.len() >= limit {
+            return;
+        }
+        let Some(node) = profile.nodes.get(node as usize) else {
+            return;
+        };
+        rows.push((node.frame, depth));
+        for child in &node.children {
+            walk(profile, *child, depth + 1, rows, limit);
+        }
+    }
+    let mut rows = Vec::new();
+    if let Some(root) = profile.nodes.first() {
+        for child in &root.children {
+            walk(profile, *child, 0, &mut rows, limit);
+        }
+    }
+    rows
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarMode {
     Project,
@@ -814,6 +842,7 @@ pub struct Workbench {
     heap_objects_status: gpui::SharedString,
     heap_path_text: String,
     profile: Option<ide_profiler::Profile>,
+    profile_view_tree: bool,
     profile_dir_input: Entity<TextInput>,
     profile_status: gpui::SharedString,
     profile_busy: bool,
@@ -1631,6 +1660,7 @@ impl Workbench {
             heap_objects_status: "Select a class to list objects".into(),
             heap_path_text: String::new(),
             profile: None,
+            profile_view_tree: false,
             profile_dir_input,
             profile_status: "Import a folder of .cpuprofile files".into(),
             profile_busy: false,
@@ -8073,6 +8103,18 @@ impl Workbench {
             .unwrap_or_default()
     }
 
+    pub fn smoke_profile_tree(&mut self, cx: &mut Context<Self>) {
+        self.profile_view_tree = true;
+        cx.notify();
+    }
+
+    pub fn profile_tree_count(&self) -> usize {
+        self.profile
+            .as_ref()
+            .map(|profile| profile_tree_rows(profile, 2_000).len())
+            .unwrap_or_default()
+    }
+
     pub fn smoke_logcat(&mut self, serial: String, cx: &mut Context<Self>) {
         self.select_sidebar(SidebarMode::Logcat, cx);
         if !serial.is_empty() {
@@ -13121,6 +13163,84 @@ impl Workbench {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn profile_frame_row(
+        &self,
+        index: usize,
+        frame: &ide_profiler::ProfileFrame,
+        total: f64,
+        self_weight: f64,
+        depth: usize,
+        unit: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = self.theme;
+        let file = frame.file.clone();
+        let line = frame.line.unwrap_or_default();
+        div()
+            .id(("profile-row", index))
+            .pl(px(6.0 + depth as f32 * 12.0))
+            .pr_2()
+            .py_1()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(px(10.))
+            .border_b_1()
+            .border_color(theme.border)
+            .when(file.is_some(), |row| {
+                row.cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+            })
+            .when_some(file, |row, file| {
+                row.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.open_or_goto(file.0.clone(), line, 0, window, cx);
+                }))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_color(theme.text)
+                            .child(frame.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child(
+                                frame
+                                    .file
+                                    .as_ref()
+                                    .map(|file| format!("{}:{}", file.0.display(), line + 1))
+                                    .unwrap_or_else(|| "(unknown source)".into()),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(66.))
+                    .text_size(px(9.))
+                    .text_color(theme.accent)
+                    .child(format!("{total:.1} {unit}")),
+            )
+            .child(
+                div()
+                    .w(px(58.))
+                    .text_size(px(8.5))
+                    .text_color(theme.faint)
+                    .child(format!("{self_weight:.1}")),
+            )
+            .into_any_element()
+    }
+
     fn render_profiler(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let mut rows = div()
@@ -13190,76 +13310,41 @@ impl Workbench {
                 .child(rows)
                 .into_any_element();
         };
-        for (index, method) in profile.methods.iter().take(500).enumerate() {
-            let Some(frame) = profile.frames.get(method.frame as usize) else {
-                continue;
-            };
-            let file = frame.file.clone();
-            let line = frame.line.unwrap_or_default();
-            rows = rows.child(
-                div()
-                    .id(("profile-method", index))
-                    .px_2()
-                    .py_1()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(10.))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .when(file.is_some(), |row| {
-                        row.cursor_pointer()
-                            .hover(|style| style.bg(theme.panel_alt))
-                    })
-                    .when_some(file, |row, file| {
-                        row.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.open_or_goto(file.0.clone(), line, 0, window, cx);
-                        }))
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_color(theme.text)
-                                    .child(frame.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(8.5))
-                                    .text_color(theme.faint)
-                                    .child(
-                                        frame
-                                            .file
-                                            .as_ref()
-                                            .map(|file| {
-                                                format!("{}:{}", file.0.display(), line + 1)
-                                            })
-                                            .unwrap_or_else(|| "(unknown source)".into()),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w(px(66.))
-                            .text_size(px(9.))
-                            .text_color(theme.accent)
-                            .child(format!("{:.1} {}", method.total, profile.unit)),
-                    )
-                    .child(
-                        div()
-                            .w(px(58.))
-                            .text_size(px(8.5))
-                            .text_color(theme.faint)
-                            .child(format!("{:.1}", method.self_weight)),
-                    ),
-            );
+        if self.profile_view_tree {
+            for (index, (frame_index, depth)) in
+                profile_tree_rows(profile, 2_000).into_iter().enumerate()
+            {
+                let Some(node) = profile.nodes.get(frame_index as usize) else {
+                    continue;
+                };
+                let Some(frame) = profile.frames.get(node.frame as usize) else {
+                    continue;
+                };
+                rows = rows.child(self.profile_frame_row(
+                    index,
+                    frame,
+                    node.total,
+                    node.self_weight,
+                    depth,
+                    &profile.unit,
+                    cx,
+                ));
+            }
+        } else {
+            for (index, method) in profile.methods.iter().take(500).enumerate() {
+                let Some(frame) = profile.frames.get(method.frame as usize) else {
+                    continue;
+                };
+                rows = rows.child(self.profile_frame_row(
+                    index,
+                    frame,
+                    method.total,
+                    method.self_weight,
+                    0,
+                    &profile.unit,
+                    cx,
+                ));
+            }
         }
         div()
             .size_full()
@@ -13296,6 +13381,54 @@ impl Workbench {
                             } else {
                                 "Load"
                             }),
+                    )
+                    .child(
+                        div()
+                            .id("profile-view-methods")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(if self.profile_view_tree {
+                                theme.faint
+                            } else {
+                                theme.text
+                            })
+                            .bg(if self.profile_view_tree {
+                                theme.panel_alt
+                            } else {
+                                theme.accent_muted
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.profile_view_tree = false;
+                                cx.notify();
+                            }))
+                            .child("Methods"),
+                    )
+                    .child(
+                        div()
+                            .id("profile-view-tree")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(if self.profile_view_tree {
+                                theme.text
+                            } else {
+                                theme.faint
+                            })
+                            .bg(if self.profile_view_tree {
+                                theme.accent_muted
+                            } else {
+                                theme.panel_alt
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.profile_view_tree = true;
+                                cx.notify();
+                            }))
+                            .child("Call tree"),
                     )
                     .child(div().flex_1())
                     .child(
@@ -16437,5 +16570,58 @@ mod tests {
                 (CoverageState::Covered, (13, 13)),
             ]
         );
+    }
+
+    #[test]
+    fn profile_tree_rows_flatten_children_depth_first() {
+        let profile = ide_profiler::Profile {
+            profiler: "node".into(),
+            unit: "ms".into(),
+            mode: ide_profiler::ProfileMode::Cpu,
+            total: 10.0,
+            frames: vec![
+                ide_profiler::ProfileFrame {
+                    name: "all".into(),
+                    file: None,
+                    line: None,
+                    kind: ide_profiler::ProfileFrameKind::Code,
+                },
+                ide_profiler::ProfileFrame {
+                    name: "main".into(),
+                    file: None,
+                    line: None,
+                    kind: ide_profiler::ProfileFrameKind::Code,
+                },
+                ide_profiler::ProfileFrame {
+                    name: "work".into(),
+                    file: None,
+                    line: None,
+                    kind: ide_profiler::ProfileFrameKind::Code,
+                },
+            ],
+            nodes: vec![
+                ide_profiler::ProfileNode {
+                    frame: 0,
+                    total: 10.0,
+                    self_weight: 0.0,
+                    children: vec![1],
+                },
+                ide_profiler::ProfileNode {
+                    frame: 1,
+                    total: 10.0,
+                    self_weight: 2.0,
+                    children: vec![2],
+                },
+                ide_profiler::ProfileNode {
+                    frame: 2,
+                    total: 8.0,
+                    self_weight: 8.0,
+                    children: Vec::new(),
+                },
+            ],
+            methods: Vec::new(),
+        };
+        assert_eq!(profile_tree_rows(&profile, 10), vec![(1, 0), (2, 1)]);
+        assert_eq!(profile_tree_rows(&profile, 1), vec![(1, 0)]);
     }
 }
