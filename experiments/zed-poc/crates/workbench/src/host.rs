@@ -1441,6 +1441,28 @@ impl NativeHost {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn github_add_review_comment(
+        &self,
+        root: PathBuf,
+        number: u32,
+        commit_id: String,
+        path: String,
+        line: u32,
+        side: String,
+        body: String,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                ide_github::add_review_comment(&root, number, &commit_id, &path, line, &side, &body)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
     pub async fn heap_open(&self, path: PathBuf) -> IdeResult<ide_host::ops::heap::HeapOpenResult> {
         self.run(move |host| async move {
             host.require_trust(MAIN_WINDOW)?;

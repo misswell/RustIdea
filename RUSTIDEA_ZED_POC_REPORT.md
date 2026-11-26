@@ -439,7 +439,7 @@ Panel coverage at this commit:
 | Bookmarks | F3 toggle at caret, editor gutter marker, navigable list, remove, per-project JSON persistence | local store + navigation, Zed gutter highlights |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers | `ide-docker` |
-| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, conversation comment, open in browser | `ide-github`, `ide-vcs` |
+| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, conversation and inline diff comments, open in browser | `ide-github`, `ide-vcs` |
 | Heap | import `.hprof`, class table, class object pages, GC-root path | `ops::heap::debug_heap_open/classes/dominators/path` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, source navigation | `ide-profiler` |
 | Logcat | adb devices, streaming threadtime log, level/text filters | `adb` process |
@@ -705,6 +705,13 @@ github_diff_files=1 github_diff_lines=6
 github_diff_status=1 files · 6 diff lines · f326112 → dd76151
 ```
 
+GitHub inline review comment smoke through the fake `gh` API:
+
+```text
+github_inline=Inline comment added to sample.txt:2
+{"commit_id":"dd761512c6af29127d7a61d7a1f047d3b56d73c2","path":"sample.txt","line":2,"side":"RIGHT","body":"Inline smoke comment"}
+```
+
 Heap snapshot smoke with a generated `ide-heap` sample:
 
 ```text
@@ -851,8 +858,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   start/stop/restart containers, but logs, pull/prune, custom connections and
   Compose lifecycle controls are missing. GitHub lists and filters pull
   requests and shows details/checks/review comments/timeline and a unified
-  diff, submits reviews and conversation comments, but inline-review comment
-  composition and timeline write actions (merge/close/reopen) are missing. Heap
+  diff, submits reviews, conversation comments and inline diff comments, but
+  timeline write actions (merge/close/reopen) are missing. Heap
   imports and lists
   classes and object pages with GC-root paths, but capture from a live JVM,
   snapshot comparison and richer instance/field detail are missing. Profiler

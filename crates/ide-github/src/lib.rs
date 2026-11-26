@@ -358,6 +358,49 @@ pub fn add_comment(root: &Path, number: u32, body: &str) -> IdeResult<()> {
     run(root, &["pr", "comment", &n, "--body", body]).map(drop)
 }
 
+/// Adds an inline review comment on a diff line (`LEFT` base, `RIGHT` head).
+#[allow(clippy::too_many_arguments)]
+pub fn add_review_comment(
+    root: &Path,
+    number: u32,
+    commit_id: &str,
+    path: &str,
+    line: u32,
+    side: &str,
+    body: &str,
+) -> IdeResult<()> {
+    if body.trim().is_empty() {
+        return Err(IdeError::invalid("the review comment is empty"));
+    }
+    if line == 0 {
+        return Err(IdeError::invalid("the review comment line must be 1-based"));
+    }
+    if !matches!(side, "LEFT" | "RIGHT") {
+        return Err(IdeError::invalid(
+            "the review comment side must be LEFT or RIGHT",
+        ));
+    }
+    if commit_id.trim().is_empty() || path.trim().is_empty() {
+        return Err(IdeError::invalid(
+            "the review comment needs a commit and path",
+        ));
+    }
+    let body = serde_json::json!({
+        "commit_id": commit_id,
+        "path": path,
+        "line": line,
+        "side": side,
+        "body": body,
+    });
+    let request = GhApiRequest {
+        method: "POST".into(),
+        endpoint: format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments"),
+        body: Some(body.to_string()),
+        paginate: false,
+    };
+    api(root, &request).map(drop)
+}
+
 /// A GitHub API call through `gh api`: GraphQL (`endpoint` `graphql`, `body`
 /// `{"query", "variables"}`) or REST (`repos/{owner}/{repo}/…`, gh fills in the
 /// placeholders from the project's remote).

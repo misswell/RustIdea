@@ -798,6 +798,8 @@ pub struct Workbench {
     github_diff_files: Vec<crate::pr_diff::DiffFile>,
     github_diff_status: gpui::SharedString,
     github_diff_busy: bool,
+    github_inline_target: Option<(String, u32, String)>,
+    github_inline_status: gpui::SharedString,
     heap_info: Option<ide_host::ops::heap::HeapSnapshotInfo>,
     heap_classes: Vec<ide_host::ops::heap::HeapClassRow>,
     heap_path_input: Entity<TextInput>,
@@ -1612,6 +1614,8 @@ impl Workbench {
             github_diff_files: Vec::new(),
             github_diff_status: "Select Diff to load changed files".into(),
             github_diff_busy: false,
+            github_inline_target: None,
+            github_inline_status: gpui::SharedString::default(),
             heap_info: None,
             heap_classes: Vec::new(),
             heap_path_input,
@@ -5798,6 +5802,8 @@ impl Workbench {
         self.github_comments.clear();
         self.github_diff_files.clear();
         self.github_diff_status = "Select Diff to load changed files".into();
+        self.github_inline_target = None;
+        self.github_inline_status = gpui::SharedString::default();
         self.github_tab = GitHubTab::Overview;
         self.github_detail_status = format!("Loading pull request #{number}…").into();
         self.load_github_pr(number, false, cx);
@@ -6006,6 +6012,74 @@ impl Workbench {
                         Err(error) => {
                             app.github_review_status =
                                 format!("Comment failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn add_github_inline_comment(&mut self, cx: &mut Context<Self>) {
+        if self.github_review_busy {
+            return;
+        }
+        let Some(number) = self.github_selected else {
+            self.github_inline_status = "Select a pull request first".into();
+            cx.notify();
+            return;
+        };
+        let Some(details) = self.github_details.as_ref() else {
+            self.github_inline_status = "Wait for pull request details to load".into();
+            cx.notify();
+            return;
+        };
+        let Some((path, line, side)) = self.github_inline_target.clone() else {
+            self.github_inline_status = "Click a diff line first".into();
+            cx.notify();
+            return;
+        };
+        let body = self
+            .github_comment_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if body.is_empty() {
+            self.github_inline_status = "Write an inline comment first".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        let root = self.root.clone();
+        let commit_id = details.head_oid.clone();
+        self.github_review_busy = true;
+        self.github_inline_status = format!("Adding inline comment to {path}:{line}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .github_add_review_comment(root, number, commit_id, path.clone(), line, side, body)
+                .await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.github_review_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.github_inline_status =
+                                format!("Inline comment added to {path}:{line}").into();
+                            app.github_inline_target = None;
+                            app.github_comment_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                            app.reload_github_pr(number, cx);
+                        }
+                        Err(error) => {
+                            app.github_inline_status =
+                                format!("Inline comment failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -7741,6 +7815,29 @@ impl Workbench {
 
     pub fn github_review_status_text(&self) -> String {
         self.github_review_status.to_string()
+    }
+
+    pub fn smoke_github_inline(&mut self, target: String, body: String, cx: &mut Context<Self>) {
+        let mut fields = target.rsplitn(3, ':');
+        let Some(side) = fields.next() else {
+            return;
+        };
+        let Some(line) = fields.next().and_then(|line| line.parse::<u32>().ok()) else {
+            return;
+        };
+        let Some(path) = fields.next().map(str::to_owned) else {
+            return;
+        };
+        self.github_tab = GitHubTab::Diff;
+        self.github_inline_target = Some((path, line, side.to_owned()));
+        self.github_comment_input.update(cx, |input, cx| {
+            input.set_content(body, cx);
+        });
+        self.add_github_inline_comment(cx);
+    }
+
+    pub fn github_inline_status_text(&self) -> String {
+        self.github_inline_status.to_string()
     }
 
     pub fn github_diff_file_count(&self) -> usize {
@@ -12265,6 +12362,17 @@ impl Workbench {
                                 .new_line
                                 .map(|line| line.to_string())
                                 .unwrap_or_default();
+                            let target = match line.kind {
+                                crate::pr_diff::DiffLineKind::Added
+                                | crate::pr_diff::DiffLineKind::Context => line
+                                    .new_line
+                                    .map(|line| (file.path.clone(), line, "RIGHT".to_string())),
+                                crate::pr_diff::DiffLineKind::Removed => line
+                                    .old_line
+                                    .map(|line| (file.path.clone(), line, "LEFT".to_string())),
+                                _ => None,
+                            };
+                            let selected = self.github_inline_target.as_ref() == target.as_ref();
                             body = body.child(
                                 div()
                                     .id(("github-diff-line", file_index * 1_000 + line_index))
@@ -12272,7 +12380,7 @@ impl Workbench {
                                     .items_center()
                                     .gap_2()
                                     .px_2()
-                                    .bg(bg)
+                                    .bg(if selected { theme.accent_muted } else { bg })
                                     .font_family("Menlo")
                                     .text_size(px(8.5))
                                     .text_color(color)
@@ -12283,9 +12391,89 @@ impl Workbench {
                                         div().w(px(28.)).text_color(theme.faint).child(new_number),
                                     )
                                     .child(div().w(px(8.)).child(prefix))
-                                    .child(div().flex_1().truncate().child(line.text.clone())),
+                                    .child(div().flex_1().truncate().child(line.text.clone()))
+                                    .when_some(target, |row, target| {
+                                        row.cursor_pointer().on_click(cx.listener(
+                                            move |this, _: &ClickEvent, _, cx| {
+                                                this.github_inline_target = Some(target.clone());
+                                                this.github_inline_status = format!(
+                                                    "Selected {}:{} — write a comment",
+                                                    target.0, target.1
+                                                )
+                                                .into();
+                                                cx.notify();
+                                            },
+                                        ))
+                                    }),
                             );
                         }
+                    }
+                    if let Some((path, line, side)) = &self.github_inline_target {
+                        body = body.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.))
+                                .p_2()
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .child(
+                                    div()
+                                        .text_size(px(9.))
+                                        .text_color(theme.muted)
+                                        .child(format!("Inline comment · {path}:{line} ({side})")),
+                                )
+                                .child(self.github_comment_input.clone())
+                                .when(!self.github_inline_status.is_empty(), |composer| {
+                                    composer.child(
+                                        div()
+                                            .text_size(px(8.5))
+                                            .text_color(theme.faint)
+                                            .child(self.github_inline_status.clone()),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id("github-inline-add")
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .bg(theme.accent_muted)
+                                                .text_size(px(8.5))
+                                                .text_color(theme.text)
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _, cx| {
+                                                        this.add_github_inline_comment(cx);
+                                                    },
+                                                ))
+                                                .child("Add Inline Comment"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("github-inline-cancel")
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .bg(theme.panel_alt)
+                                                .text_size(px(8.5))
+                                                .text_color(theme.muted)
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _, cx| {
+                                                        this.github_inline_target = None;
+                                                        cx.notify();
+                                                    },
+                                                ))
+                                                .child("Cancel"),
+                                        ),
+                                ),
+                        );
                     }
                 }
             }
