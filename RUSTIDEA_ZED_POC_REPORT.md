@@ -317,8 +317,9 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
 - the Zed `Editor` renders the active tab and receives OpenIDEA completion,
   semantics and code-action providers through `DocumentLsp`;
 - a split view opens a second Zed `Editor` over the same `language::Buffer`;
-- a native Run tool window lists OpenIDEA run configurations, starts/stops a
-  run, streams stdout/stderr/system output and shows the exit status;
+- a native Run tool window lists OpenIDEA run configurations, creates and saves
+  user shell configurations, starts/stops a run, streams
+  stdout/stderr/system output and shows the exit status;
 - a native Find in Files panel uses the shared GPUI `TextInput` and the
   OpenIDEA `ops::search` streaming engine, with regex/case/whole-word toggles
   and clickable file/line/column results;
@@ -463,7 +464,7 @@ Panel coverage at this commit:
 | Settings | filter + boolean toggles + JSON value editor | `ops::project::settings` / `set_settings` |
 | Debug | attach/session console, line breakpoints, stack/scopes/variables, evaluate, resume/pause/step (session runtime unverified) | `ops::debug` |
 | Terminal | working VT screen | Zed `terminal` + `ops::term` |
-| Run | working | `ops::run` |
+| Run | detected/user configurations, create and save user configurations to `.openidea/run.toml`, start/stop, output/exit status | `ops::run` |
 | Build | working | `ops::build` |
 
 Headless split/search smoke (real native window, real OpenIDEA host, Java file):
@@ -480,6 +481,13 @@ Run smoke on the same Java project:
 WORKBENCH_PROJECT_OPEN name=rustidea-java-workbench-smoke trusted=true tree_rows=3 initial_doc=true
 WORKBENCH_DOC_OPEN doc=1 path=.../App.java language=java tabs=1
 WORKBENCH_SMOKE status=jdtls: Ready language=true editors=2 run_status=Exited with Some(0) run_output="Process finished with exit code 0" text_prefix="// rustidea run smoke"
+```
+
+Run configuration save smoke:
+
+```text
+run_status=Saved run configuration Smoke Config run_configs=1
+.openidea/run.toml: id="user:1795665278917" name="Smoke Config" command="echo" args=["hello"] env={SMOKE="1"}
 ```
 
 Git smoke in a temporary `main` repository with one modified Java file:
@@ -942,6 +950,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   layer only supports re-keying untitled buffers, not renaming an existing file.
   Color preview covers hex literals only; `rgb()`/`hsl()` literals and a color
   picker are not implemented.
+  The Run panel can create shell configurations; edit/delete and type-specific
+  configuration dialogs are not implemented.
   Analysis runs Locate Duplicates, structural search, structural replacement
   and Inspect Code. Replace uses the OpenIDEA document layer and saves files
   that were opened transiently; edits in already-open buffers stay dirty until

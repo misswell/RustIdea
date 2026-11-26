@@ -781,6 +781,13 @@ pub struct Workbench {
     running_run: Option<ide_run::RunInfo>,
     run_output: String,
     run_status: gpui::SharedString,
+    run_editor_open: bool,
+    run_name_input: Entity<TextInput>,
+    run_command_input: Entity<TextInput>,
+    run_args_input: Entity<TextInput>,
+    run_cwd_input: Entity<TextInput>,
+    run_env_input: Entity<TextInput>,
+    run_editor_status: gpui::SharedString,
     sidebar_mode: SidebarMode,
     search_input: Entity<TextInput>,
     search_pattern: String,
@@ -1514,6 +1521,56 @@ impl Workbench {
                 TextInputEvent::Submit(_) => app.record_logcat_filter(cx),
                 _ => {}
             });
+        let run_name_input = cx.new(|cx| {
+            TextInput::new(
+                "Run configuration name",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let run_command_input = cx.new(|cx| {
+            TextInput::new(
+                "Command (e.g. cargo, npm, ./script.sh)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let run_args_input = cx.new(|cx| {
+            TextInput::new(
+                "Arguments (space separated)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let run_cwd_input = cx.new(|cx| {
+            TextInput::new(
+                "Working directory (relative to project)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let run_env_input = cx.new(|cx| {
+            TextInput::new(
+                "Environment (KEY=VALUE, space separated)",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
         let scratch_name_input = cx.new(|cx| {
             TextInput::new(
                 "Scratch file name (notes, Main.java…) then Enter",
@@ -1633,6 +1690,13 @@ impl Workbench {
             running_run: None,
             run_output: String::new(),
             run_status,
+            run_editor_open: false,
+            run_name_input,
+            run_command_input,
+            run_args_input,
+            run_cwd_input,
+            run_env_input,
+            run_editor_status: gpui::SharedString::default(),
             sidebar_mode: SidebarMode::Project,
             search_input,
             search_pattern: String::new(),
@@ -5158,6 +5222,101 @@ impl Workbench {
         .detach();
     }
 
+    fn save_run_config_editor(&mut self, cx: &mut Context<Self>) {
+        let name = self.run_name_input.read(cx).content().trim().to_owned();
+        let command = self.run_command_input.read(cx).content().trim().to_owned();
+        if name.is_empty() || command.is_empty() {
+            self.run_editor_status = "Name and command are required".into();
+            cx.notify();
+            return;
+        }
+        let args = self
+            .run_args_input
+            .read(cx)
+            .content()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let cwd_raw = self.run_cwd_input.read(cx).content().trim().to_owned();
+        let cwd = if cwd_raw.is_empty() {
+            None
+        } else {
+            let path = PathBuf::from(&cwd_raw);
+            Some(if path.is_absolute() {
+                path
+            } else {
+                self.root.join(path)
+            })
+        };
+        let mut env = BTreeMap::new();
+        for token in self.run_env_input.read(cx).content().split_whitespace() {
+            let Some((key, value)) = token.split_once('=') else {
+                self.run_editor_status = format!("Environment must be KEY=VALUE: {token}").into();
+                cx.notify();
+                return;
+            };
+            if key.is_empty() {
+                self.run_editor_status = "Environment variable name is empty".into();
+                cx.notify();
+                return;
+            }
+            env.insert(key.to_owned(), value.to_owned());
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let config = ide_run::RunConfig {
+            id: format!("user:{stamp}"),
+            name,
+            kind: "shell".into(),
+            command,
+            args,
+            cwd: cwd.map(Into::into),
+            env,
+            detected: false,
+            is_test: false,
+            debug_adapter: None,
+            allow_parallel: false,
+            extras: ide_run::RunExtras::default(),
+        };
+        let mut user_configs = self
+            .run_configs
+            .iter()
+            .filter(|config| !config.detected)
+            .cloned()
+            .collect::<Vec<_>>();
+        user_configs.push(config.clone());
+        match self.host.save_run_configs(&user_configs, &[]) {
+            Ok(()) => {
+                if let Ok(configs) = self.host.run_configs() {
+                    self.selected_run = configs
+                        .iter()
+                        .position(|item| item.id == config.id)
+                        .unwrap_or(0);
+                    self.run_configs = configs;
+                }
+                self.run_status = format!("Saved run configuration {}", config.name).into();
+                self.run_editor_open = false;
+                self.run_editor_status = gpui::SharedString::default();
+                for input in [
+                    &self.run_name_input,
+                    &self.run_command_input,
+                    &self.run_args_input,
+                    &self.run_cwd_input,
+                    &self.run_env_input,
+                ] {
+                    input.update(cx, |input, cx| input.set_content("", cx));
+                }
+            }
+            Err(error) => {
+                self.run_editor_status =
+                    format!("Run configuration save failed: {}", error.message).into();
+            }
+        }
+        cx.notify();
+    }
+
     fn start_selected_run(&mut self, cx: &mut Context<Self>) {
         let Some(config) = self.run_configs.get(self.selected_run).cloned() else {
             self.run_status = "No run configuration selected".into();
@@ -7673,6 +7832,38 @@ impl Workbench {
 
     pub fn smoke_start_run(&mut self, cx: &mut Context<Self>) {
         self.start_selected_run(cx);
+    }
+
+    pub fn smoke_create_run_config(
+        &mut self,
+        name: String,
+        command: String,
+        args: String,
+        cwd: String,
+        env: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_name_input.update(cx, |input, cx| {
+            input.set_content(name, cx);
+        });
+        self.run_command_input.update(cx, |input, cx| {
+            input.set_content(command, cx);
+        });
+        self.run_args_input.update(cx, |input, cx| {
+            input.set_content(args, cx);
+        });
+        self.run_cwd_input.update(cx, |input, cx| {
+            input.set_content(cwd, cx);
+        });
+        self.run_env_input.update(cx, |input, cx| {
+            input.set_content(env, cx);
+        });
+        self.run_editor_open = true;
+        self.save_run_config_editor(cx);
+    }
+
+    pub fn run_config_count(&self) -> usize {
+        self.run_configs.len()
     }
 
     pub fn smoke_outline(&mut self, cx: &mut Context<Self>) {
@@ -16502,7 +16693,88 @@ impl Workbench {
             output = output.children(lines.into_iter().map(|line| div().child(line)));
         }
 
-        let run_body = div().size_full().flex().flex_col().child(output);
+        let run_form = div()
+            .px_2()
+            .py_1()
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().h(px(24.)).child(self.run_name_input.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(24.))
+                            .child(self.run_command_input.clone()),
+                    )
+                    .child(div().flex_1().h(px(24.)).child(self.run_args_input.clone())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().h(px(24.)).child(self.run_cwd_input.clone()))
+                    .child(div().flex_1().h(px(24.)).child(self.run_env_input.clone())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child(self.run_editor_status.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("run-config-save")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.save_run_config_editor(cx);
+                            }))
+                            .child("Save"),
+                    )
+                    .child(
+                        div()
+                            .id("run-config-cancel")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(9.))
+                            .text_color(theme.muted)
+                            .bg(theme.panel_alt)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.run_editor_open = false;
+                                this.run_editor_status = gpui::SharedString::default();
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    ),
+            );
+        let run_body = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .when(self.run_editor_open, |body| body.child(run_form))
+            .child(output);
         let terminal_body = match &self.terminal {
             Some(terminal) => div().size_full().child(terminal.clone()).into_any_element(),
             None => div()
@@ -16894,6 +17166,29 @@ impl Workbench {
                     .child(div().flex_1())
                     .when(run_tab_active, |row| {
                         row.child(
+                            div()
+                                .id("run-config-new")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.5))
+                                .text_color(theme.muted)
+                                .bg(theme.panel_alt)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.run_editor_open = true;
+                                    this.run_editor_status = "Fill the fields, then Save".into();
+                                    let cwd = this.root.display().to_string();
+                                    this.run_cwd_input.update(cx, |input, cx| {
+                                        input.set_content(cwd, cx);
+                                    });
+                                    let focus = this.run_name_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus, cx);
+                                    cx.notify();
+                                }))
+                                .child("New"),
+                        )
+                        .child(
                             div()
                                 .id("start-run")
                                 .px_2()

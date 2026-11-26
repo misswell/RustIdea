@@ -598,6 +598,14 @@ impl NativeHost {
         ide_host::ops::run::configs(&self.host, MAIN_WINDOW)
     }
 
+    pub fn save_run_configs(
+        &self,
+        configs: &[ide_run::RunConfig],
+        removed_detected_ids: &[String],
+    ) -> IdeResult<()> {
+        ide_host::ops::run::save_configs(&self.host, MAIN_WINDOW, configs, removed_detected_ids)
+    }
+
     pub async fn start_run(
         &self,
         config: ide_run::RunConfig,
