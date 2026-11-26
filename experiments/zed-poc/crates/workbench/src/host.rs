@@ -623,6 +623,30 @@ impl NativeHost {
         .await
     }
 
+    pub async fn db_table_details(
+        &self,
+        id: String,
+        schema: String,
+        table: String,
+    ) -> IdeResult<ide_db::TableDetails> {
+        self.run(move |host| async move {
+            ide_host::ops::db::table_details(&host, MAIN_WINDOW, &id, &schema, &table).await
+        })
+        .await
+    }
+
+    pub async fn db_table_ddl(
+        &self,
+        id: String,
+        schema: String,
+        table: String,
+    ) -> IdeResult<String> {
+        self.run(move |host| async move {
+            ide_host::ops::db::ddl(&host, MAIN_WINDOW, &id, &schema, &table).await
+        })
+        .await
+    }
+
     pub async fn db_console_path(&self, id: String) -> IdeResult<IpcPath> {
         self.run(move |host| async move { ide_host::ops::db::console_path(&host, &id) })
             .await

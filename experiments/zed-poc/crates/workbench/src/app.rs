@@ -2976,6 +2976,83 @@ impl Workbench {
         cx.notify();
     }
 
+    fn describe_db_table(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
+            self.db_status = "No data source selected".into();
+            cx.notify();
+            return;
+        };
+        let Some(table) = self.db_tables.get(index).cloned() else {
+            self.db_status = "No table selected".into();
+            cx.notify();
+            return;
+        };
+        let schema = self
+            .db_schemas
+            .get(self.db_schema_selected)
+            .cloned()
+            .unwrap_or_default();
+        let qualified = if schema.is_empty() {
+            table.name.clone()
+        } else {
+            format!("{schema}.{}", table.name)
+        };
+        let host = self.host.clone();
+        let id = source.id.clone();
+        let table_name = table.name.clone();
+        self.db_busy = true;
+        self.db_status = format!("Loading details of {qualified}…").into();
+        self.db_output.clear();
+        cx.spawn(async move |this, cx| {
+            let (details, ddl) = tokio::join!(
+                host.db_table_details(id.clone(), schema.clone(), table_name.clone()),
+                host.db_table_ddl(id, schema, table_name)
+            );
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.db_busy = false;
+                    match details {
+                        Ok(details) => {
+                            let columns = details.columns.len();
+                            match serde_json::to_string_pretty(&details) {
+                                Ok(mut output) => {
+                                    output.push_str("\n\n-- DDL\n");
+                                    match ddl {
+                                        Ok(ddl) => output.push_str(&ddl),
+                                        Err(error) => {
+                                            output.push_str(&format!("-- DDL failed: {}", error.message))
+                                        }
+                                    }
+                                    app.db_output = output;
+                                    app.db_status = format!(
+                                        "{qualified}: {columns} columns · {} indexes · {} foreign keys",
+                                        details.indexes.len(),
+                                        details.foreign_keys.len()
+                                    )
+                                    .into();
+                                }
+                                Err(error) => {
+                                    app.db_status =
+                                        format!("Details format failed: {error}").into();
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            app.db_status =
+                                format!("Details failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn open_db_source_editor(&mut self, cx: &mut Context<Self>) {
         self.db_source_editor_open = true;
         self.db_source_name_input.update(cx, |input, cx| {
@@ -9073,6 +9150,11 @@ impl Workbench {
         self.run_selected_db_sql(cx);
     }
 
+    pub fn smoke_describe_db_table(&mut self, cx: &mut Context<Self>) {
+        let index = self.db_table_selected;
+        self.describe_db_table(index, cx);
+    }
+
     pub fn db_source_count(&self) -> usize {
         self.db_sources.len()
     }
@@ -12513,6 +12595,22 @@ impl Workbench {
                                 this.query_db_table(index, cx);
                             }))
                             .child("Query Table"),
+                    )
+                    .child(
+                        div()
+                            .id("db-describe-table")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                let index = this.db_table_selected;
+                                this.describe_db_table(index, cx);
+                            }))
+                            .child("Describe"),
                     )
                     .child(div().flex_1())
                     .child(

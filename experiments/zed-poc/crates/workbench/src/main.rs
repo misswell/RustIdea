@@ -308,6 +308,8 @@ fn main() {
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_DB_BROWSER").is_some();
                 let smoke_db_console =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_DB_CONSOLE").is_some();
+                let smoke_db_describe =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_DB_DESCRIBE").is_some();
                 let smoke_db_query = std::env::var("RUSTIDEA_ZED_SMOKE_DB_QUERY").ok();
                 let smoke_db_add_sqlite =
                     std::env::var("RUSTIDEA_ZED_SMOKE_DB_ADD_SQLITE").ok();
@@ -672,6 +674,9 @@ fn main() {
                                 }
                                 if smoke_db_query.is_some() {
                                     app.smoke_run_db_query(cx);
+                                }
+                                if smoke_db_describe {
+                                    app.smoke_describe_db_table(cx);
                                 }
                                 if smoke_notebook_edit {
                                     app.smoke_notebook_edit(window, cx);
