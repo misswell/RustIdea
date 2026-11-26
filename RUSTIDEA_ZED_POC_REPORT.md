@@ -438,7 +438,7 @@ Panel coverage at this commit:
 | Coverage | Run with Coverage for the selected run configuration, import lcov/JaCoCo/Go/SimpleCov reports, sort, file/directory percentages, project-tree badges, editor gutter highlights, file navigation | `ops::coverage::coverage_prepare/collect/import`, Zed gutter highlights |
 | Bookmarks | F3 toggle at caret, editor gutter marker, navigable list, remove, per-project JSON persistence | local store + navigation, Zed gutter highlights |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
-| Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers, container log viewer (tail 500), pull images, prune per-object | `ide-docker` |
+| Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers, container log viewer (tail 500), pull images, prune per-object, Compose start/stop/restart/down | `ide-docker` |
 | GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, conversation and inline diff comments, close/reopen, merge (merge/squash/rebase with two-click confirmation), open in browser | `ide-github`, `ide-vcs` |
 | Heap | import `.hprof`, class table, class object pages, GC-root path, class-by-class two-snapshot comparison | `ops::heap::debug_heap_open/classes/dominators/path/compare` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, call tree, source navigation | `ide-profiler` |
@@ -695,6 +695,12 @@ Docker prune smoke (`image prune --all --force`):
 docker_status=untagged: postgres@sha256:deadbeef
 ```
 
+Docker Compose smoke (`compose --project-name shop start`):
+
+```text
+docker_status=Compose output: compose --project-name shop start
+```
+
 GitHub Pull Requests smoke through a fake `gh` CLI:
 
 ```text
@@ -912,8 +918,8 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   and collect its report; the gutter colors are smoke-verified through the Zed
   highlight API rather than a visual screenshot. Bookmarks have a navigable panel and an editor gutter marker
   (also API-smoke-verified, not visually captured). Services lists Docker objects, can
-  start/stop/restart containers, shows logs, pulls images and prunes objects, but custom connections and
-  Compose lifecycle controls are missing. GitHub lists and filters pull
+  start/stop/restart containers, shows logs, pulls images, prunes objects and
+  runs Compose lifecycle actions, but custom connections are missing. GitHub lists and filters pull
   requests and shows details/checks/review comments/timeline and a unified
   diff, submits reviews, conversation comments, inline diff comments,
   closes/reopens and merges pull requests (two-click confirmation). Heap

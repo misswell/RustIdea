@@ -1376,6 +1376,35 @@ impl NativeHost {
         .await
     }
 
+    pub async fn docker_compose(
+        &self,
+        project: String,
+        files: Vec<String>,
+        working_dir: Option<String>,
+        op: ide_docker::ComposeOp,
+    ) -> IdeResult<Vec<String>> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                let cancel = ide_core::CancellationToken::new();
+                let lines = std::cell::RefCell::new(Vec::new());
+                ide_docker::compose_op(
+                    &ide_docker::DockerEndpoint::Default,
+                    &project,
+                    &files,
+                    working_dir.as_deref(),
+                    op,
+                    &cancel,
+                    &|line| lines.borrow_mut().push(line.trim_end().to_owned()),
+                )?;
+                Ok(lines.into_inner())
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
     pub async fn github_availability(
         &self,
         root: PathBuf,

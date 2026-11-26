@@ -5941,6 +5941,56 @@ impl Workbench {
         cx.notify();
     }
 
+    fn compose_docker(
+        &mut self,
+        project: String,
+        files: Vec<String>,
+        working_dir: Option<String>,
+        op: ide_docker::ComposeOp,
+        cx: &mut Context<Self>,
+    ) {
+        if self.docker_busy {
+            return;
+        }
+        let label = match op {
+            ide_docker::ComposeOp::Start => "start",
+            ide_docker::ComposeOp::Stop => "stop",
+            ide_docker::ComposeOp::Restart => "restart",
+            ide_docker::ComposeOp::Down => "down",
+        };
+        let host = self.host.clone();
+        self.docker_busy = true;
+        self.docker_status = format!("Compose {label} {project}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .docker_compose(project.clone(), files, working_dir, op)
+                .await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.docker_busy = false;
+                    match result {
+                        Ok(lines) => {
+                            app.docker_status = lines
+                                .last()
+                                .cloned()
+                                .unwrap_or_else(|| format!("Compose {label} {project}"))
+                                .into();
+                        }
+                        Err(error) => {
+                            app.docker_status = format!("Compose failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn refresh_github(&mut self, cx: &mut Context<Self>) {
         if self.github_busy {
             return;
@@ -8262,6 +8312,37 @@ impl Workbench {
             _ => ide_docker::PruneTarget::System,
         };
         self.prune_docker(target, cx);
+    }
+
+    pub fn smoke_docker_compose(&mut self, action: &str, cx: &mut Context<Self>) {
+        let project = self
+            .docker_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot
+                    .containers
+                    .iter()
+                    .find(|container| container.compose_project.is_some())
+            })
+            .map(|container| {
+                (
+                    container.compose_project.clone().unwrap_or_default(),
+                    container.compose_files.clone(),
+                    container.compose_working_dir.clone(),
+                )
+            });
+        let Some((project, files, working_dir)) = project else {
+            self.docker_status = "No Compose project in this snapshot".into();
+            cx.notify();
+            return;
+        };
+        let op = match action {
+            "stop" => ide_docker::ComposeOp::Stop,
+            "restart" => ide_docker::ComposeOp::Restart,
+            "down" => ide_docker::ComposeOp::Down,
+            _ => ide_docker::ComposeOp::Start,
+        };
+        self.compose_docker(project, files, working_dir, op, cx);
     }
 
     pub fn docker_log_count(&self) -> usize {
@@ -12151,6 +12232,83 @@ impl Workbench {
         } else if let Some(snapshot) = snapshot {
             match self.docker_tab {
                 DockerTab::Containers => {
+                    let mut compose_projects: BTreeMap<String, (Vec<String>, Option<String>)> =
+                        BTreeMap::new();
+                    for container in &snapshot.containers {
+                        if let Some(project) = &container.compose_project {
+                            let entry = compose_projects.entry(project.clone()).or_default();
+                            for file in &container.compose_files {
+                                if !entry.0.contains(file) {
+                                    entry.0.push(file.clone());
+                                }
+                            }
+                            if entry.1.is_none() {
+                                entry.1 = container.compose_working_dir.clone();
+                            }
+                        }
+                    }
+                    for (project, (files, working_dir)) in compose_projects {
+                        rows = rows.child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .bg(theme.panel_alt)
+                                .text_size(px(9.))
+                                .text_color(theme.muted)
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .truncate()
+                                        .child(format!("Compose · {project}")),
+                                )
+                                .children(
+                                    [
+                                        ("Start", ide_docker::ComposeOp::Start),
+                                        ("Stop", ide_docker::ComposeOp::Stop),
+                                        ("Restart", ide_docker::ComposeOp::Restart),
+                                        ("Down", ide_docker::ComposeOp::Down),
+                                    ]
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(
+                                        |(index, (label, op))| {
+                                            let project = project.clone();
+                                            let files = files.clone();
+                                            let working_dir = working_dir.clone();
+                                            div()
+                                                .id(("docker-compose", index))
+                                                .px_1()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_size(px(8.5))
+                                                .text_color(
+                                                    if matches!(op, ide_docker::ComposeOp::Down) {
+                                                        theme.warning
+                                                    } else {
+                                                        theme.accent
+                                                    },
+                                                )
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(
+                                                    move |this, _: &ClickEvent, _, cx| {
+                                                        this.compose_docker(
+                                                            project.clone(),
+                                                            files.clone(),
+                                                            working_dir.clone(),
+                                                            op,
+                                                            cx,
+                                                        );
+                                                    },
+                                                ))
+                                                .child(label)
+                                        },
+                                    ),
+                                ),
+                        );
+                    }
                     if snapshot.containers.is_empty() {
                         rows = rows.child(
                             div()
