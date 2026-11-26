@@ -647,6 +647,24 @@ impl NativeHost {
         .await
     }
 
+    pub async fn db_history(&self, id: String) -> IdeResult<Vec<ide_db::HistoryEntry>> {
+        self.run(move |host| async move {
+            ide_host::ops::db::history(&host, MAIN_WINDOW, &id).await
+        })
+        .await
+    }
+
+    pub async fn db_remove_history(
+        &self,
+        id: String,
+        texts: Option<Vec<String>>,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            ide_host::ops::db::remove_history(&host, MAIN_WINDOW, &id, texts).await
+        })
+        .await
+    }
+
     pub async fn db_console_path(&self, id: String) -> IdeResult<IpcPath> {
         self.run(move |host| async move { ide_host::ops::db::console_path(&host, &id) })
             .await

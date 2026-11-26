@@ -1044,6 +1044,9 @@ pub struct Workbench {
     db_table_selected: usize,
     db_console_files: Vec<PathBuf>,
     db_consoles_status: gpui::SharedString,
+    db_history: Vec<ide_db::HistoryEntry>,
+    db_history_open: bool,
+    db_history_status: gpui::SharedString,
     db_console_path: Option<PathBuf>,
     db_busy: bool,
     db_source_editor_open: bool,
@@ -2047,6 +2050,9 @@ impl Workbench {
             db_table_selected: 0,
             db_console_files: Vec::new(),
             db_consoles_status: "Connect to load saved consoles".into(),
+            db_history: Vec::new(),
+            db_history_open: false,
+            db_history_status: "Connect to load query history".into(),
             db_console_path: None,
             db_busy: false,
             db_source_editor_open: false,
@@ -2760,6 +2766,9 @@ impl Workbench {
         self.db_table_selected = 0;
         self.db_console_files.clear();
         self.db_consoles_status = "Connect to load saved consoles".into();
+        self.db_history.clear();
+        self.db_history_open = false;
+        self.db_history_status = "Connect to load query history".into();
         self.db_console_path = None;
         self.refresh_db_browser(cx);
     }
@@ -2770,6 +2779,8 @@ impl Workbench {
             self.db_tables.clear();
             self.db_console_files.clear();
             self.db_consoles_status = "Select a data source to load consoles".into();
+            self.db_history.clear();
+            self.db_history_status = "Select a data source to load query history".into();
             self.db_tables_status = "Select a data source to browse schemas".into();
             self.db_busy = false;
             cx.notify();
@@ -2780,6 +2791,8 @@ impl Workbench {
             self.db_tables.clear();
             self.db_console_files.clear();
             self.db_consoles_status = "Connect to load saved consoles".into();
+            self.db_history.clear();
+            self.db_history_status = "Connect to load query history".into();
             self.db_tables_status = "Connect to browse schemas and tables".into();
             self.db_busy = false;
             cx.notify();
@@ -2788,6 +2801,7 @@ impl Workbench {
         let id = source.id.clone();
         let host = self.host.clone();
         self.load_db_consoles(id.clone(), cx);
+        self.load_db_history(id.clone(), cx);
         self.db_busy = true;
         self.db_tables_status = format!("Loading schemas of {}…", source.name).into();
         cx.spawn(async move |this, cx| {
@@ -2893,6 +2907,35 @@ impl Workbench {
                             app.db_console_files.clear();
                             app.db_consoles_status =
                                 format!("Console list failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn load_db_history(&mut self, id: String, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_history(id).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(history) => {
+                            app.db_history = history;
+                            app.db_history_status =
+                                format!("{} query history entries", app.db_history.len()).into();
+                        }
+                        Err(error) => {
+                            app.db_history.clear();
+                            app.db_history_status =
+                                format!("Query history failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -3098,6 +3141,100 @@ impl Workbench {
         cx.notify();
     }
 
+    fn open_db_history_entry(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
+            self.db_status = "No data source selected".into();
+            cx.notify();
+            return;
+        };
+        let Some(entry) = self.db_history.get(index).cloned() else {
+            self.db_status = "No history entry selected".into();
+            cx.notify();
+            return;
+        };
+        let id = source.id.clone();
+        let id_for_app = id.clone();
+        let host = self.host.clone();
+        let sql = entry.text;
+        self.db_busy = true;
+        self.db_status = "Opening a console from query history…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_consoles(id, true).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.db_busy = false;
+                    match result {
+                        Ok(consoles) => match consoles.last() {
+                            Some(path) => {
+                                if let Err(error) = std::fs::write(&path.0, sql) {
+                                    app.db_status =
+                                        format!("Console write failed: {error}").into();
+                                } else {
+                                    app.db_console_path = Some(path.0.clone());
+                                    app.db_status =
+                                        format!("History console: {}", path.0.display()).into();
+                                    app.load_db_consoles(id_for_app.clone(), cx);
+                                    app.load_db_history(id_for_app.clone(), cx);
+                                    app.open_path(path.0.clone(), cx);
+                                }
+                            }
+                            None => {
+                                app.db_status = "No query console was created".into();
+                            }
+                        },
+                        Err(error) => {
+                            app.db_status =
+                                format!("Console failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn clear_db_history(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.db_sources.get(self.db_selected).cloned() else {
+            self.db_status = "No data source selected".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let id = source.id;
+        self.db_busy = true;
+        self.db_status = "Clearing query history…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.db_remove_history(id.clone(), None).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.db_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.db_history.clear();
+                            app.db_history_status = "Query history cleared".into();
+                            app.db_status = "Query history cleared".into();
+                        }
+                        Err(error) => {
+                            app.db_status =
+                                format!("Clear history failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn open_db_source_editor(&mut self, cx: &mut Context<Self>) {
         self.db_source_editor_open = true;
         self.db_source_name_input.update(cx, |input, cx| {
@@ -3220,6 +3357,7 @@ impl Workbench {
         };
         let text = document.text(cx);
         let id = source.id.clone();
+        let id_for_app = id.clone();
         let host = self.host.clone();
         self.db_status = format!("Running on {}…", source.name).into();
         self.db_output.clear();
@@ -3253,6 +3391,7 @@ impl Workbench {
                                 let split = app.db_output.len().saturating_sub(1_800_000);
                                 app.db_output.drain(..split);
                             }
+                            app.load_db_history(id_for_app.clone(), cx);
                         }
                         Err(error) => {
                             app.db_status = format!("Query failed: {}", error.message).into();
@@ -9231,6 +9370,14 @@ impl Workbench {
         self.db_consoles_status.to_string()
     }
 
+    pub fn db_history_count(&self) -> usize {
+        self.db_history.len()
+    }
+
+    pub fn db_history_status_text(&self) -> String {
+        self.db_history_status.to_string()
+    }
+
     pub fn db_output_first(&self) -> String {
         self.db_output.lines().next().unwrap_or_default().to_owned()
     }
@@ -12466,6 +12613,35 @@ impl Workbench {
                     .child(label),
             );
         }
+        let mut history_rows = div()
+            .id("db-history")
+            .flex_none()
+            .max_h(px(140.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (index, entry) in self.db_history.iter().take(100).enumerate() {
+            let label = entry.text.replace('\n', " ");
+            let label = if label.chars().count() > 140 {
+                format!("{}…", label.chars().take(140).collect::<String>())
+            } else {
+                label
+            };
+            history_rows = history_rows.child(
+                div()
+                    .id(("db-history-entry", index))
+                    .px_2()
+                    .py(px(1.))
+                    .text_size(px(9.5))
+                    .text_color(theme.muted)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.panel_alt))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_db_history_entry(index, cx);
+                    }))
+                    .child(label),
+            );
+        }
         let mut lines: Vec<String> = self.db_output.lines().map(str::to_owned).collect();
         if lines.len() > 400 {
             lines.drain(..lines.len() - 400);
@@ -12693,6 +12869,42 @@ impl Workbench {
                             }))
                             .child("Describe"),
                     )
+                    .child(
+                        div()
+                            .id("db-history-toggle")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.db_history_open = !this.db_history_open;
+                                cx.notify();
+                            }))
+                            .child(if self.db_history_open {
+                                "Close History"
+                            } else {
+                                "History"
+                            }),
+                    )
+                    .when(self.db_history_open, |row| {
+                        row.child(
+                            div()
+                                .id("db-history-clear")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_size(px(10.))
+                                .text_color(theme.error)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.clear_db_history(cx);
+                                }))
+                                .child("Clear"),
+                        )
+                    })
                     .child(div().flex_1())
                     .child(
                         div()
@@ -12731,6 +12943,21 @@ impl Workbench {
                     .child(self.db_consoles_status.clone()),
             )
             .child(console_rows)
+            .when(self.db_history_open, |view| {
+                view.child(
+                    div()
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(9.))
+                        .text_color(theme.faint)
+                        .child("QUERY HISTORY")
+                        .child(div().flex_1())
+                        .child(self.db_history_status.clone()),
+                )
+                .child(history_rows)
+            })
             .child(output)
             .into_any_element()
     }
