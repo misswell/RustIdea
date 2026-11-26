@@ -6185,7 +6185,13 @@ impl Workbench {
                                 app.sync_document(doc_id, cx);
                             } else if document.save_requested {
                                 document.save_requested = false;
-                                app.save_document(doc_id, cx);
+                                let force = document.save_force_requested;
+                                document.save_force_requested = false;
+                                if force {
+                                    app.overwrite_document(doc_id, cx);
+                                } else {
+                                    app.save_document(doc_id, cx);
+                                }
                             }
                         }
                         Err(error) => {
@@ -6205,12 +6211,30 @@ impl Workbench {
     }
 
     fn save_document(&mut self, doc_id: DocId, cx: &mut Context<Self>) {
+        self.save_document_checked(doc_id, false, cx);
+    }
+
+    fn overwrite_document(&mut self, doc_id: DocId, cx: &mut Context<Self>) {
+        self.save_document_checked(doc_id, true, cx);
+    }
+
+    fn save_document_checked(&mut self, doc_id: DocId, force: bool, cx: &mut Context<Self>) {
         let Some(document) = self.documents.get(&doc_id) else {
             return;
         };
+        if !force && document.disk_changed() {
+            if let Some(document) = self.documents.get_mut(&doc_id) {
+                document.conflict =
+                    Some("File changed on disk since it was opened".into());
+            }
+            self.status = "File changed on disk; reload or overwrite".into();
+            cx.notify();
+            return;
+        }
         if document.syncing {
             if let Some(document) = self.documents.get_mut(&doc_id) {
                 document.save_requested = true;
+                document.save_force_requested |= force;
             }
             return;
         }
@@ -6224,6 +6248,10 @@ impl Workbench {
                     match result {
                         Ok(()) => {
                             buffer.update(cx, |buffer, cx| buffer.did_save(version, None, cx));
+                            if let Some(document) = app.documents.get_mut(&doc_id) {
+                                document.refresh_disk_stamp();
+                                document.conflict = None;
+                            }
                             app.status = "Saved through OpenIDEA".into();
                         }
                         Err(error) => {
@@ -6238,6 +6266,53 @@ impl Workbench {
             refresh_window(handle, cx);
         })
         .detach();
+    }
+
+    fn reload_document(&mut self, doc_id: DocId, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        self.status = "Reloading from disk…".into();
+        cx.spawn(async move |this, cx| {
+            let reload = host.reload_document_discarding_changes(doc_id).await;
+            let result = match reload {
+                Ok(()) => host.document_info_async(doc_id).await,
+                Err(error) => Err(error),
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(info) => {
+                            let Some(document) = app.documents.get_mut(&doc_id) else {
+                                return app.window_handle;
+                            };
+                            let buffer = document.buffer.clone();
+                            let text = info.text.clone();
+                            let version = buffer.update(cx, |buffer, cx| {
+                                let len = buffer.snapshot().text().len();
+                                buffer.edit([(0..len, text)], None, cx);
+                                let version = buffer.snapshot().version().clone();
+                                buffer.did_save(version.clone(), None, cx);
+                                version
+                            });
+                            document.backend_version = info.version;
+                            document.last_clock = version.clone();
+                            document.confirmed_clock = version;
+                            document.conflict = None;
+                            document.refresh_disk_stamp();
+                            app.status = "Reloaded from disk".into();
+                        }
+                        Err(error) => {
+                            app.status = format!("Reload failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
     }
 
     fn new_run_config_editor(&mut self, cx: &mut Context<Self>) {
@@ -9051,6 +9126,34 @@ impl Workbench {
         true
     }
 
+    pub fn smoke_external_conflict(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.active else {
+            self.status = "No active document for conflict smoke".into();
+            cx.notify();
+            return;
+        };
+        let Some(document) = self.documents.get(&doc) else {
+            return;
+        };
+        let path = document.path.clone();
+        document.buffer.update(cx, |buffer, cx| {
+            buffer.edit([(0..0, "local conflict change\n")], None, cx);
+        });
+        if let Err(error) = std::fs::write(&path, "external change\n") {
+            self.status = format!("External write failed: {error}").into();
+            cx.notify();
+            return;
+        }
+        self.save_document(doc, cx);
+    }
+
+    pub fn active_conflict_text(&self) -> String {
+        self.active
+            .and_then(|doc| self.documents.get(&doc))
+            .and_then(|document| document.conflict.clone())
+            .unwrap_or_default()
+    }
+
     pub fn smoke_request_completion(&mut self, line: u32, column: u32, cx: &mut Context<Self>) {
         let Some(doc) = self.active else {
             return;
@@ -10871,6 +10974,32 @@ impl Workbench {
                     .chain(modified)
                     .map(|path| path.0)
                     .collect();
+                let mut conflicts = Vec::new();
+                let mut reloads = Vec::new();
+                for (doc_id, document) in self.documents.iter() {
+                    if !changed.iter().any(|path| path == &document.path)
+                        || !document.disk_changed()
+                    {
+                        continue;
+                    }
+                    if document.is_dirty(cx) {
+                        conflicts.push(*doc_id);
+                    } else {
+                        reloads.push(*doc_id);
+                    }
+                }
+                for doc_id in conflicts {
+                    if let Some(document) = self.documents.get_mut(&doc_id) {
+                        document.conflict =
+                            Some("File changed on disk since it was opened".into());
+                    }
+                }
+                if !reloads.is_empty() {
+                    self.status = "External change: reloading clean documents…".into();
+                }
+                for doc_id in reloads {
+                    self.reload_document(doc_id, cx);
+                }
                 let reload = self.tree.note_external_changes(&changed, &[]);
                 for directory in reload {
                     self.load_directory(directory, cx);
@@ -19845,6 +19974,10 @@ impl Render for Workbench {
             .active
             .filter(|_| self.split)
             .and_then(|doc| self.editors.get(&(doc, true)).cloned());
+        let conflict_doc = self.active;
+        let active_conflict = conflict_doc
+            .and_then(|doc| self.documents.get(&doc))
+            .and_then(|document| document.conflict.clone());
         let project = self.render_project(cx).into_any_element();
         let search = self.render_search_panel(cx);
         let todo = self.render_todo(cx);
@@ -20031,6 +20164,56 @@ impl Render for Workbench {
                             .flex()
                             .flex_col()
                             .child(tabs)
+                            .when_some(active_conflict, |column, message| {
+                                column.child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .bg(theme.panel_alt)
+                                        .border_b_1()
+                                        .border_color(theme.warning)
+                                        .text_size(px(9.5))
+                                        .text_color(theme.warning)
+                                        .child(div().flex_1().child(message))
+                                        .when_some(conflict_doc, |row, doc| {
+                                            row.child(
+                                                div()
+                                                    .id("conflict-reload")
+                                                    .px_2()
+                                                    .py(px(1.))
+                                                    .rounded_sm()
+                                                    .bg(theme.accent_muted)
+                                                    .text_color(theme.text)
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(
+                                                        move |this, _: &ClickEvent, _, cx| {
+                                                            this.reload_document(doc, cx);
+                                                        },
+                                                    ))
+                                                    .child("Reload"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("conflict-overwrite")
+                                                    .px_2()
+                                                    .py(px(1.))
+                                                    .rounded_sm()
+                                                    .bg(theme.panel)
+                                                    .text_color(theme.muted)
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(
+                                                        move |this, _: &ClickEvent, _, cx| {
+                                                            this.overwrite_document(doc, cx);
+                                                        },
+                                                    ))
+                                                    .child("Overwrite"),
+                                            )
+                                        })
+                                )
+                            })
                             .child(
                                 div()
                                     .flex_1()

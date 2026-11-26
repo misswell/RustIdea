@@ -413,6 +413,8 @@ fn main() {
                 let smoke_scratch_template =
                     std::env::var("RUSTIDEA_ZED_SMOKE_SCRATCH_TEMPLATE").ok();
                 let smoke_recent = std::env::var_os("RUSTIDEA_ZED_SMOKE_RECENT").is_some();
+                let smoke_external_conflict =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_EXTERNAL_CONFLICT").is_some();
                 let smoke_save_as = std::env::var("RUSTIDEA_ZED_SMOKE_SAVE_AS").ok();
                 let smoke_color_preview =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_COLOR_PREVIEW").is_some();
@@ -764,6 +766,15 @@ fn main() {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_secs(3))
                                 .await;
+                            this.update_in(cx, |app, _window, cx| {
+                                if smoke_external_conflict && !smoke_notebook_edit {
+                                    app.smoke_external_conflict(cx);
+                                }
+                            })
+                            .ok();
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(3))
+                                .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
     "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} run_configs={} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} coverage_badges={} coverage_gutter={} coverage_run_busy={} bookmarks={} bookmark_status={} bookmark_first={:?} bookmark_gutter={} color_preview={} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} docker_logs={} docker_logs_status={} github_prs={} github_status={} github_first={:?} github_detail={} github_comments={} github_timeline={} github_review={} github_diff_files={} github_diff_lines={} github_diff_status={} github_inline={} github_detail_status={} heap_classes={} heap_object_rows={} heap_objects_status={} heap_object_first={:?} heap_status={} heap_first={:?} heap_compare={} heap_compare_status={} profile_methods={} profile_tree={} profile_status={} profile_first={:?} logcat_lines={} logcat_matches={} logcat_export={:?} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} duplicate_groups={} duplicate_status={} duplicate_first={:?} structural_matches={} structural_status={} structural_apply={} structural_first={:?} inspect_problems={} inspect_status={} inspect_first={:?} active_path={} status={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http_editor={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_outputs={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} settings_keymap_overrides={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
@@ -932,6 +943,10 @@ fn main() {
                                     "WORKBENCH_GITHUB_UI reviews={} status={:?}",
                                     app.github_review_count(),
                                     app.github_review_status_text()
+                                );
+                                eprintln!(
+                                    "WORKBENCH_EXTERNAL conflict={:?}",
+                                    app.active_conflict_text()
                                 );
                                 cx.quit();
                             })

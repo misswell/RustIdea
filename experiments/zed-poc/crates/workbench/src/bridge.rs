@@ -1,5 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash as _, Hasher as _};
 
 use anyhow::Result;
 use gpui::{AppContext as _, Context, Entity};
@@ -19,7 +21,31 @@ pub struct ZedDocument {
     pub syncing: bool,
     pub applying_backend_patch: bool,
     pub save_requested: bool,
+    pub save_force_requested: bool,
     pub conflict: Option<String>,
+    pub disk_stamp: Option<DiskStamp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiskStamp {
+    len: u64,
+    hash: u64,
+}
+
+impl DiskStamp {
+    pub fn read(path: &Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Some(Self {
+            len: bytes.len() as u64,
+            hash: hasher.finish(),
+        })
+    }
+
+    pub fn is_current(&self, path: &Path) -> bool {
+        Self::read(path).as_ref() == Some(self)
+    }
 }
 
 impl ZedDocument {
@@ -51,9 +77,11 @@ impl ZedDocument {
             }
         })
         .detach();
+        let path = info.path.0;
+        let disk_stamp = DiskStamp::read(&path);
         Self {
             doc: info.id,
-            path: info.path.0,
+            path,
             language,
             buffer,
             backend_version: info.version,
@@ -62,7 +90,9 @@ impl ZedDocument {
             syncing: false,
             applying_backend_patch: false,
             save_requested: false,
+            save_force_requested: false,
             conflict: None,
+            disk_stamp,
         }
     }
 
@@ -140,8 +170,34 @@ impl ZedDocument {
         let snapshot = self.buffer.read(cx).snapshot();
         Some(snapshot.anchor_before(PointUtf16::new(line, column)))
     }
+
+    pub fn disk_changed(&self) -> bool {
+        self.disk_stamp
+            .as_ref()
+            .is_some_and(|stamp| !stamp.is_current(&self.path))
+    }
+
+    pub fn refresh_disk_stamp(&mut self) {
+        self.disk_stamp = DiskStamp::read(&self.path);
+    }
 }
 
 pub fn is_buffer_edited(event: &BufferEvent) -> bool {
     matches!(event, BufferEvent::Edited { .. })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_stamp_detects_a_same_length_external_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "abc\n").unwrap();
+        let stamp = DiskStamp::read(&path).unwrap();
+        assert!(stamp.is_current(&path));
+        std::fs::write(&path, "abd\n").unwrap();
+        assert!(!stamp.is_current(&path));
+    }
 }

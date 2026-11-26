@@ -227,8 +227,19 @@ POC_EXTERNAL_PATCH version=1
 The OpenIdea `DocPatched` event was converted into a Zed buffer edit and the
 backend/confirmed clocks were advanced. A dirty-buffer guard refuses to apply a
 patch when the Zed clock differs from the confirmed clock and keeps local text;
-that conflict path has not yet been exercised by an interactive test. Files
-outside the project root are not watched by this POC.
+that conflict path has not yet been exercised by an interactive test.
+
+Disk conflict smoke: the workbench records a content hash for each opened file.
+After a local edit and an unrelated external write, Save refused to overwrite:
+
+```text
+WORKBENCH_EXTERNAL conflict="File changed on disk since it was opened"
+disk: external change
+buffer: local conflict change
+```
+
+The conflict banner exposes Reload and Overwrite; Reload calls OpenIDEA's
+`reload_discarding_changes` and replaces the shared Zed buffer.
 
 ## Phase 3 additions (2026-11-25)
 
@@ -1067,7 +1078,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 66 passed; 0 failed
+documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 67 passed; 0 failed
 ide-github: 12 passed; 0 failed
 ```
 
@@ -1080,8 +1091,9 @@ ide-github: 12 passed; 0 failed
 - Real window keyboard, Chinese IME, clipboard and visual verification on an
   accessible/onscreen macOS Space. The current agent session creates windows
   offscreen even with an unlocked console.
-- External-change reload/conflict handling in the Zed Buffer path (the POC only
-  ignores backend patches for the document it owns).
+- Interactive acceptance of the external-change reload/overwrite banner and a
+  real OS-watcher race remain unverified; the disk stamp and save guard are
+  covered by automated tests.
 - Process-tree memory/performance comparison and three-platform CI.
 - Plugin live UI contributions, conditioned breakpoints/logpoints and Java/
   Unity attach, rich notebook output rendering (JSON edit/clear is implemented,
