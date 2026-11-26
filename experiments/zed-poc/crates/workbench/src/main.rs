@@ -379,6 +379,12 @@ fn main() {
                         .unwrap_or_else(|_| "Looks good to me".into());
                 let smoke_github_reviewer =
                     std::env::var("RUSTIDEA_ZED_SMOKE_GITHUB_REVIEWER").ok();
+                let smoke_github_dismiss = std::env::var("RUSTIDEA_ZED_SMOKE_GITHUB_DISMISS")
+                    .ok()
+                    .and_then(|id| id.parse::<u64>().ok());
+                let smoke_github_dismiss_body =
+                    std::env::var("RUSTIDEA_ZED_SMOKE_GITHUB_DISMISS_BODY")
+                        .unwrap_or_else(|_| "Dismissed from RustIdea".into());
                 let smoke_github_diff =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_GITHUB_DIFF").is_some();
                 let smoke_github_inline = std::env::var("RUSTIDEA_ZED_SMOKE_GITHUB_INLINE").ok();
@@ -696,6 +702,13 @@ fn main() {
                                 if let Some(login) = &smoke_github_reviewer {
                                     app.smoke_request_github_reviewer(login.clone(), cx);
                                 }
+                                if let Some(review_id) = smoke_github_dismiss {
+                                    app.smoke_dismiss_github_review(
+                                        review_id,
+                                        smoke_github_dismiss_body.clone(),
+                                        cx,
+                                    );
+                                }
                                 if smoke_github_diff {
                                     app.smoke_github_diff(cx);
                                 }
@@ -898,6 +911,11 @@ fn main() {
                                     "WORKBENCH_RUN_TEMPLATE configs={} command={:?}",
                                     app.run_config_count(),
                                     app.run_config_first_command()
+                                );
+                                eprintln!(
+                                    "WORKBENCH_GITHUB_UI reviews={} status={:?}",
+                                    app.github_review_count(),
+                                    app.github_review_status_text()
                                 );
                                 cx.quit();
                             })

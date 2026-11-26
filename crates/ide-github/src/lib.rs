@@ -261,6 +261,23 @@ pub fn review_comments(root: &Path, number: u32) -> IdeResult<Vec<PrReviewCommen
     )?))
 }
 
+/// Submitted reviews of a pull request (every page).
+pub fn reviews(root: &Path, number: u32) -> IdeResult<Vec<PrReview>> {
+    let path = format!("repos/{{owner}}/{{repo}}/pulls/{number}/reviews?per_page=100");
+    parse(parse_reviews(&run(root, &["api", "--paginate", &path])?))
+}
+
+/// Dismisses review `review_id` with a message (`gh api -X PUT .../dismissals`).
+pub fn dismiss_review(root: &Path, number: u32, review_id: u64, message: &str) -> IdeResult<()> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(IdeError::invalid("the dismissal message is empty"));
+    }
+    let path = format!("repos/{{owner}}/{{repo}}/pulls/{number}/reviews/{review_id}/dismissals");
+    let field = format!("message={message}");
+    run(root, &["api", "--method", "PUT", &path, "-f", &field]).map(drop)
+}
+
 /// `gh pr checkout <n>`: creates / updates a local branch for the pull request and switches to it.
 pub fn checkout(
     root: &Path,

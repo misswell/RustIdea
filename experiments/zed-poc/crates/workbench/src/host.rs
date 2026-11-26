@@ -1526,6 +1526,38 @@ impl NativeHost {
         .await
     }
 
+    pub async fn github_reviews(
+        &self,
+        root: PathBuf,
+        number: u32,
+    ) -> IdeResult<Vec<ide_github::PrReview>> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || ide_github::reviews(&root, number))
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
+    pub async fn github_dismiss_review(
+        &self,
+        root: PathBuf,
+        number: u32,
+        review_id: u64,
+        message: String,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                ide_github::dismiss_review(&root, number, review_id, &message)
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
     pub async fn github_submit_review(
         &self,
         root: PathBuf,

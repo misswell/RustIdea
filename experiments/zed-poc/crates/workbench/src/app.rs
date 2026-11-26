@@ -918,6 +918,10 @@ pub struct Workbench {
     github_selected: Option<u32>,
     github_details: Option<ide_github::PullRequestDetails>,
     github_comments: Vec<ide_github::PrReviewComment>,
+    github_reviews: Vec<ide_github::PrReview>,
+    github_review_dismiss_confirm: Option<u64>,
+    github_dismiss_input: Entity<TextInput>,
+    _github_dismiss_subscription: Subscription,
     github_detail_status: gpui::SharedString,
     github_tab: GitHubTab,
     github_comment_input: Entity<TextInput>,
@@ -1543,6 +1547,24 @@ impl Workbench {
                     app.request_github_reviewer(cx);
                 }
             });
+        let github_dismiss_input = cx.new(|cx| {
+            TextInput::new(
+                "Dismissal message (required)…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let github_dismiss_subscription =
+            cx.subscribe(&github_dismiss_input, |app, _, event, cx| {
+                if let TextInputEvent::Submit(_) = event
+                    && let Some(review) = app.github_review_dismiss_confirm
+                {
+                    app.dismiss_github_review(review, cx);
+                }
+            });
         let docker_pull_input = cx.new(|cx| {
             TextInput::new(
                 "Image reference (e.g. postgres:16)…",
@@ -1891,6 +1913,10 @@ impl Workbench {
             github_selected: None,
             github_details: None,
             github_comments: Vec::new(),
+            github_reviews: Vec::new(),
+            github_review_dismiss_confirm: None,
+            github_dismiss_input,
+            _github_dismiss_subscription: github_dismiss_subscription,
             github_detail_status: "Select a pull request".into(),
             github_tab: GitHubTab::Overview,
             github_comment_input,
@@ -7127,6 +7153,8 @@ impl Workbench {
         self.github_selected = Some(number);
         self.github_details = None;
         self.github_comments.clear();
+        self.github_reviews.clear();
+        self.github_review_dismiss_confirm = None;
         self.github_diff_files.clear();
         self.github_diff_status = "Select Diff to load changed files".into();
         self.github_inline_target = None;
@@ -7149,9 +7177,10 @@ impl Workbench {
         let host = self.host.clone();
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let (details, comments) = tokio::join!(
+            let (details, comments, reviews) = tokio::join!(
                 host.github_pr_view(root.clone(), number),
-                host.github_review_comments(root, number)
+                host.github_review_comments(root.clone(), number),
+                host.github_reviews(root, number)
             );
             let handle = this
                 .update(cx, |app, cx| {
@@ -7170,6 +7199,14 @@ impl Workbench {
                                     app.github_comments.clear();
                                     app.github_detail_status =
                                         format!("Review comments failed: {}", error.message).into();
+                                }
+                            }
+                            match reviews {
+                                Ok(reviews) => app.github_reviews = reviews,
+                                Err(error) => {
+                                    app.github_reviews.clear();
+                                    app.github_detail_status =
+                                        format!("Reviews failed: {}", error.message).into();
                                 }
                             }
                         }
@@ -7289,6 +7326,74 @@ impl Workbench {
                         Err(error) => {
                             app.github_review_status =
                                 format!("Request review failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn request_github_review_dismiss(&mut self, review_id: u64, cx: &mut Context<Self>) {
+        self.github_review_dismiss_confirm = Some(review_id);
+        self.github_review_status =
+            "Write a dismissal message, then press Dismiss again".into();
+        cx.notify();
+    }
+
+    fn dismiss_github_review(&mut self, review_id: u64, cx: &mut Context<Self>) {
+        if self.github_review_busy {
+            return;
+        }
+        if self.github_review_dismiss_confirm != Some(review_id) {
+            self.request_github_review_dismiss(review_id, cx);
+            return;
+        }
+        let Some(number) = self.github_selected else {
+            self.github_review_status = "Select a pull request first".into();
+            cx.notify();
+            return;
+        };
+        let message = self
+            .github_dismiss_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if message.is_empty() {
+            self.github_review_status = "Write a dismissal message first".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.github_review_busy = true;
+        self.github_review_status = "Dismissing review…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .github_dismiss_review(root, number, review_id, message)
+                .await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.github_review_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.github_review_status =
+                                format!("Dismissed review {review_id}").into();
+                            app.github_review_dismiss_confirm = None;
+                            app.github_dismiss_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                            app.reload_github_pr(number, cx);
+                        }
+                        Err(error) => {
+                            app.github_review_status =
+                                format!("Dismiss review failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -9837,6 +9942,23 @@ impl Workbench {
             input.set_content(login, cx);
         });
         self.request_github_reviewer(cx);
+    }
+
+    pub fn smoke_dismiss_github_review(
+        &mut self,
+        review_id: u64,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.github_dismiss_input.update(cx, |input, cx| {
+            input.set_content(message, cx);
+        });
+        self.request_github_review_dismiss(review_id, cx);
+        self.dismiss_github_review(review_id, cx);
+    }
+
+    pub fn github_review_count(&self) -> usize {
+        self.github_reviews.len()
     }
 
     pub fn smoke_heap(&mut self, path: String, cx: &mut Context<Self>) {
@@ -14994,6 +15116,93 @@ impl Workbench {
                                 div().child(format!("{} · {}", reviewer.login, reviewer.state))
                             })),
                     );
+                }
+                if !self.github_reviews.is_empty() {
+                    body = body.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .text_size(px(9.5))
+                            .text_color(theme.muted)
+                            .child("Submitted reviews")
+                            .children(self.github_reviews.iter().take(20).map(|review| {
+                                let review_id = review.id;
+                                let confirm =
+                                    self.github_review_dismiss_confirm == Some(review_id);
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(1.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .text_size(px(8.5))
+                                            .text_color(theme.faint)
+                                            .child(review.author.clone())
+                                            .child(
+                                                div()
+                                                    .text_color(if review.state == "DISMISSED" {
+                                                        theme.faint
+                                                    } else {
+                                                        theme.warning
+                                                    })
+                                                    .child(review.state.clone()),
+                                            )
+                                            .child(div().flex_1())
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "github-review-dismiss-{review_id}"
+                                                    )))
+                                                    .px_1()
+                                                    .rounded_sm()
+                                                    .bg(if confirm {
+                                                        theme.accent_muted
+                                                    } else {
+                                                        theme.panel_alt
+                                                    })
+                                                    .text_color(if confirm {
+                                                        theme.accent
+                                                    } else {
+                                                        theme.muted
+                                                    })
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(
+                                                        move |this, _: &ClickEvent, _, cx| {
+                                                            if this.github_review_dismiss_confirm
+                                                                == Some(review_id)
+                                                            {
+                                                                this.dismiss_github_review(
+                                                                    review_id, cx,
+                                                                );
+                                                            } else {
+                                                                this.request_github_review_dismiss(
+                                                                    review_id, cx,
+                                                                );
+                                                            }
+                                                        },
+                                                    ))
+                                                    .child(if confirm {
+                                                        "Confirm dismiss"
+                                                    } else {
+                                                        "Dismiss"
+                                                    }),
+                                            ),
+                                    )
+                                    .when(!review.body.trim().is_empty(), |row| {
+                                        row.child(
+                                            div()
+                                                .text_size(px(9.))
+                                                .text_color(theme.muted)
+                                                .child(review.body.clone()),
+                                        )
+                                    })
+                            })),
+                    );
+                    body = body.child(self.github_dismiss_input.clone());
                 }
                 if !details.commits.is_empty() {
                     body = body.child(

@@ -451,7 +451,7 @@ Panel coverage at this commit:
 | Bookmarks | F3 toggle at caret, editor gutter marker, navigable list, remove, per-project JSON persistence | local store + navigation, Zed gutter highlights |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers, container log viewer (tail 500), pull images, prune per-object, Compose start/stop/restart/down | `ide-docker` |
-| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, request a reviewer, conversation and inline diff comments, close/reopen, merge (merge/squash/rebase with two-click confirmation), open in browser | `ide-github`, `ide-vcs` |
+| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, submitted reviews with dismissal, unified diff, submit review, request a reviewer, conversation and inline diff comments, close/reopen, merge (merge/squash/rebase with two-click confirmation), open in browser | `ide-github`, `ide-vcs` |
 | Heap | import `.hprof`, class table, class object pages, GC-root path, class-by-class two-snapshot comparison | `ops::heap::debug_heap_open/classes/dominators/path/compare` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, call tree, source navigation | `ide-profiler` |
 | Logcat | adb devices, streaming threadtime log, level/text filters, Android Studio `tag:`/`level:`/`package:`/`message:` query grammar, persisted filter history, log export | `adb` process |
@@ -848,6 +848,16 @@ pr edit 42 --add-reviewer octocat
 The `@` prefix was stripped before invoking `gh`; empty or whitespace-containing
 logins are rejected by the `ide-github` unit test.
 
+GitHub review-dismiss smoke through the fake `gh` API:
+
+```text
+WORKBENCH_GITHUB_UI reviews=2 status="Dismissed review 11"
+api --method PUT repos/{owner}/{repo}/pulls/42/reviews/11/dismissals -f message=Stale review
+```
+
+The submitted-review list was loaded from the pulls reviews API, and the
+dismissal message was required before the two-step Dismiss action.
+
 Heap snapshot smoke with a generated `ide-heap` sample:
 
 ```text
@@ -1018,7 +1028,7 @@ Workbench tests:
 
 ```text
 documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 63 passed; 0 failed
-ide-github reviewer-login: 1 passed; 0 failed
+ide-github: 12 passed; 0 failed
 ```
 
 ## Not yet done
@@ -1058,7 +1068,8 @@ ide-github reviewer-login: 1 passed; 0 failed
   requests and shows details/checks/review comments/timeline and a unified
   diff, submits reviews, requests reviewers, conversation comments, inline
   diff comments, closes/reopens and merges pull requests (two-click
-  confirmation); review dismissals are missing. Heap
+  confirmation). Review-thread resolution and richer timeline actions are
+  missing. Heap
   imports and lists
   classes and object pages with GC-root paths and compares two snapshots
   class-by-class, but capture from a live JVM and richer instance/field detail are missing. Profiler
