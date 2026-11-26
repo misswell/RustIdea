@@ -102,6 +102,18 @@ fn http_exchange_output(exchange: &ide_http::HttpExchange) -> String {
     output
 }
 
+fn run_template(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    match kind {
+        "cargo" => Some(("Cargo run", "cargo", "run")),
+        "cargo-test" => Some(("Cargo test", "cargo", "test")),
+        "npm" => Some(("npm start", "npm", "start")),
+        "python" => Some(("Python main", "python3", "main.py")),
+        "maven" => Some(("Maven test", "mvn", "test")),
+        "gradle" => Some(("Gradle build", "./gradlew", "build")),
+        _ => None,
+    }
+}
+
 fn coverage_runs(lines: &[ide_coverage::LineCoverage]) -> Vec<(CoverageState, (u32, u32))> {
     let mut runs = Vec::new();
     let mut current: Option<(CoverageState, u32, u32)> = None;
@@ -5866,6 +5878,34 @@ impl Workbench {
         cx.notify();
     }
 
+    fn apply_run_template(&mut self, kind: &str, cx: &mut Context<Self>) {
+        let Some((name, command, args)) = run_template(kind) else {
+            self.run_editor_status = format!("Unknown run template: {kind}").into();
+            cx.notify();
+            return;
+        };
+        self.run_edit_id = None;
+        self.run_name_input.update(cx, |input, cx| {
+            input.set_content(name, cx);
+        });
+        self.run_command_input.update(cx, |input, cx| {
+            input.set_content(command, cx);
+        });
+        self.run_args_input.update(cx, |input, cx| {
+            input.set_content(args, cx);
+        });
+        let cwd = self.root.display().to_string();
+        self.run_cwd_input.update(cx, |input, cx| {
+            input.set_content(cwd, cx);
+        });
+        self.run_env_input.update(cx, |input, cx| {
+            input.set_content("", cx);
+        });
+        self.run_editor_open = true;
+        self.run_editor_status = format!("Template: {name}").into();
+        cx.notify();
+    }
+
     fn edit_run_config_editor(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(config) = self.run_configs.get(index).cloned() else {
             return;
@@ -8640,8 +8680,29 @@ impl Workbench {
         self.save_run_config_editor(cx);
     }
 
+    pub fn smoke_run_template(&mut self, kind: String, cx: &mut Context<Self>) {
+        self.new_run_config_editor(cx);
+        self.apply_run_template(&kind, cx);
+        self.save_run_config_editor(cx);
+    }
+
     pub fn run_config_count(&self) -> usize {
         self.run_configs.len()
+    }
+
+    pub fn run_config_first_command(&self) -> String {
+        self.run_configs
+            .iter()
+            .find(|config| !config.detected)
+            .map(|config| {
+                let mut line = config.command.clone();
+                if !config.args.is_empty() {
+                    line.push(' ');
+                    line.push_str(&config.args.join(" "));
+                }
+                line
+            })
+            .unwrap_or_default()
     }
 
     pub fn smoke_edit_run_config(&mut self, name: String, cx: &mut Context<Self>) {
@@ -18231,6 +18292,46 @@ impl Workbench {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(8.5))
+                            .text_color(theme.faint)
+                            .child("TEMPLATE"),
+                    )
+                    .children(
+                        [
+                            ("cargo", "Cargo run"),
+                            ("cargo-test", "Cargo test"),
+                            ("npm", "npm start"),
+                            ("python", "Python"),
+                            ("maven", "Maven test"),
+                            ("gradle", "Gradle build"),
+                        ]
+                        .into_iter()
+                        .map(|(kind, label)| {
+                            div()
+                                .id(SharedString::from(format!("run-template-{kind}")))
+                                .px_1()
+                                .py(px(1.))
+                                .rounded_sm()
+                                .bg(theme.panel_alt)
+                                .text_size(px(8.5))
+                                .text_color(theme.muted)
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(theme.text))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.apply_run_template(kind, cx);
+                                }))
+                                .child(label)
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
                     .items_center()
                     .gap_2()
                     .child(
@@ -19255,6 +19356,16 @@ mod tests {
             build_mcp_server_input(None, "echo", ide_agent::McpTransport::Stdio, " ", "", "")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn run_templates_cover_names_commands_and_unknown_kinds() {
+        assert_eq!(run_template("cargo"), Some(("Cargo run", "cargo", "run")));
+        assert_eq!(
+            run_template("python"),
+            Some(("Python main", "python3", "main.py"))
+        );
+        assert!(run_template("unknown").is_none());
     }
 
     #[test]

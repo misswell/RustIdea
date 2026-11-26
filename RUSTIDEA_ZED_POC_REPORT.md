@@ -318,7 +318,8 @@ The new `experiments/zed-poc/crates/workbench` crate is a first Phase 4 slice:
   semantics and code-action providers through `DocumentLsp`;
 - a split view opens a second Zed `Editor` over the same `language::Buffer`;
 - a native Run tool window lists OpenIDEA run configurations, creates and saves
-  user shell configurations, starts/stops a run, streams
+  user shell configurations (with Cargo, npm, Python, Maven and Gradle
+  templates), starts/stops a run, streams
   stdout/stderr/system output and shows the exit status;
 - a native Find in Files panel uses the shared GPUI `TextInput` and the
   OpenIDEA `ops::search` streaming engine, with regex/case/whole-word toggles
@@ -471,7 +472,7 @@ Panel coverage at this commit:
 | Settings | filter + boolean toggles + multiline JSON editor for scalars/lists/maps | `ops::project::settings` / `set_settings` |
 | Debug | attach/session console, line breakpoints, stack/scopes/variables, evaluate, resume/pause/step (session runtime unverified) | `ops::debug` |
 | Terminal | working VT screen | Zed `terminal` + `ops::term` |
-| Run | detected/user configurations, create/edit/delete user configurations in `.openidea/run.toml`, start/stop, output/exit status | `ops::run` |
+| Run | detected/user configurations, create/edit/delete user configurations in `.openidea/run.toml`, Cargo/npm/Python/Maven/Gradle templates, start/stop, output/exit status | `ops::run` |
 | Build | working | `ops::build` |
 
 Headless split/search smoke (real native window, real OpenIDEA host, Java file):
@@ -504,6 +505,15 @@ run_status=Saved run configuration Edited run_configs=1
 run.toml name="Edited"
 run_status=Deleted run configuration DeleteMe run_configs=0
 ```
+
+Run template smoke (`cargo-test`):
+
+```text
+WORKBENCH_RUN_TEMPLATE configs=1 command="cargo test"
+```
+
+A new `.openidea/run.toml` entry named `Cargo test` held `command = "cargo"`
+and `args = ["test"]`.
 
 Git smoke in a temporary `main` repository with one modified Java file:
 
@@ -997,7 +1007,7 @@ used as visual text/IME acceptance.
 Workbench tests:
 
 ```text
-documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 62 passed; 0 failed
+documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 63 passed; 0 failed
 ide-github reviewer-login: 1 passed; 0 failed
 ```
 
@@ -1049,8 +1059,9 @@ ide-github reviewer-login: 1 passed; 0 failed
   layer only supports re-keying untitled buffers, not renaming an existing file.
   Color preview covers hex literals only; `rgb()`/`hsl()` literals and a color
   picker are not implemented.
-  The Run panel can create/edit/delete shell configurations; type-specific
-  configuration dialogs and templates are not implemented.
+  The Run panel can create/edit/delete shell configurations and fill Cargo,
+  npm, Python, Maven and Gradle templates; type-specific configuration dialogs
+  and non-shell configuration kinds are not implemented.
   Analysis runs Locate Duplicates, structural search, structural replacement
   and Inspect Code. Replace uses the OpenIDEA document layer and saves files
   that were opened transiently; edits in already-open buffers stay dirty until

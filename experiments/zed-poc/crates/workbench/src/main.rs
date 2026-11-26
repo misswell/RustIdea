@@ -288,6 +288,8 @@ fn main() {
                     .unwrap_or_default();
                 let smoke_run_config_edit =
                     std::env::var("RUSTIDEA_ZED_SMOKE_RUN_CONFIG_EDIT").ok();
+                let smoke_run_template =
+                    std::env::var("RUSTIDEA_ZED_SMOKE_RUN_TEMPLATE").ok();
                 let smoke_run_config_delete =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_RUN_CONFIG_DELETE").is_some();
                 let smoke_terminal =
@@ -438,6 +440,9 @@ fn main() {
                                         smoke_run_config_env.clone(),
                                         cx,
                                     );
+                                }
+                                if let Some(template) = &smoke_run_template {
+                                    app.smoke_run_template(template.clone(), cx);
                                 }
                                 if smoke_terminal {
                                     app.smoke_start_terminal(window, cx);
@@ -883,6 +888,11 @@ fn main() {
                                     app.http_env_text(),
                                     app.http_history_count(),
                                     app.http_history_status_text()
+                                );
+                                eprintln!(
+                                    "WORKBENCH_RUN_TEMPLATE configs={} command={:?}",
+                                    app.run_config_count(),
+                                    app.run_config_first_command()
                                 );
                                 cx.quit();
                             })
