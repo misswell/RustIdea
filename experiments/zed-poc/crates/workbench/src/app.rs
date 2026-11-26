@@ -809,6 +809,11 @@ pub struct Workbench {
     docker_status: gpui::SharedString,
     docker_tab: DockerTab,
     docker_busy: bool,
+    docker_logs: Vec<String>,
+    docker_logs_title: gpui::SharedString,
+    docker_logs_status: gpui::SharedString,
+    docker_logs_container: Option<String>,
+    docker_logs_busy: bool,
     github_availability: Option<ide_github::GhAvailability>,
     github_pulls: Vec<ide_github::PullRequestSummary>,
     github_status: gpui::SharedString,
@@ -1627,6 +1632,11 @@ impl Workbench {
             docker_status: "Open Services to load Docker".into(),
             docker_tab: DockerTab::Containers,
             docker_busy: false,
+            docker_logs: Vec::new(),
+            docker_logs_title: gpui::SharedString::default(),
+            docker_logs_status: gpui::SharedString::default(),
+            docker_logs_container: None,
+            docker_logs_busy: false,
             github_availability: None,
             github_pulls: Vec::new(),
             github_status: "Open GitHub to load pull requests".into(),
@@ -5734,6 +5744,52 @@ impl Workbench {
         cx.notify();
     }
 
+    fn open_docker_logs(&mut self, id: String, title: String, cx: &mut Context<Self>) {
+        if self.docker_logs_busy {
+            return;
+        }
+        let host = self.host.clone();
+        self.docker_logs_container = Some(id.clone());
+        self.docker_logs_title = title.into();
+        self.docker_logs.clear();
+        self.docker_logs_busy = true;
+        self.docker_logs_status = "Loading container logs…".into();
+        cx.spawn(async move |this, cx| {
+            let result = host.docker_logs(id, 500).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.docker_logs_busy = false;
+                    match result {
+                        Ok(lines) => {
+                            app.docker_logs_status =
+                                format!("{} line(s) · tail 500", lines.len()).into();
+                            app.docker_logs = lines;
+                        }
+                        Err(error) => {
+                            app.docker_logs.clear();
+                            app.docker_logs_status =
+                                format!("Docker logs failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn close_docker_logs(&mut self, cx: &mut Context<Self>) {
+        self.docker_logs.clear();
+        self.docker_logs_container = None;
+        self.docker_logs_title = gpui::SharedString::default();
+        self.docker_logs_status = gpui::SharedString::default();
+        cx.notify();
+    }
+
     fn refresh_github(&mut self, cx: &mut Context<Self>) {
         if self.github_busy {
             return;
@@ -7885,6 +7941,30 @@ impl Workbench {
                 )
             })
             .unwrap_or_default()
+    }
+
+    pub fn smoke_docker_logs(&mut self, target: &str, cx: &mut Context<Self>) {
+        let container = self.docker_snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .containers
+                .iter()
+                .find(|container| container.id == target || container.name == target)
+                .cloned()
+        });
+        let Some(container) = container else {
+            self.docker_logs_status = format!("Container not found: {target}").into();
+            cx.notify();
+            return;
+        };
+        self.open_docker_logs(container.id, container.name, cx);
+    }
+
+    pub fn docker_log_count(&self) -> usize {
+        self.docker_logs.len()
+    }
+
+    pub fn docker_logs_status_text(&self) -> String {
+        self.docker_logs_status.to_string()
     }
 
     pub fn smoke_github(&mut self, cx: &mut Context<Self>) {
@@ -11662,6 +11742,8 @@ impl Workbench {
                         let state_color = if running { theme.accent } else { theme.faint };
                         let id = container.id.clone();
                         let name = container.name.clone();
+                        let logs_id = id.clone();
+                        let logs_name = name.clone();
                         let action = if running {
                             ide_docker::ContainerOp::Stop
                         } else {
@@ -11728,6 +11810,23 @@ impl Workbench {
                                                     },
                                                 ))
                                                 .child(action_label),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(("docker-container-logs", index))
+                                                .text_size(px(9.))
+                                                .text_color(theme.accent)
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(
+                                                    move |this, _: &ClickEvent, _, cx| {
+                                                        this.open_docker_logs(
+                                                            logs_id.clone(),
+                                                            logs_name.clone(),
+                                                            cx,
+                                                        );
+                                                    },
+                                                ))
+                                                .child("Logs"),
                                         ),
                                 )
                                 .child(
@@ -11959,6 +12058,67 @@ impl Workbench {
             )
             .child(div().px_2().py_1().child(tab_row))
             .child(rows)
+            .when(self.docker_logs_container.is_some(), |root| {
+                root.child(
+                    div()
+                        .h(px(180.))
+                        .flex()
+                        .flex_col()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .h(px(24.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .bg(theme.panel_alt)
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .truncate()
+                                        .text_size(px(9.))
+                                        .text_color(theme.text)
+                                        .child(format!("Logs · {}", self.docker_logs_title)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(8.5))
+                                        .text_color(theme.faint)
+                                        .child(self.docker_logs_status.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id("docker-logs-close")
+                                        .text_size(px(9.))
+                                        .text_color(theme.muted)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.close_docker_logs(cx);
+                                        }))
+                                        .child("Close"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("docker-logs")
+                                .flex_1()
+                                .min_h(px(0.))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .children(self.docker_logs.iter().take(500).map(|line| {
+                                    div()
+                                        .px_2()
+                                        .font_family("Menlo")
+                                        .text_size(px(8.5))
+                                        .text_color(theme.muted)
+                                        .child(line.clone())
+                                })),
+                        ),
+                )
+            })
             .into_any_element()
     }
 

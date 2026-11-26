@@ -1307,6 +1307,34 @@ impl NativeHost {
         .await
     }
 
+    pub async fn docker_logs(&self, id: String, tail: u32) -> IdeResult<Vec<String>> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || {
+                let cancel = ide_core::CancellationToken::new();
+                let lines = std::cell::RefCell::new(Vec::new());
+                ide_docker::logs(
+                    &ide_docker::DockerEndpoint::Default,
+                    &id,
+                    tail,
+                    false,
+                    false,
+                    &cancel,
+                    &|line| {
+                        let prefix = if line.stderr { "[stderr] " } else { "" };
+                        lines
+                            .borrow_mut()
+                            .push(format!("{prefix}{}", line.text.trim_end()));
+                    },
+                )?;
+                Ok(lines.into_inner())
+            })
+            .await
+            .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
     pub async fn github_availability(
         &self,
         root: PathBuf,
