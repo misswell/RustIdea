@@ -455,7 +455,7 @@ Panel coverage at this commit:
 | Outline | working | `ops::doc::doc_outline` |
 | Problems | working (list/navigation) | `IdeEvent::Diagnostics` |
 | Database | working (source/connect/query) | `ops::db` |
-| HTTP Client | working (parse/run/response) | `ide_http::run` |
+| HTTP Client | working (file parse/run/response) plus unsaved multiline request editor with Send | `ide_http::run` |
 | Remote Host | SSH terminal, SFTP browse/preview/edit | `ops::term::spawn_ssh`, `SshManager` |
 | Notebook | viewer + cell edit/insert/delete/type + save/run all | `ops::notebook` |
 | Agents | working (providers/tasks/timeline/prompt/cancel) | `ops::agent` |
@@ -534,6 +534,14 @@ HTTP smoke against a local `http.server`:
 
 ```text
 http_status=200 OK · 26 bytes · 1.7 ms
+http="HTTP/1.0 200 OK"
+```
+
+HTTP editor smoke against the same local server:
+
+```text
+http_status=1 requests
+http_editor=200 OK · 26 bytes · 8.2 ms
 http="HTTP/1.0 200 OK"
 ```
 
@@ -950,8 +958,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   and live subagent/form verification
   are not yet integrated. MCP add/update/remove is wired for stdio, HTTP and
   SSE transports. Settings edits booleans and JSON scalars/lists/maps through a
-  multiline editor; dedicated widgets for complex schemas are missing. Database/HTTP have working execution paths but no
-  source/request editors of their own. Coverage imports existing lcov, JaCoCo,
+  multiline editor; dedicated widgets for complex schemas are missing. HTTP has
+  an unsaved request editor with Send; Database has a query execution path but
+  no source editor. Coverage imports existing lcov, JaCoCo,
   Go and SimpleCov reports; project-tree badges show file and directory
   coverage, and the editor applies covered/partial/uncovered gutter highlights.
   The coverage panel can launch the selected run configuration with coverage

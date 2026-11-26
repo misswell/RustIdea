@@ -959,6 +959,9 @@ pub struct Workbench {
     http_selected: usize,
     http_status: gpui::SharedString,
     http_output: String,
+    http_editor: Option<Entity<Editor>>,
+    http_editor_buffer: Option<Entity<Buffer>>,
+    http_editor_status: gpui::SharedString,
     db_sources: Vec<ide_db::DataSource>,
     db_connected: Vec<String>,
     db_selected: usize,
@@ -1877,6 +1880,9 @@ impl Workbench {
             http_selected: 0,
             http_status: "Open an .http file to list requests".into(),
             http_output: String::new(),
+            http_editor: None,
+            http_editor_buffer: None,
+            http_editor_status: gpui::SharedString::default(),
             db_sources: Vec::new(),
             db_connected: Vec::new(),
             db_selected: 0,
@@ -2345,6 +2351,105 @@ impl Workbench {
                         }
                         Err(error) => {
                             app.http_status = format!("HTTP failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_http_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self
+            .active
+            .and_then(|doc| self.documents.get(&doc))
+            .map(|document| document.text(cx))
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| "### Request\nGET https://example.com\n".to_owned());
+        let buffer = cx.new(|cx| Buffer::local(text, cx));
+        let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.http_editor_buffer = Some(buffer);
+        self.http_editor = Some(editor);
+        self.http_editor_status = "Edit the request, then Send".into();
+        cx.notify();
+    }
+
+    fn close_http_editor(&mut self, cx: &mut Context<Self>) {
+        self.http_editor = None;
+        self.http_editor_buffer = None;
+        self.http_editor_status = gpui::SharedString::default();
+        cx.notify();
+    }
+
+    fn run_http_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(buffer) = self.http_editor_buffer.clone() else {
+            return;
+        };
+        let text = buffer.read(cx).snapshot().text();
+        let parsed = ide_http::parse::parse(&text);
+        self.http_blocks = parsed
+            .requests
+            .into_iter()
+            .map(|request| request.block)
+            .collect();
+        self.http_selected = 0;
+        let Some(block) = self.http_blocks.first() else {
+            self.http_editor_status = "No request found in the editor".into();
+            cx.notify();
+            return;
+        };
+        let method = block.method.clone();
+        let url = block.url.clone();
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.http_editor_status = format!("Running {method} {url}…").into();
+        self.http_output.clear();
+        cx.spawn(async move |this, cx| {
+            let result = host.run_http(text, 0, None, root).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(exchange) => {
+                            if let Some(response) = &exchange.response {
+                                app.http_editor_status = format!(
+                                    "{} {} · {} bytes · {:.1} ms",
+                                    response.status,
+                                    response.status_text,
+                                    response.size,
+                                    response.total_ms
+                                )
+                                .into();
+                                let mut output = format!(
+                                    "{} {} {}\n",
+                                    response.version, response.status, response.status_text
+                                );
+                                for (name, value) in &response.headers {
+                                    output.push_str(&format!("{name}: {value}\n"));
+                                }
+                                output.push('\n');
+                                if let Some(body) = &response.body {
+                                    output.push_str(body);
+                                }
+                                app.http_output = output;
+                            } else {
+                                app.http_editor_status =
+                                    "Transport failed before a response".into();
+                                app.http_output = exchange
+                                    .entry
+                                    .error
+                                    .unwrap_or_else(|| "unknown transport error".into());
+                            }
+                        }
+                        Err(error) => {
+                            app.http_editor_status =
+                                format!("HTTP request failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -8046,6 +8151,20 @@ impl Workbench {
         self.run_selected_http(cx);
     }
 
+    pub fn smoke_http_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_sidebar(SidebarMode::Http, cx);
+        self.refresh_http(cx);
+        self.open_http_editor(window, cx);
+    }
+
+    pub fn smoke_http_editor_run(&mut self, cx: &mut Context<Self>) {
+        self.run_http_editor(cx);
+    }
+
+    pub fn http_editor_status_text(&self) -> String {
+        self.http_editor_status.to_string()
+    }
+
     pub fn http_status(&self) -> &gpui::SharedString {
         &self.http_status
     }
@@ -10570,6 +10689,75 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_http_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(editor) = &self.http_editor else {
+            return div().into_any_element();
+        };
+        let theme = self.theme;
+        div()
+            .absolute()
+            .top(px(70.))
+            .left(px(220.))
+            .w(px(760.))
+            .h(px(520.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .text_size(px(10.5))
+                    .text_color(theme.muted)
+                    .child(self.http_editor_status.clone()),
+            )
+            .child(div().flex_1().min_h(px(0.)).child(editor.clone()))
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("http-editor-send")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.run_http_editor(cx);
+                            }))
+                            .child("Send"),
+                    )
+                    .child(
+                        div()
+                            .id("http-editor-close")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.close_http_editor(cx);
+                            }))
+                            .child("Close"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_agent_form_answer(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some((_, permission)) = &self.agent_answer_target else {
             return div().into_any_element();
@@ -10795,6 +10983,21 @@ impl Workbench {
                     .gap_2()
                     .border_b_1()
                     .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("http-edit")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_http_editor(window, cx);
+                            }))
+                            .child("Edit"),
+                    )
                     .child(
                         div()
                             .id("http-refresh")
@@ -17790,6 +17993,7 @@ impl Render for Workbench {
         let setting_editor = self.render_setting_editor(cx);
         let agent_form_answer = self.render_agent_form_answer(cx);
         let notebook_editor = self.render_notebook_editor(cx);
+        let http_editor = self.render_http_editor(cx);
         let remote_editor = self.render_remote_editor(cx);
         div()
             .size_full()
@@ -17930,6 +18134,7 @@ impl Render for Workbench {
             .child(setting_editor)
             .child(agent_form_answer)
             .child(notebook_editor)
+            .child(http_editor)
             .child(remote_editor)
     }
 }
