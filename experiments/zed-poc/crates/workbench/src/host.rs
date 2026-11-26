@@ -1441,6 +1441,26 @@ impl NativeHost {
         .await
     }
 
+    pub async fn github_close_pr(&self, root: PathBuf, number: u32) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || ide_github::close(&root, number))
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
+    pub async fn github_reopen_pr(&self, root: PathBuf, number: u32) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || ide_github::reopen(&root, number))
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn github_add_review_comment(
         &self,

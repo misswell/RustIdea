@@ -342,6 +342,7 @@ fn main() {
                 let smoke_github_inline_body =
                     std::env::var("RUSTIDEA_ZED_SMOKE_GITHUB_INLINE_BODY")
                         .unwrap_or_else(|_| "Inline smoke comment".into());
+                let smoke_github_state = std::env::var("RUSTIDEA_ZED_SMOKE_GITHUB_STATE").ok();
                 let smoke_heap = std::env::var("RUSTIDEA_ZED_SMOKE_HEAP").ok();
                 let smoke_heap_objects =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_HEAP_OBJECTS").is_some();
@@ -574,6 +575,9 @@ fn main() {
                                         smoke_github_inline_body.clone(),
                                         cx,
                                     );
+                                }
+                                if let Some(action) = &smoke_github_state {
+                                    app.smoke_github_state(action, cx);
                                 }
                             })
                             .ok();

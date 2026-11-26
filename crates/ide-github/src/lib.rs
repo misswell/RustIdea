@@ -358,6 +358,18 @@ pub fn add_comment(root: &Path, number: u32, body: &str) -> IdeResult<()> {
     run(root, &["pr", "comment", &n, "--body", body]).map(drop)
 }
 
+/// Closes an open pull request (`gh pr close`).
+pub fn close(root: &Path, number: u32) -> IdeResult<()> {
+    let n = number.to_string();
+    run(root, &["pr", "close", &n]).map(drop)
+}
+
+/// Reopens a closed pull request (`gh pr reopen`).
+pub fn reopen(root: &Path, number: u32) -> IdeResult<()> {
+    let n = number.to_string();
+    run(root, &["pr", "reopen", &n]).map(drop)
+}
+
 /// Adds an inline review comment on a diff line (`LEFT` base, `RIGHT` head).
 #[allow(clippy::too_many_arguments)]
 pub fn add_review_comment(

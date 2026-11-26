@@ -6093,6 +6093,58 @@ impl Workbench {
         cx.notify();
     }
 
+    fn set_github_pr_state(&mut self, reopen: bool, cx: &mut Context<Self>) {
+        if self.github_review_busy {
+            return;
+        }
+        let Some(number) = self.github_selected else {
+            self.github_review_status = "Select a pull request first".into();
+            cx.notify();
+            return;
+        };
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.github_review_busy = true;
+        self.github_review_status = if reopen {
+            "Reopening pull request…".into()
+        } else {
+            "Closing pull request…".into()
+        };
+        cx.spawn(async move |this, cx| {
+            let result = if reopen {
+                host.github_reopen_pr(root, number).await
+            } else {
+                host.github_close_pr(root, number).await
+            };
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.github_review_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.github_review_status = if reopen {
+                                format!("Reopened #{number}")
+                            } else {
+                                format!("Closed #{number}")
+                            }
+                            .into();
+                            app.reload_github_pr(number, cx);
+                        }
+                        Err(error) => {
+                            app.github_review_status =
+                                format!("Pull request action failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn close_github_pr(&mut self, cx: &mut Context<Self>) {
         self.github_selected = None;
         self.github_details = None;
@@ -7838,6 +7890,10 @@ impl Workbench {
 
     pub fn github_inline_status_text(&self) -> String {
         self.github_inline_status.to_string()
+    }
+
+    pub fn smoke_github_state(&mut self, action: &str, cx: &mut Context<Self>) {
+        self.set_github_pr_state(action == "reopen", cx);
     }
 
     pub fn github_diff_file_count(&self) -> usize {
@@ -12082,6 +12138,37 @@ impl Workbench {
                                 .child(decision),
                         )
                     });
+                let is_open = matches!(summary.state, ide_github::PrState::Open);
+                body = body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("github-pr-state")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(theme.panel_alt)
+                                .text_size(px(8.5))
+                                .text_color(if is_open { theme.warning } else { theme.accent })
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.set_github_pr_state(!is_open, cx);
+                                }))
+                                .child(if is_open { "Close PR" } else { "Reopen PR" }),
+                        )
+                        .when(!self.github_review_status.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .text_size(px(8.5))
+                                    .text_color(theme.faint)
+                                    .truncate()
+                                    .child(self.github_review_status.clone()),
+                            )
+                        }),
+                );
                 if !summary.labels.is_empty() {
                     body = body.child(div().flex().flex_wrap().gap_1().children(
                         summary.labels.iter().map(|label| {
