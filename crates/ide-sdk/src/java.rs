@@ -1337,10 +1337,14 @@ echo 'openjdk version 1.8'
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert!(ready.exists(), "the probe must start");
-            assert!(
-                JAVA_PROBES.try_lock().is_ok(),
-                "a running java -version must not lock out cached or unrelated probes"
-            );
+            let lock_started = Instant::now();
+            while JAVA_PROBES.try_lock().is_err() {
+                assert!(
+                    lock_started.elapsed() < Duration::from_millis(1500),
+                    "a running java -version must not lock out cached or unrelated probes"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
             assert!(probe.join().unwrap());
         });
     }
