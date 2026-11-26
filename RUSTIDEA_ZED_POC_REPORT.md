@@ -1098,8 +1098,9 @@ pinned `fetch-zed.sh`, and a `SOURCE_CODE.txt` containing the exact RustIdea
 commit and Zed revision.
 
 The root repository license and the stable `main` product remain Apache-2.0.
-The Preview is not a claim of production parity, is not merged into `main`,
-and does not replace the stable GPUI editor entry.
+The integration branch is now merged into `main` at
+`4f526e6e4be9e4f83cfbc5b889505c30570fb927`, but the Preview is not a claim of
+production parity and does not replace the stable GPUI editor entry.
 
 The hardened runtime signature carries only the JIT and unsigned-executable-
 memory entitlements needed by the pinned tree-sitter/Wasmtime grammar engine.

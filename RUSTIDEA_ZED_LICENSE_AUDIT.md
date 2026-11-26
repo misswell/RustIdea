@@ -1,7 +1,9 @@
 # RustIdea Zed license audit
 
-Status: approved for a GPL-3.0-or-later Preview distribution only.
-The integration branch is still not the Apache-2.0 production `main` binary.
+Status: the integration branch was merged into `main` at
+`4f526e6e4be9e4f83cfbc5b889505c30570fb927` after an explicit release-owner
+instruction to proceed. The Zed-linked binary is still distributed only as a
+GPL-3.0-or-later Preview, not as the stable GPUI release.
 
 ## Components
 
@@ -62,12 +64,14 @@ Preview, not as a replacement for the stable GPUI product. The Preview:
 - is hardened-runtime signed with narrowly scoped JIT entitlements required by
   the tree-sitter/Wasmtime grammar engine;
 - remains arm64-only for this first Preview build;
-- does not change the root `LICENSE`, does not merge the experiment into
-  `main`, and does not replace the stable editor entry.
+- keeps the root `LICENSE` and stable release scripts unchanged, even though
+  the isolated experiment is now present on `main`;
+- does not replace the stable RustIdea editor entry.
 
 The full production integration, universal build, interactive IME acceptance
 and OpenIDEA parity remain separate release gates. A Preview distribution is
-not evidence that those gates passed.
+not evidence that those gates passed. The release owner explicitly directed the
+merge despite the unresolved production-license gate.
 
 ## Verification commands
 

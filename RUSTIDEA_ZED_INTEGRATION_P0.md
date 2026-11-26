@@ -1,8 +1,9 @@
 # RustIdea Zed integration P0
 
 Status: integration branch created, Zed POC merged, and P1 external-change
-protection implemented. The branch is not merged into `main`; it is distributed
-only as a GPL-3.0-or-later Preview.
+protection implemented. The branch is merged into `main` at
+`4f526e6e4be9e4f83cfbc5b889505c30570fb927`. The Zed workbench remains an
+isolated workspace and is distributed as a GPL-3.0-or-later Preview.
 
 ## Baseline
 
@@ -14,9 +15,10 @@ only as a GPL-3.0-or-later Preview.
 | Zed upstream | `2664a0aa1eae5dabf8f8273c03f88d53061ca7dc` |
 | OpenIdea backend baseline | `ae7a8e74c836b89473162bd486eec0f13c52d962` |
 
-The integration branch starts from the latest 0.2.0 `main` and merges the
-Zed experiment with `--no-ff`. The main workbench, release scripts and
-Apache-2.0 production graph are preserved.
+The integration branch started from the latest 0.2.0 `main` and merged the Zed
+experiment with `--no-ff`. It was then merged back into `main` with merge commit
+`4f526e6e4be9e4f83cfbc5b889505c30570fb927`. The existing RustIdea workbench,
+stable release scripts and Apache-2.0 dependency graph remain in place.
 
 ## Diff from main
 
@@ -101,7 +103,7 @@ produce `third_party/zed/.rustidea-zed-rev` containing the pinned Zed SHA.
 
 - The release owner approved only the explicitly labelled GPL Preview; a
   production replacement still requires a final licensing and support review.
-- The Zed workbench must be wired into the formal RustIdea workspace rather
-  than remaining an isolated Preview binary.
+- The Zed workbench must be wired into the formal RustIdea application entry
+  rather than remaining an isolated workspace and Preview binary.
 - Interactive macOS acceptance, Chinese IME and real Maven project workflow
   remain to be completed.
