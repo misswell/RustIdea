@@ -447,7 +447,7 @@ Panel coverage at this commit:
 | Bookmarks | F3 toggle at caret, editor gutter marker, navigable list, remove, per-project JSON persistence | local store + navigation, Zed gutter highlights |
 | Git Log | 100 newest commits, message/hash filter, refs and merge markers | `ide-vcs` `Repo::log` |
 | Services | Docker availability, containers/images/volumes/networks, start/stop/restart containers, container log viewer (tail 500), pull images, prune per-object, Compose start/stop/restart/down | `ide-docker` |
-| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, conversation and inline diff comments, close/reopen, merge (merge/squash/rebase with two-click confirmation), open in browser | `ide-github`, `ide-vcs` |
+| GitHub | repository/login status, PR list by state, details/files/checks/review comments/timeline, unified diff, submit review, request a reviewer, conversation and inline diff comments, close/reopen, merge (merge/squash/rebase with two-click confirmation), open in browser | `ide-github`, `ide-vcs` |
 | Heap | import `.hprof`, class table, class object pages, GC-root path, class-by-class two-snapshot comparison | `ops::heap::debug_heap_open/classes/dominators/path/compare` |
 | Profiler | import Node `.cpuprofile` folders, method self/total weights, call tree, source navigation | `ide-profiler` |
 | Logcat | adb devices, streaming threadtime log, level/text filters, Android Studio `tag:`/`level:`/`package:`/`message:` query grammar, persisted filter history, log export | `adb` process |
@@ -804,6 +804,16 @@ github_review=Merged #42
 pr merge 42 --squash
 ```
 
+GitHub request-reviewer smoke through the fake `gh` CLI:
+
+```text
+github_review=Review requested from @octocat
+pr edit 42 --add-reviewer octocat
+```
+
+The `@` prefix was stripped before invoking `gh`; empty or whitespace-containing
+logins are rejected by the `ide-github` unit test.
+
 Heap snapshot smoke with a generated `ide-heap` sample:
 
 ```text
@@ -974,6 +984,7 @@ Workbench tests:
 
 ```text
 documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/pr_diff/color_preview: 62 passed; 0 failed
+ide-github reviewer-login: 1 passed; 0 failed
 ```
 
 ## Not yet done
@@ -1008,8 +1019,9 @@ documents/project/sync/host/build/coverage/todo/bookmarks/logcat/scratch/recent/
   start/stop/restart containers, shows logs, pulls images, prunes objects and
   runs Compose lifecycle actions, but custom connections are missing. GitHub lists and filters pull
   requests and shows details/checks/review comments/timeline and a unified
-  diff, submits reviews, conversation comments, inline diff comments,
-  closes/reopens and merges pull requests (two-click confirmation). Heap
+  diff, submits reviews, requests reviewers, conversation comments, inline
+  diff comments, closes/reopens and merges pull requests (two-click
+  confirmation); review dismissals are missing. Heap
   imports and lists
   classes and object pages with GC-root paths and compares two snapshots
   class-by-class, but capture from a live JVM and richer instance/field detail are missing. Profiler

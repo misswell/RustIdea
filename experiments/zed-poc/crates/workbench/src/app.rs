@@ -871,6 +871,8 @@ pub struct Workbench {
     github_detail_status: gpui::SharedString,
     github_tab: GitHubTab,
     github_comment_input: Entity<TextInput>,
+    github_reviewer_input: Entity<TextInput>,
+    _github_reviewer_subscription: Subscription,
     github_review_status: gpui::SharedString,
     github_review_busy: bool,
     _github_comment_subscription: Subscription,
@@ -1468,6 +1470,22 @@ impl Workbench {
                     app.add_github_comment(cx);
                 }
             });
+        let github_reviewer_input = cx.new(|cx| {
+            TextInput::new(
+                "Reviewer login (e.g. octocat)…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let github_reviewer_subscription =
+            cx.subscribe(&github_reviewer_input, |app, _, event, cx| {
+                if let TextInputEvent::Submit(_) = event {
+                    app.request_github_reviewer(cx);
+                }
+            });
         let docker_pull_input = cx.new(|cx| {
             TextInput::new(
                 "Image reference (e.g. postgres:16)…",
@@ -1819,6 +1837,8 @@ impl Workbench {
             github_detail_status: "Select a pull request".into(),
             github_tab: GitHubTab::Overview,
             github_comment_input,
+            github_reviewer_input,
+            _github_reviewer_subscription: github_reviewer_subscription,
             github_review_status: gpui::SharedString::default(),
             github_review_busy: false,
             _github_comment_subscription: github_comment_subscription,
@@ -7056,6 +7076,62 @@ impl Workbench {
         cx.notify();
     }
 
+    fn request_github_reviewer(&mut self, cx: &mut Context<Self>) {
+        if self.github_review_busy {
+            return;
+        }
+        let Some(number) = self.github_selected else {
+            self.github_review_status = "Select a pull request first".into();
+            cx.notify();
+            return;
+        };
+        let login = self
+            .github_reviewer_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if login.is_empty() {
+            self.github_review_status = "Write a reviewer login first".into();
+            cx.notify();
+            return;
+        }
+        let host = self.host.clone();
+        let root = self.root.clone();
+        self.github_review_busy = true;
+        self.github_review_status = format!("Requesting review from {login}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = host
+                .github_request_reviewer(root, number, login.clone())
+                .await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.github_review_busy = false;
+                    match result {
+                        Ok(()) => {
+                            app.github_review_status =
+                                format!("Review requested from {login}").into();
+                            app.github_reviewer_input.update(cx, |input, cx| {
+                                input.set_content("", cx);
+                            });
+                            app.reload_github_pr(number, cx);
+                        }
+                        Err(error) => {
+                            app.github_review_status =
+                                format!("Request review failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn submit_github_review(&mut self, event: ide_github::ReviewEvent, cx: &mut Context<Self>) {
         if self.github_review_busy {
             return;
@@ -9541,6 +9617,13 @@ impl Workbench {
             _ => ide_github::ReviewEvent::Comment,
         };
         self.submit_github_review(event, cx);
+    }
+
+    pub fn smoke_request_github_reviewer(&mut self, login: String, cx: &mut Context<Self>) {
+        self.github_reviewer_input.update(cx, |input, cx| {
+            input.set_content(login, cx);
+        });
+        self.request_github_reviewer(cx);
     }
 
     pub fn smoke_heap(&mut self, path: String, cx: &mut Context<Self>) {
@@ -14586,6 +14669,34 @@ impl Workbench {
                                 .text_size(px(9.5))
                                 .text_color(theme.muted)
                                 .child("Review"),
+                        )
+                        .child(self.github_reviewer_input.clone())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("github-review-request")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(theme.panel_alt)
+                                        .text_size(px(8.5))
+                                        .text_color(theme.text)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.request_github_reviewer(cx);
+                                        }))
+                                        .child("Request review"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(8.5))
+                                        .text_color(theme.faint)
+                                        .child("login, then Enter"),
+                                ),
                         )
                         .child(self.github_comment_input.clone())
                         .when(!self.github_review_status.is_empty(), |composer| {

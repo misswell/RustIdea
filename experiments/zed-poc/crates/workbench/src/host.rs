@@ -1578,6 +1578,21 @@ impl NativeHost {
         .await
     }
 
+    pub async fn github_request_reviewer(
+        &self,
+        root: PathBuf,
+        number: u32,
+        login: String,
+    ) -> IdeResult<()> {
+        self.run(move |host| async move {
+            host.require_trust(MAIN_WINDOW)?;
+            tokio::task::spawn_blocking(move || ide_github::request_reviewer(&root, number, &login))
+                .await
+                .map_err(|error| ide_core::IdeError::internal(error.to_string()))?
+        })
+        .await
+    }
+
     pub async fn github_close_pr(&self, root: PathBuf, number: u32) -> IdeResult<()> {
         self.run(move |host| async move {
             host.require_trust(MAIN_WINDOW)?;

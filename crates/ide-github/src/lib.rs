@@ -358,6 +358,24 @@ pub fn add_comment(root: &Path, number: u32, body: &str) -> IdeResult<()> {
     run(root, &["pr", "comment", &n, "--body", body]).map(drop)
 }
 
+fn reviewer_login(login: &str) -> IdeResult<&str> {
+    let login = login.trim().strip_prefix('@').unwrap_or(login.trim());
+    if login.is_empty() {
+        return Err(IdeError::invalid("the reviewer login is empty"));
+    }
+    if login.chars().any(char::is_whitespace) {
+        return Err(IdeError::invalid("the reviewer login contains whitespace"));
+    }
+    Ok(login)
+}
+
+/// Requests a review (`gh pr edit --add-reviewer`).
+pub fn request_reviewer(root: &Path, number: u32, login: &str) -> IdeResult<()> {
+    let login = reviewer_login(login)?;
+    let n = number.to_string();
+    run(root, &["pr", "edit", &n, "--add-reviewer", login]).map(drop)
+}
+
 /// Closes an open pull request (`gh pr close`).
 pub fn close(root: &Path, number: u32) -> IdeResult<()> {
     let n = number.to_string();
@@ -549,4 +567,18 @@ pub fn prepare_diff(
         files,
         root: ide_core::IpcPath(repo.root().to_path_buf()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reviewer_login;
+
+    #[test]
+    fn reviewer_login_strips_at_sign_and_rejects_empty_or_whitespace() {
+        assert_eq!(reviewer_login("@octocat").unwrap(), "octocat");
+        assert_eq!(reviewer_login("  octocat  ").unwrap(), "octocat");
+        assert!(reviewer_login("").is_err());
+        assert!(reviewer_login("@").is_err());
+        assert!(reviewer_login("octo cat").is_err());
+    }
 }

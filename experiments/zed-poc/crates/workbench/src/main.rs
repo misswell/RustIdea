@@ -372,6 +372,8 @@ fn main() {
                 let smoke_github_review_body =
                     std::env::var("RUSTIDEA_ZED_SMOKE_GITHUB_REVIEW_BODY")
                         .unwrap_or_else(|_| "Looks good to me".into());
+                let smoke_github_reviewer =
+                    std::env::var("RUSTIDEA_ZED_SMOKE_GITHUB_REVIEWER").ok();
                 let smoke_github_diff =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_GITHUB_DIFF").is_some();
                 let smoke_github_inline = std::env::var("RUSTIDEA_ZED_SMOKE_GITHUB_INLINE").ok();
@@ -676,6 +678,9 @@ fn main() {
                                         smoke_github_review_body.clone(),
                                         cx,
                                     );
+                                }
+                                if let Some(login) = &smoke_github_reviewer {
+                                    app.smoke_request_github_reviewer(login.clone(), cx);
                                 }
                                 if smoke_github_diff {
                                     app.smoke_github_diff(cx);
