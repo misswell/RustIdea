@@ -89,7 +89,9 @@ produce `third_party/zed/.rustidea-zed-rev` containing the pinned Zed SHA.
     `CARGO_INCREMENTAL=0` and `RUSTFLAGS=-C debuginfo=0` to fit the review
     machine's disk budget.
 - CI reproducibility gate: `.github/workflows/zed-integration.yml` runs the
-  same fetch/check/test/Clippy path on macOS.
+  same fetch/check/test/Clippy path on macOS. Run `45810060881` for
+  `e000a919cd289d01acb52b5b5ff3f317c6c9d435` completed successfully:
+  fetch, check, 66 tests and Clippy all passed.
 
 ## Open gates before P1
 
