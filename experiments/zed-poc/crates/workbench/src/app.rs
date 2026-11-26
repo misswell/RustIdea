@@ -28,6 +28,57 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{Theme, ThemeMode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoverageState {
+    Covered,
+    Partial,
+    Uncovered,
+}
+
+struct CoverageCovered;
+struct CoveragePartial;
+struct CoverageUncovered;
+
+fn coverage_covered_color(_: &gpui::App) -> gpui::Hsla {
+    gpui::hsla(0.36, 0.62, 0.46, 0.55)
+}
+
+fn coverage_partial_color(_: &gpui::App) -> gpui::Hsla {
+    gpui::hsla(0.12, 0.85, 0.52, 0.62)
+}
+
+fn coverage_uncovered_color(_: &gpui::App) -> gpui::Hsla {
+    gpui::hsla(0.0, 0.75, 0.52, 0.62)
+}
+
+fn coverage_runs(lines: &[ide_coverage::LineCoverage]) -> Vec<(CoverageState, (u32, u32))> {
+    let mut runs = Vec::new();
+    let mut current: Option<(CoverageState, u32, u32)> = None;
+    for line in lines {
+        let state = if line.hits == 0 {
+            CoverageState::Uncovered
+        } else if line.partial() {
+            CoverageState::Partial
+        } else {
+            CoverageState::Covered
+        };
+        match current {
+            Some((run_state, start, last)) if run_state == state && line.line == last + 1 => {
+                current = Some((run_state, start, line.line));
+            }
+            Some((run_state, start, last)) => {
+                runs.push((run_state, (start, last)));
+                current = Some((state, line.line, line.line));
+            }
+            None => current = Some((state, line.line, line.line)),
+        }
+    }
+    if let Some((state, start, last)) = current {
+        runs.push((state, (start, last)));
+    }
+    runs
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarMode {
     Project,
     Search,
@@ -686,6 +737,8 @@ pub struct Workbench {
     coverage_suite: Option<ide_coverage::CoverageSuite>,
     coverage_rows: Vec<crate::coverage::CoverageRow>,
     coverage_lookup: std::collections::HashMap<PathBuf, (u32, u32)>,
+    coverage_line_files: std::collections::HashMap<PathBuf, Vec<ide_coverage::LineCoverage>>,
+    coverage_gutter_runs: usize,
     coverage_status: gpui::SharedString,
     coverage_path_input: Entity<TextInput>,
     coverage_sort_lines: bool,
@@ -1496,6 +1549,8 @@ impl Workbench {
             coverage_suite: None,
             coverage_rows: Vec::new(),
             coverage_lookup: std::collections::HashMap::new(),
+            coverage_line_files: std::collections::HashMap::new(),
+            coverage_gutter_runs: 0,
             coverage_status: "Import a coverage report to inspect it".into(),
             coverage_path_input,
             coverage_sort_lines: true,
@@ -3443,6 +3498,7 @@ impl Workbench {
                             let mut rows = crate::coverage::coverage_rows(&root, &suite);
                             crate::coverage::sort_rows(&mut rows, app.coverage_sort_lines);
                             let lookup = crate::coverage::lookup(&root, &suite);
+                            let line_files = crate::coverage::line_files(&root, &suite);
                             let (covered, total, _, _) = crate::coverage::totals(&suite.files);
                             app.coverage_status = format!(
                                 "{} · {} files · {} lines",
@@ -3453,14 +3509,18 @@ impl Workbench {
                             .into();
                             app.coverage_rows = rows;
                             app.coverage_lookup = lookup;
+                            app.coverage_line_files = line_files;
                             app.coverage_suite = Some(suite);
+                            app.apply_coverage_to_open_editors(cx);
                         }
                         Err(error) => {
                             app.coverage_rows.clear();
                             app.coverage_lookup.clear();
+                            app.coverage_line_files.clear();
                             app.coverage_suite = None;
                             app.coverage_status =
                                 format!("Coverage import failed: {}", error.message).into();
+                            app.apply_coverage_to_open_editors(cx);
                         }
                     }
                     cx.notify();
@@ -3472,6 +3532,50 @@ impl Workbench {
         })
         .detach();
         cx.notify();
+    }
+
+    fn apply_coverage_to_open_editors(&mut self, cx: &mut Context<Self>) {
+        let mut runs = 0;
+        for ((doc, _), editor) in &self.editors {
+            let Some(document) = self.documents.get(doc) else {
+                continue;
+            };
+            runs +=
+                Self::apply_coverage_gutter(editor, &document.path, &self.coverage_line_files, cx);
+        }
+        self.coverage_gutter_runs = runs;
+    }
+
+    fn apply_coverage_gutter(
+        editor: &Entity<Editor>,
+        path: &std::path::Path,
+        line_files: &std::collections::HashMap<PathBuf, Vec<ide_coverage::LineCoverage>>,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let lines = line_files.get(&path);
+        let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
+        let mut covered = Vec::new();
+        let mut partial = Vec::new();
+        let mut uncovered = Vec::new();
+        if let Some(lines) = lines {
+            for (state, run) in coverage_runs(lines) {
+                let start = snapshot.anchor_before(TextPoint::new(run.0, 0));
+                let end = snapshot.anchor_before(TextPoint::new(run.1, 0));
+                match state {
+                    CoverageState::Covered => covered.push(start..end),
+                    CoverageState::Partial => partial.push(start..end),
+                    CoverageState::Uncovered => uncovered.push(start..end),
+                }
+            }
+        }
+        let total = covered.len() + partial.len() + uncovered.len();
+        editor.update(cx, |editor, cx| {
+            editor.highlight_gutter::<CoverageCovered>(covered, coverage_covered_color, cx);
+            editor.highlight_gutter::<CoveragePartial>(partial, coverage_partial_color, cx);
+            editor.highlight_gutter::<CoverageUncovered>(uncovered, coverage_uncovered_color, cx);
+        });
+        total
     }
 
     fn run_build(&mut self, kind: ide_build::compile::BuildKind, cx: &mut Context<Self>) {
@@ -4078,6 +4182,7 @@ impl Workbench {
             editor.set_code_action_provider(Some(Rc::new(OpenIdeaCodeActionProvider::new(lsp))));
         });
         self.editors.insert((doc, secondary), editor.clone());
+        self.apply_coverage_to_open_editors(cx);
         Some(editor)
     }
 
@@ -7202,6 +7307,13 @@ impl Workbench {
         self.import_coverage(cx);
     }
 
+    pub fn smoke_open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(doc) = self.active {
+            self.ensure_editor(doc, false, window, cx);
+            self.apply_coverage_to_open_editors(cx);
+        }
+    }
+
     pub fn coverage_file_count(&self) -> usize {
         self.coverage_rows.len()
     }
@@ -7219,6 +7331,10 @@ impl Workbench {
 
     pub fn coverage_badge_count(&self) -> usize {
         self.coverage_lookup.len()
+    }
+
+    pub fn coverage_gutter_run_count(&self) -> usize {
+        self.coverage_gutter_runs
     }
 
     pub fn smoke_bookmark(&mut self, cx: &mut Context<Self>) {
@@ -15595,5 +15711,32 @@ mod tests {
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(format_bytes(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
+    fn coverage_runs_group_consecutive_lines_by_state() {
+        let line = |line, hits, branches_total, branches_covered| ide_coverage::LineCoverage {
+            line,
+            hits,
+            branches_total,
+            branches_covered,
+        };
+        let lines = vec![
+            line(2, 1, 0, 0),
+            line(3, 1, 0, 0),
+            line(4, 1, 2, 1),
+            line(10, 0, 0, 0),
+            line(11, 0, 0, 0),
+            line(13, 1, 0, 0),
+        ];
+        assert_eq!(
+            coverage_runs(&lines),
+            vec![
+                (CoverageState::Covered, (2, 3)),
+                (CoverageState::Partial, (4, 4)),
+                (CoverageState::Uncovered, (10, 11)),
+                (CoverageState::Covered, (13, 13)),
+            ]
+        );
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use ide_coverage::{CoverageSuite, FileCoverage};
+use ide_coverage::{CoverageSuite, FileCoverage, LineCoverage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoverageRow {
@@ -123,6 +123,24 @@ pub fn lookup(root: &Path, suite: &CoverageSuite) -> HashMap<PathBuf, (u32, u32)
     map
 }
 
+pub fn line_files(root: &Path, suite: &CoverageSuite) -> HashMap<PathBuf, Vec<LineCoverage>> {
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    suite
+        .files
+        .iter()
+        .map(|file| {
+            let path = if let Ok(path) = std::fs::canonicalize(&file.path.0) {
+                path
+            } else if file.path.0.is_absolute() {
+                file.path.0.clone()
+            } else {
+                canonical.join(&file.path.0)
+            };
+            (path, file.lines.clone())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +186,33 @@ mod tests {
         assert_eq!(map.get(Path::new("/repo/src/B.java")), Some(&(2, 5)));
         assert_eq!(map.get(Path::new("/repo/src")), Some(&(12, 15)));
         assert_eq!(map.get(Path::new("/repo")), Some(&(12, 15)));
+    }
+
+    #[test]
+    fn keeps_line_hits_for_editor_gutters() {
+        let suite = CoverageSuite {
+            runner: "lcov".into(),
+            has_branches: false,
+            files: vec![FileCoverage {
+                path: IpcPath("/repo/src/A.java".into()),
+                lines: (0..10)
+                    .map(|line| LineCoverage {
+                        line,
+                        hits: 1,
+                        branches_total: 0,
+                        branches_covered: 0,
+                    })
+                    .collect(),
+                lines_total: 10,
+                lines_covered: 10,
+                branches_total: 0,
+                branches_covered: 0,
+            }],
+        };
+        let map = line_files(Path::new("/repo"), &suite);
+        let lines = map.get(Path::new("/repo/src/A.java")).unwrap();
+        assert_eq!(lines.len(), 10);
+        assert!(lines.iter().all(|line| line.hits > 0));
     }
 
     #[test]
