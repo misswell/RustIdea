@@ -4,6 +4,9 @@ Status: integration branch created, Zed POC merged, and P1 external-change
 protection implemented. The branch is merged into `main` at
 `4f526e6e4be9e4f83cfbc5b889505c30570fb927`. The Zed workbench remains an
 isolated workspace and is distributed as a GPL-3.0-or-later Preview.
+The real `tg-tenant-fork` backend/workbench acceptance is recorded in
+`RUSTIDEA_ZED_P4_ACCEPTANCE.md`; interactive GUI acceptance is still pending
+because the macOS console is locked and the AgentSpace worker is offline.
 
 ## Baseline
 

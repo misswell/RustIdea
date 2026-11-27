@@ -2,7 +2,7 @@ name: Zed Integration
 
 on:
   push:
-    branches: [integration/zed-workbench, experiment/zed-editor]
+    branches: [main, integration/zed-workbench, experiment/zed-editor]
   workflow_dispatch:
 
 permissions:

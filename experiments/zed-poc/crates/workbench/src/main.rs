@@ -284,7 +284,14 @@ fn main() {
                     })
                     .expect("activate workbench window");
                 cx.activate(true);
+                let smoke_wait = std::env::var("RUSTIDEA_ZED_SMOKE_WAIT_SECS")
+                    .ok()
+                    .and_then(|seconds| seconds.parse::<u64>().ok())
+                    .map(|seconds| std::time::Duration::from_secs(seconds.min(900)))
+                    .unwrap_or_else(|| std::time::Duration::from_secs(3));
                 let smoke_split = std::env::var_os("RUSTIDEA_ZED_SMOKE_SPLIT").is_some();
+                let smoke_second_file =
+                    std::env::var("RUSTIDEA_ZED_SMOKE_SECOND_FILE").ok();
                 let smoke_run = std::env::var_os("RUSTIDEA_ZED_SMOKE_RUN").is_some();
                 let smoke_run_config_name =
                     std::env::var("RUSTIDEA_ZED_SMOKE_RUN_CONFIG_NAME").ok();
@@ -442,6 +449,13 @@ fn main() {
                         let (line, column) = position.split_once(':')?;
                         Some((line.parse().ok()?, column.parse().ok()?))
                     });
+                let lsp_position = std::env::var("RUSTIDEA_ZED_SMOKE_LSP_POS")
+                    .ok()
+                    .and_then(|position| {
+                        let (line, column) = position.split_once(':')?;
+                        Some((line.parse().ok()?, column.parse().ok()?))
+                    });
+                let lsp_rename = std::env::var("RUSTIDEA_ZED_SMOKE_LSP_RENAME").ok();
                 window
                     .update(cx, |_workbench, window, cx| {
                         cx.spawn_in(window, async move |this, cx| {
@@ -451,6 +465,9 @@ fn main() {
                             this.update_in(cx, |app, window, cx| {
                                 if smoke_split {
                                     app.smoke_enable_split(cx);
+                                }
+                                if let Some(path) = &smoke_second_file {
+                                    app.smoke_open_path(PathBuf::from(path), cx);
                                 }
                                 if smoke_run {
                                     app.smoke_start_run(cx);
@@ -672,14 +689,39 @@ fn main() {
                                 if let Some((line, column)) = completion_position {
                                     app.smoke_request_completion(line, column, cx);
                                 }
+                                if let Some((line, column)) = lsp_position {
+                                    app.smoke_request_lsp(
+                                        line,
+                                        column,
+                                        lsp_rename.clone(),
+                                        cx,
+                                    );
+                                }
                                 if !smoke_notebook_edit && smoke_usages.is_none() {
                                     app.smoke_insert_marker(&marker, cx);
                                 }
                             })
                             .ok();
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_secs(3))
-                                .await;
+                            if smoke_build {
+                                let deadline = std::time::Instant::now() + smoke_wait;
+                                loop {
+                                    let running = this
+                                        .update(cx, |app, _cx| app.smoke_build_running())
+                                        .unwrap_or(false);
+                                    if !running {
+                                        break;
+                                    }
+                                    if std::time::Instant::now() >= deadline {
+                                        eprintln!("WORKBENCH_BUILD_WAIT_TIMEOUT");
+                                        break;
+                                    }
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_secs(1))
+                                        .await;
+                                }
+                            } else {
+                                cx.background_executor().timer(smoke_wait).await;
+                            }
                             this.update_in(cx, |app, window, cx| {
                                 if !smoke_notebook_edit && smoke_usages.is_none() {
                                     app.smoke_save_active(cx);
@@ -958,6 +1000,15 @@ fn main() {
                                     "WORKBENCH_EXTERNAL conflict={:?}",
                                     app.active_conflict_text()
                                 );
+                                eprintln!(
+                                    "WORKBENCH_TABS count={} active_path={}",
+                                    app.smoke_tab_count(),
+                                    app.active_path()
+                                );
+                                if smoke_terminal {
+                                    app.smoke_stop_terminal(cx);
+                                }
+                                app.smoke_shutdown_host();
                                 cx.quit();
                             })
                             .ok();

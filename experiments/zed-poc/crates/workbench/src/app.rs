@@ -6753,8 +6753,16 @@ impl Workbench {
                         app.bottom_mode = BottomMode::Terminal;
                         app.attach_terminal_output(output_rx, cx);
                         if std::env::var_os("RUSTIDEA_ZED_SMOKE_TERMINAL").is_some() {
-                            let command = "printf 'WORKBENCH_TERMINAL_OK\\n'\r";
-                            if let Err(error) = host.write_terminal(terminal_id, command) {
+                            let command = std::env::var("RUSTIDEA_ZED_SMOKE_TERMINAL_COMMAND")
+                                .map(|command| {
+                                    if command.ends_with(['\r', '\n']) {
+                                        command
+                                    } else {
+                                        format!("{command}\r")
+                                    }
+                                })
+                                .unwrap_or_else(|_| "printf 'WORKBENCH_TERMINAL_OK\\n'\r".into());
+                            if let Err(error) = host.write_terminal(terminal_id, &command) {
                                 eprintln!("WORKBENCH_TERMINAL_WRITE_ERROR {}", error.message);
                             }
                         }
@@ -9186,6 +9194,86 @@ impl Workbench {
         .detach();
     }
 
+    pub fn smoke_request_lsp(
+        &mut self,
+        line: u32,
+        column: u32,
+        rename_to: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.active else {
+            return;
+        };
+        let Some(document) = self.documents.get(&doc) else {
+            return;
+        };
+        let lsp = Arc::new(DocumentLsp::new(
+            self.host.clone(),
+            doc,
+            document.path.clone(),
+        ));
+        cx.spawn(async move |_this, cx| {
+            let mut hover_chars = 0;
+            let mut definitions = Vec::new();
+            for attempt in 0..60 {
+                if hover_chars == 0
+                    && let Ok(Some(hover)) = lsp.hover(line, column).await
+                {
+                    hover_chars = hover.contents.value.chars().count();
+                }
+                if definitions.is_empty()
+                    && let Ok(locations) = lsp
+                        .definition(line, column, ide_lsp::types::GotoKind::Definition)
+                        .await
+                {
+                    definitions = locations;
+                }
+                if hover_chars > 0 && !definitions.is_empty() {
+                    break;
+                }
+                if attempt < 59 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(500))
+                        .await;
+                }
+            }
+            eprintln!(
+                "WORKBENCH_LSP hover_chars={hover_chars} definitions={} definition_first={:?}",
+                definitions.len(),
+                definitions.first().map(|location| (
+                    location.path.0.display().to_string(),
+                    location.range.start.line,
+                    location.range.start.col
+                ))
+            );
+            if let Some(new_name) = rename_to {
+                match lsp.prepare_rename(line, column).await {
+                    Ok(range) => {
+                        let result = lsp.rename(line, column, new_name).await;
+                        match result {
+                            Ok(()) => {
+                                eprintln!("WORKBENCH_LSP_RENAME range={range:?} status=ok");
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "WORKBENCH_LSP_RENAME range={range:?} status=error message={}",
+                                    error.message
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "WORKBENCH_LSP_RENAME status=unavailable message={}",
+                            error.message
+                        );
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
     pub fn smoke_active_text(&self, cx: &gpui::App) -> String {
         self.active
             .and_then(|doc| self.documents.get(&doc))
@@ -9205,6 +9293,14 @@ impl Workbench {
 
     pub fn smoke_editor_count(&self) -> usize {
         self.editors.len()
+    }
+
+    pub fn smoke_tab_count(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn smoke_open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.open_path(path, cx);
     }
 
     pub fn smoke_start_run(&mut self, cx: &mut Context<Self>) {
@@ -9516,6 +9612,24 @@ impl Workbench {
     pub fn smoke_build(&mut self, cx: &mut Context<Self>) {
         self.bottom_mode = BottomMode::Build;
         self.run_build(ide_build::compile::BuildKind::Build, cx);
+    }
+
+    pub fn smoke_build_running(&self) -> bool {
+        self.build_running
+    }
+
+    pub fn smoke_stop_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal.take() else {
+            return;
+        };
+        let id = terminal.read(cx).id();
+        let _ = self.host.kill_terminal(id);
+        self.terminal_output = None;
+        self.terminal_status = "Stopped smoke terminal".into();
+    }
+
+    pub fn smoke_shutdown_host(&self) {
+        self.host.runtime().block_on(self.host.host().shutdown());
     }
 
     pub fn build_status(&self) -> &gpui::SharedString {

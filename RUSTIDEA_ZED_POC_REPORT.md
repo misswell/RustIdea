@@ -1106,6 +1106,20 @@ The hardened runtime signature carries only the JIT and unsigned-executable-
 memory entitlements needed by the pinned tree-sitter/Wasmtime grammar engine.
 Without those entitlements macOS kills the app when a Java buffer is parsed.
 
+## tg-tenant-fork acceptance (2026-11-27)
+
+The workbench was exercised against the real `tg-tenant-fork` project in a
+detached worktree. It opened the project and a Java file, opened two tabs and
+a split, ran the real JDT.LS completion/hover/definition/rename paths, streamed
+search and outline results, spawned a real shell, completed a Maven
+`test-compile`, ran a standalone Maven test in that shell, and detected an
+external disk conflict. The detailed evidence and limitations are in
+`RUSTIDEA_ZED_P4_ACCEPTANCE.md`.
+
+The console was locked and the AgentSpace worker was offline, so this is
+backend/workbench acceptance, not GUI acceptance. No screenshot, keyboard
+IME, clipboard or undo/redo claim is made.
+
 ## Not yet done
 
 - Replacing the existing RustIdea `Editor`/`DocumentBuffer` workbench entry with
