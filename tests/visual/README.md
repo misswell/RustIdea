@@ -15,9 +15,13 @@ committed — the runner treats absent files as `SKIP`, never as a pass.
 
 ## Capture procedure
 
-1. Unlock the display. Window capture returns a blank surface while the screen
-   is locked or asleep; `screencapture -x` is black. Keep the display awake with
-   `caffeinate -u -t 3600` while capturing.
+1. Unlock the display. Window capture returns a stale or partial surface while
+   the screen is locked or asleep, and `screencapture -x` is black. For
+   GPU-rendered apps (RustIdea) a locked display yields a frame with the layout
+   shapes but no text or icons, which looks like a real screenshot. Keep the
+   display awake with `caffeinate -d -u -t 3600`, and note that
+   `capture-window.sh` refuses to capture while
+   `tests/visual/session-locked.swift` reports "locked".
 2. Open the pinned OpenIDEA app and the comparison project
    (`/Users/guofeng/Code/cscec3b/tg-tenant-fork`), size the window to 1600x900
    and keep it fully on screen. Record the window origin; clicks are addressed in

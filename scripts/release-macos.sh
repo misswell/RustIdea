@@ -59,10 +59,36 @@ if printf '%s\n' "$linked_libraries" | grep -q 'rustidea-editor'; then
 fi
 
 ditto -c -k --keepParent "$app_bundle" "$upload_archive"
-xcrun notarytool submit "$upload_archive" \
-  --keychain-profile "$notary_profile" \
-  --no-s3-acceleration --wait --timeout 1h --output-format json \
-  > "$dist_dir/notary-result-native.json"
+
+# Uploads go to S3, which a throttling HTTP proxy (the usual local 7890 proxy)
+# breaks with a multipart deadline error even though the notary service is
+# healthy. Retry a few times, and say what to do instead of leaving a bare
+# SotoS3 stack trace.
+notary_attempts="${NOTARY_ATTEMPTS:-3}"
+notary_log="$dist_dir/notary-submit.log"
+for attempt in $(seq 1 "$notary_attempts"); do
+  if xcrun notarytool submit "$upload_archive" \
+      --keychain-profile "$notary_profile" \
+      --no-s3-acceleration --wait --timeout 1h --output-format json \
+      > "$dist_dir/notary-result-native.json" 2> "$notary_log"; then
+    break
+  fi
+  echo "notary submit attempt $attempt/$notary_attempts failed:" >&2
+  tail -3 "$notary_log" >&2
+  if grep -q "deadlineExceeded" "$notary_log"; then
+    echo "The upload timed out, which usually means a local HTTP proxy is throttling" >&2
+    echo "S3. Either bypass the proxy for this run or temporarily turn it off:" >&2
+    echo "  networksetup -setwebproxystate 'Wi-Fi' off" >&2
+    echo "  networksetup -setsecurewebproxystate 'Wi-Fi' off" >&2
+    echo "  networksetup -setsocksfirewallproxystate 'Wi-Fi' off" >&2
+    echo "and restore it afterwards. The packaged app is kept at: $app_bundle" >&2
+  fi
+  if [[ "$attempt" == "$notary_attempts" ]]; then
+    echo "Notarization did not complete; the signed app is not distributed." >&2
+    exit 1
+  fi
+  sleep 20
+done
 jq -e '.status == "Accepted"' "$dist_dir/notary-result-native.json" >/dev/null
 
 xcrun stapler staple "$app_bundle"
