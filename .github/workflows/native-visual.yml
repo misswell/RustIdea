@@ -4,6 +4,9 @@ name: Native Visual Parity
 #   manifest - cheap contract check (runs anywhere): every captured scenario
 #              points at a real PNG with the declared geometry, no two captures
 #              are the same image, pending scenarios ship no placeholder.
+#   headless-render - renders the GPUI text stack through Metal without a visible
+#              window, so glyph painting is verified even while the display is
+#              locked (window capture returns stale frames in that state).
 #   real-app-screenshots - needs a signed-in macOS GUI session with the pinned
 #              OpenIDEA app and the native RustIdea build installed. It is
 #              intentionally not run on hosted runners: a headless runner cannot
@@ -33,6 +36,19 @@ jobs:
       - uses: actions/checkout@v7
       - name: Validate scenarios, files and geometry
         run: python3 tests/visual/validate-manifest.py
+
+  headless-render:
+    name: Headless glyph rendering
+    needs: manifest
+    runs-on: [self-hosted, macOS, rustidea-visual]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Render text without a visible window
+        run: |
+          cd experiments/zed-poc
+          cargo test --release -p rustidea-zed-workbench --test headless_render -- --nocapture
 
   real-app-screenshots:
     name: Real OpenIDEA vs real RustIdea

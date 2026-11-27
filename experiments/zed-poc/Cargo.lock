@@ -5299,6 +5299,7 @@ dependencies = [
  "gpui_linux",
  "gpui_macos",
  "gpui_web",
+ "gpui_wgpu",
  "gpui_windows",
 ]
 
@@ -5369,6 +5370,7 @@ dependencies = [
  "etagere",
  "gpui",
  "gpui_util",
+ "image",
  "itertools 0.14.0",
  "js-sys",
  "log",
@@ -12048,6 +12050,7 @@ dependencies = [
  "fs",
  "futures",
  "gpui",
+ "gpui_apple",
  "gpui_platform",
  "ide-agent",
  "ide-analysis",

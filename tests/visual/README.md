@@ -22,6 +22,22 @@ committed — the runner treats absent files as `SKIP`, never as a pass.
    display awake with `caffeinate -d -u -t 3600`, and note that
    `capture-window.sh` refuses to capture while
    `tests/visual/session-locked.swift` reports "locked".
+   Window lookup uses the ASCII unit separator (0x1f), not tabs: bash treats a
+   tab as whitespace in `IFS`, so an empty window title would silently shift
+   every later field.
+
+   To tell "the app paints no glyphs" apart from "the capture is stale", render
+   the same GPUI text stack without a window:
+
+   ```bash
+   cd experiments/zed-poc
+   cargo test --release -p rustidea-zed-workbench --test headless_render -- --nocapture
+   ```
+
+   The test draws a red box with black text through Metal and asserts both the
+   box and the glyph pixels exist, plus a negative control that an empty label
+   produces none. It passes on a locked screen, so it is the reliable signal
+   that text rendering itself is healthy.
 2. Open the pinned OpenIDEA app and the comparison project
    (`/Users/guofeng/Code/cscec3b/tg-tenant-fork`), size the window to 1600x900
    and keep it fully on screen. Record the window origin; clicks are addressed in

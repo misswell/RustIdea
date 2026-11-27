@@ -31,7 +31,7 @@ if [[ -z "$info" ]]; then
   exit 1
 fi
 
-IFS=$'\t' read -r id window_owner window_title x y width height <<<"$info"
+IFS=$'\x1f' read -r id window_owner window_title x y width height <<<"$info"
 tmp="$(mktemp -t rustidea-window).png"
 trap 'rm -f "$tmp"' EXIT
 screencapture -l "$id" -x "$tmp"

@@ -116,6 +116,25 @@ ids, real PNGs matching the declared geometry, no duplicated images, no image
 behind a pending status, and matching OpenIDEA commits in the manifest and the
 environment record.
 
+### Renderer health vs capture artefacts
+
+Window captures taken while the screen is locked return a stale or partial GPU
+surface: layout shapes survive, glyphs and icons do not. That state looks like a
+broken renderer and was previously read as one.
+
+`experiments/zed-poc/crates/workbench/tests/headless_render.rs` removes the
+ambiguity. It renders a red box and black text through the same GPUI shaping and
+Metal raster path, without a visible window, and asserts that the box paints
+(>5000 red pixels), that the label paints (>50 dark pixels), and that an empty
+label paints none. Verified at Zed `2664a0aa` on macOS 27.2: `red=8165
+dark_in_box=472`, negative control `dark_in_box=0`. So glyph painting works on
+this machine, and "no text in the screenshot" now means "the capture is stale",
+not "the renderer is broken".
+
+`capture-window.sh` refuses to run while `session-locked.swift` reports a locked
+session, and the headless test runs in the same self-hosted CI job, so a locked
+machine fails loudly instead of producing misleading evidence.
+
 The installed OpenIDEA 0.1.54 is real and signed, but it does not embed its
 source SHA. The definitive reference must be rebuilt from `fe3e647` or a build
 with recorded provenance before release. The pinned source is vendored for

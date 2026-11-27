@@ -70,4 +70,7 @@ unicode-segmentation = "1"
 util.workspace = true
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+gpui_apple = { path = "../../../../third_party/zed/crates/gpui_apple", features = ["font-kit"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
 tempfile = "3"
