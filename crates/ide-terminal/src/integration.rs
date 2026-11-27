@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const ZSHENV: &str = r#"# OpenIDEA shell integration (generated)
 _openidea_dir=$ZDOTDIR
@@ -104,7 +105,22 @@ fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, content)
+    // Shells start concurrently, so another thread may be generating the same file.
+    // Rename a complete file into place instead of truncating the one being read.
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let temp = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("shell-integration"),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&temp, content)?;
+    if let Err(e) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Adjusts how `shell` is started so it reports its cwd. `args` are the
