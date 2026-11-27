@@ -31,9 +31,9 @@
     "theme": "Light (Semantics adapter installed)",
     "note": "Native captures do not exist yet for any scenario; run-visual-regression.sh skips them and never substitutes mock images."
   },
-  "capture_method": "CGWindowListCopyWindowInfo for bounds; screencapture -l <windowID>; normalize_window.py crops the 2x shadow and resizes to logical pixels (LANCZOS). Helper scripts and input gotchas live in tests/visual/README.md.",
+  "capture_method": "CGWindowListCopyWindowInfo for bounds; screencapture -l <windowID>; normalize_window.py crops the 2x shadow and resizes to logical pixels (LANCZOS). Helper scripts and input gotchas live in tests/visual/README.md. The GUI session locked twice mid-run (blank window captures); keep caffeinate -d -u active and re-read the window origin before every input batch.",
   "known_blockers": [
-    "19-save-conflict is not captured yet: the conflict toast only renders while the display is unlocked, and the GUI session locked before it could be captured. The previous file was not a conflict and was deleted.",
+    "19-save-conflict remains pending: the file-changed-on-disk toast was observed once but could not be reproduced in this session (OpenIDEA reloaded or discarded the dirty buffer on external change and on Cmd+W). Needs a fresh session with the indexer idle and a verified dirty buffer; no placeholder is shipped.",
     "The installed 0.1.54 app cannot be tied to a source SHA; the final baseline must be rebuilt from fe3e647 or the build metadata must be added.",
     "No RustIdea native workbench screenshot at the same geometry/state exists yet."
   ]

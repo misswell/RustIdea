@@ -195,7 +195,7 @@
       "state": "File changed on disk while the editor is dirty; 'changed on disk' dialog offers Load Changes from Disk / Keep Editor Changes",
       "status": "pending-capture",
       "masks": [],
-      "notes": "Previous file was a plain editor capture and was removed. Recapture requires the host display to be unlocked: the conflict toast only renders on screen, and window capture returns a blank surface while the Mac is locked."
+      "notes": "Blocked after two controlled attempts. The UI exists (observed once as the 'RoleController.java changed on disk' toast with Load Changes from Disk / Keep Editor Changes), but in this session OpenIDEA's watcher discarded the dirty buffer instead of showing it: typing into the editor marked it dirty, an external append did not raise the toast, Cmd+S saved nothing, and Cmd+W closed the tab without prompting. Capturing it needs a fresh app session with the indexer idle and a verified dirty buffer, not a fabricated frame."
     },
     {
       "id": "20-dark-theme",
