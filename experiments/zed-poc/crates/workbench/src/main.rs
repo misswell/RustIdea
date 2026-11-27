@@ -292,6 +292,8 @@ fn main() {
                 let smoke_split = std::env::var_os("RUSTIDEA_ZED_SMOKE_SPLIT").is_some();
                 let smoke_second_file =
                     std::env::var("RUSTIDEA_ZED_SMOKE_SECOND_FILE").ok();
+                let smoke_no_marker =
+                    std::env::var_os("RUSTIDEA_ZED_SMOKE_NO_MARKER").is_some();
                 let smoke_run = std::env::var_os("RUSTIDEA_ZED_SMOKE_RUN").is_some();
                 let smoke_run_config_name =
                     std::env::var("RUSTIDEA_ZED_SMOKE_RUN_CONFIG_NAME").ok();
@@ -697,7 +699,10 @@ fn main() {
                                         cx,
                                     );
                                 }
-                                if !smoke_notebook_edit && smoke_usages.is_none() {
+                                if !smoke_no_marker
+                                    && !smoke_notebook_edit
+                                    && smoke_usages.is_none()
+                                {
                                     app.smoke_insert_marker(&marker, cx);
                                 }
                             })
@@ -723,7 +728,10 @@ fn main() {
                                 cx.background_executor().timer(smoke_wait).await;
                             }
                             this.update_in(cx, |app, window, cx| {
-                                if !smoke_notebook_edit && smoke_usages.is_none() {
+                                if !smoke_no_marker
+                                    && !smoke_notebook_edit
+                                    && smoke_usages.is_none()
+                                {
                                     app.smoke_save_active(cx);
                                 }
                                 if smoke_db_query.is_some() {

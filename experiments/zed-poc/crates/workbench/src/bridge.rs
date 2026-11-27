@@ -22,6 +22,7 @@ pub struct ZedDocument {
     pub applying_backend_patch: bool,
     pub save_requested: bool,
     pub save_force_requested: bool,
+    pub save_as_requested: Option<PathBuf>,
     pub conflict: Option<String>,
     pub disk_stamp: Option<DiskStamp>,
 }
@@ -91,6 +92,7 @@ impl ZedDocument {
             applying_backend_patch: false,
             save_requested: false,
             save_force_requested: false,
+            save_as_requested: None,
             conflict: None,
             disk_stamp,
         }

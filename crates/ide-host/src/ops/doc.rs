@@ -34,8 +34,9 @@ pub async fn open_untitled(
         .await
 }
 
-/// Save As for an untitled buffer ([`Documents::save_as`]); LightEdit windows
-/// start watching the saved file's folder.
+/// Save As for an untitled buffer or an existing file
+/// ([`Documents::save_as`]); LightEdit windows start watching the saved file's
+/// folder.
 pub async fn save_as(
     host: &Host,
     window: &str,

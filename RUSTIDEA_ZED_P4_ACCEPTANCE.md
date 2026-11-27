@@ -11,7 +11,9 @@ screenshots and visual menu acceptance remain unverified.
 ## Environment
 
 - macOS 27.2.1 on Apple Silicon.
-- RustIdea `main` at `20473ead2a9a38abbd127a5c8a1052fa33c333c4`.
+- RustIdea `main` at `9ff2a2de9b9f99e1855e32b0b5675f93d4a40d78`
+  for the original run; the Save As re-key evidence below was added on the
+  follow-up working tree before the `v0.3.3-zed-preview.1` release.
 - Project: `/Users/guofeng/Code/cscec3b/tg-tenant-fork` at
   `7f92ab5317194fb3615f3b2be54bba54e8c7b8a7`.
 - The test used a detached Git worktree so the project's uncommitted
@@ -30,6 +32,7 @@ screenshots and visual menu acceptance remain unverified.
 | Project tree | partial | 17 top-level entries loaded; lazy child expansion was not driven visually |
 | Open Java file | pass | `WORKBENCH_DOC_OPEN ... language=java tabs=1`; the Zed buffer had `language=true` |
 | Edit and save | pass | Marker was inserted through the Zed buffer and saved through OpenIDEA; `status=Saved through OpenIDEA` |
+| Save As re-keys the open document | pass at backend and smoke level | `WORKBENCH_SAVE_AS ok`; `WORKBENCH_TABS count=1` with `active_path=.../IpUtilsSavedAs.java`; the source file was unchanged and both files had the same SHA-256 |
 | Clean reload after disk change | partial | The external-change path was exercised; a clean automatic reload in an interactive window was not |
 | Maven compile | pass | Build panel: `0 errors · 0 warnings · 27.0 s`, final line `Process finished with exit code 0` |
 | Maven tests | pass | Direct run reported `Tests run: 2, Failures: 0, Errors: 0` and `BUILD SUCCESS`; the embedded terminal ran the same command and printed `WORKBENCH_MAVEN_TEST_OK` |
@@ -70,8 +73,14 @@ Zed path uses more or less memory under equivalent language-server workloads.
 
 The acceptance knobs added to the workbench are:
 
+- `RUSTIDEA_ZED_SMOKE_MARKER=<text>`: activates the scripted smoke path. It
+  is required even when the marker edit itself is disabled.
+- `RUSTIDEA_ZED_SMOKE_NO_MARKER=1`: skip inserting the marker edit; used by
+  read-only and Save As checks.
 - `RUSTIDEA_ZED_SMOKE_WAIT_SECS`: maximum wait, used by the build adaptive
   wait and by fixed-delay stages.
+- `RUSTIDEA_ZED_SMOKE_SAVE_AS=<path>`: Save As the active document to a path,
+  reporting `WORKBENCH_SAVE_AS ok` after the OpenIDEA document is re-keyed.
 - `RUSTIDEA_ZED_SMOKE_LSP_POS` / `RUSTIDEA_ZED_SMOKE_LSP_RENAME`: request
   hover, definition and rename at a document position.
 - `RUSTIDEA_ZED_SMOKE_SECOND_FILE`: open a second document and report the tab

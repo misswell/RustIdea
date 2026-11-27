@@ -41,7 +41,7 @@ editor suite. The optimized Criterion baseline is recorded in
 | Async lazy project tree | `ProjectTree` caches per-directory `ide_vfs` listings, loads only root/missing directories, rebuilds cached expansions without I/O and uses `uniform_list`. |
 | Incremental file watcher updates | `FsChanged` invalidates only affected loaded parents; deleted directories are not re-read. Unit tests cover cached expansion, incremental invalidation and removal. |
 | No workbench repaint per keystroke | The app no longer has `cx.observe(&editor)` subscriptions. `BufferEvent::Changed` returns before `cx.notify`; dirty/title/save/error are the only workbench notifications. |
-| DocumentStore | Canonical path/symlink identity, one handle per document, view ref-counting, Save As rekey and last-view release are tested. |
+| DocumentStore | Canonical path/symlink identity, one handle per document, view ref-counting, Save As rekey (UI store and OpenIDEA document) and last-view release are tested. |
 | External change protection | Disk-stamp detection plus dirty-conflict banner and save guard; backend `reload_discarding_changes` has an automated dirty-buffer reload test. |
 | Bounded editor work | Visible-line virtualization, bounded shaped-line cache, version/epoch invalidation, 1,000-entry history, delta undo/redo, coalesced autosave and large-file syntax cutoff. |
 | No WebView runtime | Static dependency search and `Cargo.lock` contain no Tauri/Wry/WebKit/WebView/CodeMirror/Monaco/xterm runtime. |
@@ -113,6 +113,7 @@ until that evidence exists.
 | `cargo test -p rustidea` | Pass: 34 binary tests + 68 integration tests |
 | document sync regression | Pass: 10,000 sequential inputs, disjoint rebase, explicit conflict |
 | multiview regression | Pass: shared handle, tab/split view counts, Save As rekey, last-view release |
+| existing-file Save As | Pass: `ide-workspace` keeps the doc ID/version, leaves the original file and rekeys the target; Zed workbench smoke keeps one tab at the new path |
 | event overflow regression | Pass: bounded queue coalescing and document/fs recovery flags |
 | project tree regression | Pass: 100,000-file paging, generation dedup, stale result rejection |
 | large-file regression | Pass: 1M-line edit/undo, 2M-character single line |

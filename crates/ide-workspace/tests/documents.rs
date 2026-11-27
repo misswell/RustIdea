@@ -1487,7 +1487,7 @@ fn save_as_rejects_paths_opened_elsewhere_and_reuses_free_names() {
     let f = fixture();
     let first = f.root.join("taken.txt");
     fs::write(&first, "taken").unwrap();
-    let taken = f.docs.open(&first).unwrap();
+    let _taken = f.docs.open(&first).unwrap();
 
     let a = f.docs.open_untitled(None).unwrap();
     let b = f.docs.open_untitled(None).unwrap();
@@ -1510,13 +1510,32 @@ fn save_as_rejects_paths_opened_elsewhere_and_reuses_free_names() {
     f.docs.close(a.id);
     let c = f.docs.open_untitled(None).unwrap();
     assert_eq!(c.path, PathBuf::from("untitled:Untitled-1"));
+}
 
-    // Non-untitled documents cannot be re-keyed.
-    let err = f
+#[test]
+fn save_as_rekeys_an_existing_file_and_keeps_the_original_file() {
+    let f = fixture();
+    let original = f.root.join("original.txt");
+    fs::write(&original, "before").unwrap();
+    let doc = f.docs.open(&original).unwrap();
+    let edited = f
         .docs
-        .save_as(taken.id, &f.root.join("other.txt"))
-        .unwrap_err();
-    assert_eq!(err.kind, ErrorKind::InvalidInput);
+        .edit(doc.id, doc.version, change(0, 0, "after "))
+        .unwrap();
+    let target = f.root.join("saved-copy.txt");
+    let saved = f.docs.save_as(doc.id, &target).unwrap();
+
+    assert_eq!(saved.id, doc.id, "the shared buffer keeps its identity");
+    assert_eq!(saved.version, edited, "undo history and version are kept");
+    assert_eq!(saved.path, target);
+    assert!(!saved.dirty);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "after before");
+    assert_eq!(fs::read_to_string(&original).unwrap(), "before");
+
+    let reopened = f.docs.open(&target).unwrap();
+    assert_eq!(reopened.id, doc.id);
+    assert_eq!(f.docs.snapshot(doc.id).unwrap().path, target);
+    f.docs.close(reopened.id);
 }
 
 #[test]

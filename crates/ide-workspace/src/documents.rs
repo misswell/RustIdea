@@ -931,11 +931,11 @@ impl Documents {
         })
     }
 
-    /// Save As for an untitled buffer: writes it to `target` (creating missing
-    /// parent folders) and turns it into a regular file document — the buffer
-    /// keeps its identity (undo history, version), the registry is re-keyed and
-    /// the language is re-detected from the new path. The target path must not
-    /// be open as another document.
+    /// Save As: writes the document to `target` (creating missing parent
+    /// folders), keeps the buffer identity (undo history, version), re-keys the
+    /// registry and re-detects the language from the new path. An existing file
+    /// document keeps its old file on disk; the open document now represents
+    /// the new path. The target path must not be open as another document.
     pub fn save_as(&self, doc: DocId, target: &Path) -> IdeResult<DocumentInfo> {
         let _operation = self.operations.lock();
         // The caller picks a real file path; an `untitled:` key is never one
@@ -956,43 +956,48 @@ impl Documents {
             }
         }
         self.with_doc(doc, |st| {
-            if st.uri.is_none() || !is_untitled(&st.path) {
+            if st.uri.is_some() && !is_untitled(&st.path) {
                 return Err(IdeError::invalid(
-                    "only an untitled document can be saved to a new path",
+                    "a virtual document cannot be saved to a file",
                 ));
             }
             let text = st.doc.text_for_save();
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let mtime = if st.native_to_ascii {
+            let defaults = self.file_defaults();
+            let native_to_ascii = defaults.native_to_ascii_for(&target);
+            let mtime = if native_to_ascii {
                 ide_vfs::save_properties_text(&target, &text)?
             } else {
                 ide_vfs::save_text(&target, &text, &st.encoding, st.has_bom)?
             };
-            // Re-key the registry before anyone opens the new path in parallel.
-            let keys = keys_for(&target);
-            {
-                let mut reg = self.registry.lock();
-                let old_keys = match reg.docs.get_mut(&doc) {
-                    Some(entry) => std::mem::take(&mut entry.keys),
-                    None => return Err(IdeError::not_found("document closed while saving")),
-                };
-                for k in &old_keys {
-                    if reg.by_key.get(k) == Some(&doc) {
-                        reg.by_key.remove(k);
+            let replacing_self = st.path == target;
+            if !replacing_self {
+                // Re-key the registry before anyone opens the new path in parallel.
+                let keys = keys_for(&target);
+                {
+                    let mut reg = self.registry.lock();
+                    let old_keys = match reg.docs.get_mut(&doc) {
+                        Some(entry) => std::mem::take(&mut entry.keys),
+                        None => return Err(IdeError::not_found("document closed while saving")),
+                    };
+                    for k in &old_keys {
+                        if reg.by_key.get(k) == Some(&doc) {
+                            reg.by_key.remove(k);
+                        }
                     }
-                }
-                for k in &keys {
-                    reg.by_key.insert(k.clone(), doc);
-                }
-                if let Some(entry) = reg.docs.get_mut(&doc) {
-                    entry.keys = keys;
+                    for k in &keys {
+                        reg.by_key.insert(k.clone(), doc);
+                    }
+                    if let Some(entry) = reg.docs.get_mut(&doc) {
+                        entry.keys = keys;
+                    }
                 }
             }
             let old_path = std::mem::replace(&mut st.path, target.clone());
             st.uri = None;
-            let defaults = self.file_defaults();
+            st.can_reload_encoding = true;
             let first_line = st.doc.text();
             let first_line = first_line.lines().next();
             let language = (self.detect_language)(&st.path, first_line);
@@ -1005,15 +1010,18 @@ impl Documents {
             } else {
                 None
             };
-            st.native_to_ascii = defaults.native_to_ascii_for(&st.path);
+            st.native_to_ascii = native_to_ascii;
             st.disk_mtime = mtime;
             st.disk_len = disk_len(&st.path);
             self.set_dirty(doc, st, false);
             let info = Self::info(doc, st);
             if st.observed {
-                for o in self.observers() {
-                    o.closed(doc, &old_path);
-                    o.opened(&info);
+                let observers = self.observers();
+                for o in observers {
+                    if !replacing_self {
+                        o.closed(doc, &old_path);
+                        o.opened(&info);
+                    }
                     o.saved(doc, &st.path, &st.doc.text());
                 }
             }

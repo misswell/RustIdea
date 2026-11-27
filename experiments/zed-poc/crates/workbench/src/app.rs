@@ -15,7 +15,7 @@ use language::{
 use lsp::LanguageServerId;
 use text::Point as TextPoint;
 
-use crate::bridge::{ZedDocument, is_buffer_edited};
+use crate::bridge::{DiskStamp, ZedDocument, is_buffer_edited};
 use crate::code_actions::OpenIdeaCodeActionProvider;
 use crate::completion::OpenIdeaCompletionProvider;
 use crate::documents::{DocumentKey, DocumentStore};
@@ -6181,10 +6181,12 @@ impl Workbench {
                             let current = document.buffer.read(cx).snapshot().version().clone();
                             if current != request_clock {
                                 app.sync_document(doc_id, cx);
-                            } else if document.save_requested {
+                            } else if let Some(path) = document.save_as_requested.take() {
                                 document.save_requested = false;
-                                let force = document.save_force_requested;
                                 document.save_force_requested = false;
+                                app.save_as_to_path(doc_id, path, cx);
+                            } else if std::mem::take(&mut document.save_requested) {
+                                let force = std::mem::take(&mut document.save_force_requested);
                                 if force {
                                     app.overwrite_document(doc_id, cx);
                                 } else {
@@ -6650,29 +6652,74 @@ impl Workbench {
         } else {
             self.root.join(path)
         };
-        let Some(text) = self
-            .documents
-            .get(&doc)
-            .map(|document| document.buffer.read(cx).snapshot().text())
-        else {
+        let Some(document) = self.documents.get(&doc) else {
             return;
         };
-        let host = self.host.clone();
         self.save_as = false;
-        self.status = format!("Saving a copy as {}…", path.display()).into();
+        if document.syncing {
+            if let Some(document) = self.documents.get_mut(&doc) {
+                document.save_as_requested = Some(path.clone());
+            }
+            self.status = format!("Save As queued for {}", path.display()).into();
+            cx.notify();
+            return;
+        }
+        self.save_as_to_path(doc, path, cx);
+        cx.notify();
+    }
+
+    fn save_as_to_path(&mut self, doc_id: DocId, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(document) = self.documents.get(&doc_id) else {
+            return;
+        };
+        let old_path = document.path.clone();
+        let version = document.buffer.read(cx).snapshot().version().clone();
+        let buffer = document.buffer.clone();
+        let host = self.host.clone();
+        self.status = format!("Saving as {}…", path.display()).into();
         cx.spawn(async move |this, cx| {
-            let result = host.save_file_copy(path.clone(), text).await;
+            let result = host.save_document_as(doc_id, path.clone()).await;
             let handle = this
                 .update(cx, |app, cx| {
                     match result {
-                        Ok(()) => {
-                            eprintln!("WORKBENCH_SAVE_COPY ok path={}", path.display());
-                            app.record_recent_file(&path, cx);
-                            app.status = format!("Saved a copy as {}", path.display()).into();
+                        Ok(info) => {
+                            buffer.update(cx, |buffer, cx| {
+                                buffer.did_save(version.clone(), None, cx);
+                            });
+                            let old_key = DocumentKey::for_ui_path(&old_path);
+                            let new_key = DocumentKey::for_ui_path(&info.path.0);
+                            if app.store.rekey(&old_key, new_key, doc_id).is_ok() {
+                                app.record_recent_file(&info.path.0, cx);
+                                let language_name = info.language.to_string();
+                                let registry = app.language_registry.clone();
+                                if let Some(document) = app.documents.get_mut(&doc_id) {
+                                    document.path = info.path.0.clone();
+                                    document.language = language_name.clone();
+                                    document.backend_version = info.version;
+                                    document.disk_stamp = DiskStamp::read(&info.path.0);
+                                    document.conflict = None;
+                                    let language_buffer = document.buffer.clone();
+                                    cx.spawn(async move |_this, cx| {
+                                        if let Ok(language) = registry
+                                            .language_for_name_or_extension(&language_name)
+                                            .await
+                                        {
+                                            language_buffer.update(cx, |buffer, cx| {
+                                                buffer.set_language(Some(language), cx);
+                                            });
+                                        }
+                                    })
+                                    .detach();
+                                }
+                                eprintln!("WORKBENCH_SAVE_AS ok path={}", info.path.0.display());
+                                app.status = format!("Saved as {}", info.path.0.display()).into();
+                            } else {
+                                app.status = "Save As failed: target is already open".into();
+                            }
                         }
                         Err(error) => {
-                            eprintln!("WORKBENCH_SAVE_COPY failed {}", error.message);
-                            app.status = format!("Save copy failed: {}", error.message).into();
+                            eprintln!("WORKBENCH_SAVE_AS failed {}", error.message);
+                            app.status = format!("Save As failed: {}", error.message).into();
                         }
                     }
                     cx.notify();
@@ -6683,7 +6730,6 @@ impl Workbench {
             refresh_window(handle, cx);
         })
         .detach();
-        cx.notify();
     }
 
     fn stop_active_run(&mut self, cx: &mut Context<Self>) {

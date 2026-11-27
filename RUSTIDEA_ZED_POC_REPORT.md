@@ -1167,8 +1167,10 @@ IME, clipboard or undo/redo claim is made.
   recording new profiles and Python/JVM/perf formats are missing. Logcat lists devices, streams, filters threadtime output,
   supports the Android Studio query grammar, persists filter history and exports logs. The
   Scratch panel lists and creates files with Java/Python/Rust/JS/Markdown
-  template shortcuts; a full language chooser is still missing. Save As currently saves a copy: the OpenIDEA document
-  layer only supports re-keying untitled buffers, not renaming an existing file.
+  template shortcuts; a full language chooser is still missing. Save As now
+  re-keys an existing file document in place: the same doc ID, Zed buffer and
+  undo history continue at the new path, the old file stays on disk and the
+  tab follows the new path. Untitled buffers keep their earlier Save As path.
   Color preview covers hex and `rgb()`/`rgba()`/`hsl()`/`hsla()` literals; a
   color picker and CSS named colors are not implemented.
   The Run panel can create/edit/delete shell configurations and fill Cargo,
