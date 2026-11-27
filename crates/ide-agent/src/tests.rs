@@ -576,6 +576,18 @@ async fn saved_conversation_reads_do_not_start_or_load_the_agent() {
         .await
         .unwrap();
     wait_for(&mgr, &task.id, AgentStatus::NeedsInput).await;
+    let permission = mgr
+        .entries(&task.id, None)
+        .unwrap()
+        .iter()
+        .find_map(|entry| match entry {
+            AgentEntry::Permission { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    mgr.respond(&task.id, permission, Some("no".into()))
+        .unwrap();
+    wait_for(&mgr, &task.id, AgentStatus::Ready).await;
     mgr.shutdown();
     let restored_agent = Arc::new(FakeAgent::default());
     let restored = manager(tmp.path(), restored_agent.clone());
