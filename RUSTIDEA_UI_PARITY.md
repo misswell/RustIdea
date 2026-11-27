@@ -20,13 +20,16 @@ filled and the two real applications match at the same state.
 No component is marked **Parity** in this revision. The current workbench is
 still the old experiment (`app.rs`, one growing `SidebarMode` enum, a fixed
 250 px sidebar, a permanent bottom pane and a 24 px status bar), not the
-OpenIDEA Islands frame.
+OpenIDEA Islands frame. What has changed is that the reference side is now
+complete: 20 of 21 states have real OpenIDEA 0.1.54 captures, the token table is
+generated from the pinned CSS, and the GPUI `theme.rs` adapter derives every
+colour from `Semantics` instead of a hand-tuned palette.
 
 ## Component ledger
 
 | OpenIDEA source | RustIdea implementation | Original geometry / behaviour | Data source | Screenshot | Tests | Status / unresolved |
 |---|---|---|---|---|---|---|
-| `src/styles/tokens.css` | `crates/rustidea-design/src/tokens.rs`, `tokens_generated.rs`, `semantic.rs`, `metrics.rs`; converter `tools/openidea-tokens/generate.py` | 428 dark tokens; light/high-contrast/compact tables; `--h-titlebar 40`, `--h-header 40`, `--h-tab 28`, `--h-row 24`, `--h-statusbar 30`, `--stripe-icon-button 30`, `--island-gap 6`, `--island-radius 10`, `--fs-ui 13`; compact 32/32/24/22/24/24/4/8 | `third_party/openidea/tokens.css` at the pinned commit | `tests/visual-baselines/openidea/02-project-main.png` only establishes the reference state | `cargo test -p rustidea-design` (28 tests); token hash check in CI | **Foundation.** Full token table generated and tested. The renderer still uses `experiment/.../src/theme.rs`, which must be deleted rather than extended. |
+| `src/styles/tokens.css` | `crates/rustidea-design/src/tokens.rs`, `tokens_generated.rs`, `semantic.rs`, `metrics.rs`; converter `tools/openidea-tokens/generate.py` | 428 dark tokens; light/high-contrast/compact tables; `--h-titlebar 40`, `--h-header 40`, `--h-tab 28`, `--h-row 24`, `--h-statusbar 30`, `--stripe-icon-button 30`, `--island-gap 6`, `--island-radius 10`, `--fs-ui 13`; compact 32/32/24/22/24/24/4/8 | `third_party/openidea/tokens.css` at the pinned commit | `tests/visual-baselines/openidea/01-welcome.png` … `21-light-theme.png` (20 real captures at the pinned build) | `cargo test -p rustidea-design` (28 tests); token hash check in CI | **Foundation.** Full token table generated and tested; `theme.rs` now adapts `Semantics` and must not grow its own palette. The editor scheme still needs to be installed into Zed. |
 | `src/workbench/Workbench.tsx` | `experiments/zed-poc/crates/workbench/src/app.rs` (current); planned `.../src/workbench/mod.rs` | Frame background, project colour wash, titlebar + islands + statusbar; welcome replaces the frame without a project | `ProjectInfo`, contributions, layout state | Not captured with the native frame | Workbench tests only cover data paths | **Porting.** No titlebar/stripes/islands in the current render; `app.rs` is 21 038 lines and must be split by feature. |
 | `src/workbench/TitleBar.tsx`, `TitleBar.module.css`, `ContributedToolbar.tsx`, `mainToolbar.ts` | planned `.../workbench/title_bar.rs`; `TitleItemRegistry` in `rustidea-design/src/workbench/registry.rs` | 40 px bar, `padding 0 8px 0 10px`; macOS traffic-light inset `max(82px, 82px/zoom)`; project widget (avatar, name, chevron), VCS branch, run configuration, Run, Debug, search, gear; drag region; compact 30 px header | Project, VCS, run/config, actions | None yet | Registry unit tests | **Gap.** Current workbench has no titlebar widgets or macOS traffic-light-aware padding. |
 | `src/workbench/EditorArea.tsx`, `EditorArea.module.css` | `app.rs` editor/split render; planned `.../workbench/editor_area.rs` | Editor island fills the centre track; tabs live above it; empty-editor hints use the OpenIDEA key hints | `Editor` entities, document store | None | Existing Zed integration tests | **Porting.** Editor engine is Zed; the surrounding island, tab strip, breadcrumb and split chrome are not ported. |
@@ -97,12 +100,21 @@ screenshots use the same scenario id under `tests/visual-baselines/rustidea/`.
 `diff.png` and `metrics.json` per scenario and reports missing real captures as
 `SKIP`, never as a pass.
 
-Current evidence:
+Current evidence (all reference frames 1600×900 at the same window origin,
+except Settings at 980×720):
 
 | Scenario | OpenIDEA real capture | RustIdea real capture | Result |
 |---|---|---|---|
-| `02-project-main` | `openidea/02-project-main.png` (1651×856, light, tg-tenant-fork) | `rustidea/00-before-zed-workbench.png` (1281×853, old dark empty shell) | **Fail / not comparable**: wrong size, wrong app state, no titlebar/islands. This is the "before" evidence. |
-| All others | Pending: GUI session locked during this run | Pending | **Not run.** No mock screenshots. |
+| `01-welcome` | `openidea/01-welcome.png` | none | **Not run.** |
+| `02-project-main` | `openidea/02-project-main.png` | `rustidea/00-before-zed-workbench.png` (1281×853, old dark empty shell) | **Fail / not comparable**: wrong size, wrong app state, no titlebar/islands. This is the "before" evidence. |
+| `03-project-tree` … `18-context-menu` | `openidea/<id>.png` | none | **Not run.** |
+| `19-save-conflict` | pending: the conflict toast needs an unlocked display | none | **Not run.** No placeholder is shipped. |
+| `20-dark-theme`, `21-light-theme` | `openidea/<id>.png` | none | **Not run.** |
+
+`python3 tests/visual/validate-manifest.py` enforces the contract: contiguous
+ids, real PNGs matching the declared geometry, no duplicated images, no image
+behind a pending status, and matching OpenIDEA commits in the manifest and the
+environment record.
 
 The installed OpenIDEA 0.1.54 is real and signed, but it does not embed its
 source SHA. The definitive reference must be rebuilt from `fe3e647` or a build
@@ -121,15 +133,16 @@ tokens only; it is not a runtime dependency.
 
 ## Immediate next changes (in order)
 
-1. Replace `experiments/zed-poc/crates/workbench/src/theme.rs` with
-   `rustidea-design::Semantics`; install `EditorTheme` into Zed instead of
-   Zed's default family.
+1. Install `rustidea_design::EditorTheme` into Zed's `theme_settings` instead
+   of Zed's default family. The GPUI adapter (`theme.rs`) already derives all
+   colours from `Semantics`; the editor scheme is the remaining seam.
 2. Add the renderer modules `workbench/{title_bar,status_bar,tool_windows,editor_area}.rs`,
    `ui/{tabs,tree,button,input,menu,dialog,popup,tooltip,icons,file_presentation}.rs`.
 3. Make `app.rs` consume `Contributions`/`LayoutState`; build only visible
    tool-window entities and drop the `SidebarMode` enum.
 4. Vendor the expui/OpenIDEA SVGs with their licenses and add the custom
    `AssetSource`; remove every text abbreviation from the stripe.
-5. Capture the same 20 scenarios in both apps, then turn the visual job into a
-   required CI gate.
+5. Capture the same scenarios in both apps (19 of 21 reference frames exist;
+   `19-save-conflict` is blocked on an unlocked display), then turn the visual
+   job into a required CI gate.
 
