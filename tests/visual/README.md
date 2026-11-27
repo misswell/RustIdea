@@ -75,6 +75,18 @@ Gotchas learned on OpenIDEA 0.1.54:
   stale or corrupted, quit the app, restore the file from git, and reopen the
   project rather than fighting the buffer.
 
+## Validation
+
+```bash
+python3 tests/visual/validate-manifest.py
+```
+
+Checks the contract without a GUI: unique and contiguous ids, real PNGs whose
+pixels match the declared geometry, no two scenarios sharing an image (a copy is
+not a capture), no shipped image behind a `pending-capture` status, and matching
+OpenIDEA commits in `manifest.json` / `environment.json`. CI runs it on hosted
+runners for every change under `tests/visual-baselines/`.
+
 ## Comparison
 
 ```bash

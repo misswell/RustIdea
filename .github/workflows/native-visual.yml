@@ -1,8 +1,13 @@
 name: Native Visual Parity
 
-# This job needs a signed-in macOS GUI session with the pinned OpenIDEA app and
-# the native RustIdea build installed. It is intentionally not run on hosted
-# runners: a headless runner cannot provide the real windows the gate requires.
+# Two jobs:
+#   manifest - cheap contract check (runs anywhere): every captured scenario
+#              points at a real PNG with the declared geometry, no two captures
+#              are the same image, pending scenarios ship no placeholder.
+#   real-app-screenshots - needs a signed-in macOS GUI session with the pinned
+#              OpenIDEA app and the native RustIdea build installed. It is
+#              intentionally not run on hosted runners: a headless runner cannot
+#              provide the real windows the gate requires.
 on:
   workflow_dispatch:
   push:
@@ -12,13 +17,26 @@ on:
       - "tests/visual-baselines/**"
       - "crates/rustidea-design/**"
       - "experiments/zed-poc/crates/workbench/**"
+  pull_request:
+    paths:
+      - "tests/visual/**"
+      - "tests/visual-baselines/**"
 
 permissions:
   contents: read
 
 jobs:
+  manifest:
+    name: Baseline manifest contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate scenarios, files and geometry
+        run: python3 tests/visual/validate-manifest.py
+
   real-app-screenshots:
     name: Real OpenIDEA vs real RustIdea
+    needs: manifest
     runs-on: [self-hosted, macOS, rustidea-visual]
     timeout-minutes: 60
     steps:
