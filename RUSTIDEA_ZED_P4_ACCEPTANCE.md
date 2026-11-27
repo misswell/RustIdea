@@ -40,6 +40,7 @@ screenshots and visual menu acceptance remain unverified.
 | LSP hover | pass at backend level | `WORKBENCH_LSP hover_chars=265` |
 | LSP go to definition | pass at backend level | `definitions=1` at `IpUtils.java` line 19, column 15 |
 | LSP rename | pass at backend level | `WORKBENCH_LSP_RENAME ... status=ok`; all 15 `ipAddress` occurrences became `clientIp` in the detached copy |
+| Multi-file rename through the UI command path | pass | `WORKBENCH_RENAME_READY references=2 min=2`; `WORKBENCH_RENAME files=2 paths=2 new_name=getClientIp status=ok`; two tabs were open, both on-disk files changed and both Zed buffers contained the new name (`text_expect_docs=2`) |
 | Multiple tabs | pass | Second Java file opened with `tabs=2`; final `WORKBENCH_TABS count=2` |
 | Split | pass at entity level | `editors=2` after `RUSTIDEA_ZED_SMOKE_SPLIT=1`; visual split layout remains unverified |
 | Terminal | pass | Real zsh PTY spawned, printed `WORKBENCH_TERMINAL_OK`, and its final text contained `WORKBENCH_MAVEN_TEST_OK` |
@@ -83,6 +84,14 @@ The acceptance knobs added to the workbench are:
   reporting `WORKBENCH_SAVE_AS ok` after the OpenIDEA document is re-keyed.
 - `RUSTIDEA_ZED_SMOKE_LSP_POS` / `RUSTIDEA_ZED_SMOKE_LSP_RENAME`: request
   hover, definition and rename at a document position.
+- `RUSTIDEA_ZED_SMOKE_RENAME` / `..._POS` / `..._MIN_REFS`: run the workbench
+  rename command path and wait until at least the requested number of
+  references is visible before applying it.
+- `RUSTIDEA_ZED_SMOKE_EXPECT_TEXT`: report whether the active Zed buffer
+  contains a string after a workspace edit, and how many open Zed buffers
+  contain it.
+- `RUSTIDEA_ZED_SMOKE_ACTIVE_TAB`: select a tab by index before the next
+  scripted action.
 - `RUSTIDEA_ZED_SMOKE_SECOND_FILE`: open a second document and report the tab
   count.
 - `RUSTIDEA_ZED_SMOKE_TERMINAL_COMMAND`: run a command in the real PTY instead
@@ -97,5 +106,7 @@ The acceptance knobs added to the workbench are:
 - Verify a clean external-change reload, not only the conflict banner.
 - Run the full Maven test suite or the project's approved subset; only one
   standalone test class was executed during this acceptance.
+- Verify class or package renames that move files; the current multi-file
+  rename evidence edits existing files across modules.
 - Close the remaining parity items in `RUSTIDEA_FEATURE_PARITY.md`, including
   plugin live UI, structured settings/run editors and the other listed gaps.

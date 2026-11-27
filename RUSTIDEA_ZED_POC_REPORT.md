@@ -31,8 +31,9 @@ The POC binary is `rustidea-zed-poc`. It builds and runs with:
 - `OpenIdeaSemanticsProvider`, installed with
   `Editor::set_semantics_provider`, which maps `ide_host::ops::lsp::lsp_hover`
   results into Zed's hover blocks and same-file `lsp_goto` results into Zed
-  `LocationLink`s. Rename uses OpenIdea `lsp_prepare_rename` plus
-  `lsp_rename`/`apply_workspace_edit`; document highlights use
+  `LocationLink`s. F2 opens a native rename dialog, and the command uses
+  OpenIdea `lsp_prepare_rename` plus `lsp_rename`/`apply_workspace_edit`, so
+  edits can span several open or closed files; document highlights use
   `lsp_document_highlights`. Inlay-hint mapping now calls
   `lsp_inlay_hints`; semantic tokens remain an explicit empty stub.
 - An OpenIdea event pump that converts `IdeEvent::Diagnostics` into a Zed
@@ -192,8 +193,9 @@ renamed.
 
 `perform_rename` returns an empty Zed `ProjectTransaction`; the actual edits
 come back through OpenIdea `DocPatched` events and are applied to the Zed buffer
-by the bridge. Multi-file rename therefore depends on the final DocumentStore
-keeping every affected file open/synchronized.
+by the bridge. A real JDT.LS rename verified that two files were edited, both
+open Zed buffers received their patches (`text_expect_docs=2`) and no extra tab
+was created; see `RUSTIDEA_ZED_P4_ACCEPTANCE.md`.
 
 Diagnostics bridge test with an intentional TypeScript type error:
 

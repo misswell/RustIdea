@@ -41,6 +41,7 @@ actions!(
     [
         SaveDocument,
         SaveDocumentAs,
+        RenameSymbol,
         CloseTab,
         ToggleSplit,
         ToggleQuickOpen,
@@ -149,6 +150,7 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("cmd-s", SaveDocument, Some("Editor")),
                 KeyBinding::new("cmd-shift-s", SaveDocumentAs, None),
+                KeyBinding::new("f2", RenameSymbol, Some("Editor")),
                 KeyBinding::new("cmd-w", CloseTab, None),
                 KeyBinding::new("cmd-\\", ToggleSplit, None),
                 KeyBinding::new("cmd-p", ToggleQuickOpen, None),
@@ -292,6 +294,9 @@ fn main() {
                 let smoke_split = std::env::var_os("RUSTIDEA_ZED_SMOKE_SPLIT").is_some();
                 let smoke_second_file =
                     std::env::var("RUSTIDEA_ZED_SMOKE_SECOND_FILE").ok();
+                let smoke_active_tab = std::env::var("RUSTIDEA_ZED_SMOKE_ACTIVE_TAB")
+                    .ok()
+                    .and_then(|index| index.parse::<usize>().ok());
                 let smoke_no_marker =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_NO_MARKER").is_some();
                 let smoke_run = std::env::var_os("RUSTIDEA_ZED_SMOKE_RUN").is_some();
@@ -435,6 +440,19 @@ fn main() {
                 let smoke_external_conflict =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_EXTERNAL_CONFLICT").is_some();
                 let smoke_save_as = std::env::var("RUSTIDEA_ZED_SMOKE_SAVE_AS").ok();
+                let smoke_rename = std::env::var("RUSTIDEA_ZED_SMOKE_RENAME").ok();
+                let smoke_rename_pos =
+                    std::env::var("RUSTIDEA_ZED_SMOKE_RENAME_POS")
+                        .ok()
+                        .and_then(|position| {
+                            let (line, column) = position.split_once(':')?;
+                            Some((line.parse().ok()?, column.parse().ok()?))
+                        });
+                let smoke_rename_min_refs = std::env::var("RUSTIDEA_ZED_SMOKE_RENAME_MIN_REFS")
+                    .ok()
+                    .and_then(|count| count.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let smoke_expect_text = std::env::var("RUSTIDEA_ZED_SMOKE_EXPECT_TEXT").ok();
                 let smoke_color_preview =
                     std::env::var_os("RUSTIDEA_ZED_SMOKE_COLOR_PREVIEW").is_some();
                 let smoke_analysis =
@@ -470,6 +488,9 @@ fn main() {
                                 }
                                 if let Some(path) = &smoke_second_file {
                                     app.smoke_open_path(PathBuf::from(path), cx);
+                                }
+                                if let Some(index) = smoke_active_tab {
+                                    app.smoke_activate_tab(index, cx);
                                 }
                                 if smoke_run {
                                     app.smoke_start_run(cx);
@@ -669,6 +690,17 @@ fn main() {
                                 if let Some(path) = &smoke_save_as {
                                     app.smoke_save_as(path.clone(), cx);
                                 }
+                                if let (Some(new_name), Some((line, column))) =
+                                    (&smoke_rename, smoke_rename_pos)
+                                {
+                                    app.smoke_rename_symbol(
+                                        line,
+                                        column,
+                                        new_name.clone(),
+                                        smoke_rename_min_refs,
+                                        cx,
+                                    );
+                                }
                                 if smoke_color_preview {
                                     app.smoke_color_preview(window, cx);
                                 }
@@ -837,7 +869,7 @@ fn main() {
                                 .await;
                             this.update(cx, |app, cx| {
                                 eprintln!(
-    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} run_configs={} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} coverage_badges={} coverage_gutter={} coverage_run_busy={} bookmarks={} bookmark_status={} bookmark_first={:?} bookmark_gutter={} color_preview={} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} docker_logs={} docker_logs_status={} github_prs={} github_status={} github_first={:?} github_detail={} github_comments={} github_timeline={} github_review={} github_diff_files={} github_diff_lines={} github_diff_status={} github_inline={} github_detail_status={} heap_classes={} heap_object_rows={} heap_objects_status={} heap_object_first={:?} heap_status={} heap_first={:?} heap_compare={} heap_compare_status={} profile_methods={} profile_tree={} profile_status={} profile_first={:?} logcat_lines={} logcat_matches={} logcat_export={:?} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} duplicate_groups={} duplicate_status={} duplicate_first={:?} structural_matches={} structural_status={} structural_apply={} structural_first={:?} inspect_problems={} inspect_status={} inspect_first={:?} active_path={} status={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http_editor={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_outputs={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} settings_keymap_overrides={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?}",
+    "WORKBENCH_SMOKE status={} language={} editors={} run_status={} run_output={:?} run_configs={} search_status={} search_files={} todo={} todo_status={} todo_first={:?} dep_modules={} dep_libraries={} dep_status={} dep_first_module={:?} dep_first_library={:?} coverage_files={} coverage_status={} coverage_first={:?} coverage_badges={} coverage_gutter={} coverage_run_busy={} bookmarks={} bookmark_status={} bookmark_first={:?} bookmark_gutter={} color_preview={} git_branch={} git_files={} git_log={} git_log_status={} git_log_first={:?} docker_containers={} docker_images={} docker_status={} docker_first={:?} docker_logs={} docker_logs_status={} github_prs={} github_status={} github_first={:?} github_detail={} github_comments={} github_timeline={} github_review={} github_diff_files={} github_diff_lines={} github_diff_status={} github_inline={} github_detail_status={} heap_classes={} heap_object_rows={} heap_objects_status={} heap_object_first={:?} heap_status={} heap_first={:?} heap_compare={} heap_compare_status={} profile_methods={} profile_tree={} profile_status={} profile_first={:?} logcat_lines={} logcat_matches={} logcat_export={:?} logcat_status={} logcat_first={:?} scratch_files={} scratch_status={} scratch_first={:?} recent_files={} recent_status={} recent_first={:?} duplicate_groups={} duplicate_status={} duplicate_first={:?} structural_matches={} structural_status={} structural_apply={} structural_first={:?} inspect_problems={} inspect_status={} inspect_first={:?} active_path={} status={} terminal_status={} terminal={:?} outline_status={} outline_items={} problems={} http_status={} http_editor={} http={:?} db_status={} remote_status={} notebook_cells={} notebook_outputs={} notebook_first={:?} agents={} agent_tasks={} mcp={} tools={} plugins={} market={} market_status={} preview_status={} quick_open={} quick_open_status={} commands={} command_first={:?} sidebar={} symbols={} symbol_first={:?} references={} references_status={} settings_rows={} settings_keymap_overrides={} show_whitespace={} font_family={:?} debug_attachables={} debug_status={} breakpoints={} build_status={} build={:?} text_prefix={:?} text_expect={} text_expect_ok={} text_expect_docs={}",
                                     app.smoke_status(),
                                     app.smoke_has_language(cx),
                                     app.smoke_editor_count(),
@@ -971,7 +1003,14 @@ fn main() {
                                     app.breakpoint_count(),
                                     app.build_status(),
                                     app.build_output().lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default(),
-                                    app.smoke_active_text(cx).lines().next().unwrap_or_default()
+                                    app.smoke_active_text(cx).lines().next().unwrap_or_default(),
+                                    smoke_expect_text.as_deref().unwrap_or(""),
+                                    smoke_expect_text
+                                        .as_deref()
+                                        .is_none_or(|needle| app.smoke_active_text(cx).contains(needle)),
+                                    smoke_expect_text
+                                        .as_deref()
+                                        .map_or(0, |needle| app.smoke_documents_containing(needle, cx))
                                 );
                                 eprintln!(
                                     "WORKBENCH_DB_UI sources={} schemas={} tables={} consoles={} consoles_status={:?} history={} history_status={:?} status={:?} console={:?} output={:?}",

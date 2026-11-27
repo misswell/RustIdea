@@ -272,6 +272,7 @@ enum LogcatEvent {
 enum Command {
     Save,
     SaveAs,
+    RenameSymbol,
     CloseTab,
     ToggleSplit,
     QuickOpen,
@@ -324,9 +325,10 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 51] = [
+    const ALL: [Command; 52] = [
         Command::Save,
         Command::SaveAs,
+        Command::RenameSymbol,
         Command::CloseTab,
         Command::ToggleSplit,
         Command::QuickOpen,
@@ -381,7 +383,8 @@ impl Command {
     fn label(self) -> &'static str {
         match self {
             Command::Save => "Save file",
-            Command::SaveAs => "Save a copy…",
+            Command::SaveAs => "Save As…",
+            Command::RenameSymbol => "Rename symbol at cursor",
             Command::CloseTab => "Close tab",
             Command::ToggleSplit => "Toggle split editor",
             Command::QuickOpen => "Quick open file",
@@ -833,6 +836,11 @@ pub struct Workbench {
     save_as: bool,
     save_as_input: Entity<TextInput>,
     _save_as_subscription: Subscription,
+    rename_open: bool,
+    rename_input: Entity<TextInput>,
+    _rename_subscription: Subscription,
+    rename_target: Option<(DocId, u32, u32)>,
+    rename_in_flight: bool,
     diagnostics: HashMap<PathBuf, usize>,
     window_handle: Option<gpui::WindowHandle<Workbench>>,
     run_configs: Vec<ide_run::RunConfig>,
@@ -1235,6 +1243,25 @@ impl Workbench {
             TextInputEvent::Submit(_) => app.perform_save_as(cx),
             TextInputEvent::Cancel => {
                 app.save_as = false;
+                cx.notify();
+            }
+            _ => {}
+        });
+        let rename_input = cx.new(|cx| {
+            TextInput::new(
+                "New symbol name…",
+                theme.text,
+                theme.faint,
+                theme.selection,
+                theme.cursor,
+                cx,
+            )
+        });
+        let rename_subscription = cx.subscribe(&rename_input, |app, _, event, cx| match event {
+            TextInputEvent::Submit(name) => app.perform_rename(name.clone(), cx),
+            TextInputEvent::Cancel => {
+                app.rename_open = false;
+                app.rename_target = None;
                 cx.notify();
             }
             _ => {}
@@ -1835,6 +1862,11 @@ impl Workbench {
             save_as: false,
             save_as_input,
             _save_as_subscription: save_as_subscription,
+            rename_open: false,
+            rename_input,
+            _rename_subscription: rename_subscription,
+            rename_target: None,
+            rename_in_flight: false,
             diagnostics: HashMap::default(),
             window_handle,
             run_configs,
@@ -6016,6 +6048,7 @@ impl Workbench {
                 }
             }
             Command::SaveAs => self.open_save_as(window, cx),
+            Command::RenameSymbol => self.open_rename_symbol(window, cx),
             Command::CloseTab => {
                 if let Some(doc) = self.active {
                     self.close_tab(doc, cx);
@@ -6631,6 +6664,89 @@ impl Workbench {
         cx.notify();
     }
 
+    fn open_rename_symbol(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename_in_flight {
+            self.status = "A rename is already running".into();
+            cx.notify();
+            return;
+        }
+        let Some(doc) = self.active else {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let Some(document) = self.documents.get(&doc) else {
+            return;
+        };
+        let Some(editor) = self.editors.get(&(doc, false)).cloned() else {
+            self.status = "The active file has no editor".into();
+            cx.notify();
+            return;
+        };
+        let point = editor.update(cx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            editor.selections.newest_adjusted(&snapshot).head()
+        });
+        let line = point.row;
+        let column = point.column;
+        let lsp = Arc::new(DocumentLsp::new(
+            self.host.clone(),
+            doc,
+            document.path.clone(),
+        ));
+        self.rename_target = None;
+        self.rename_input
+            .update(cx, |input, cx| input.set_content("", cx));
+        self.rename_open = true;
+        self.status = "Preparing rename…".into();
+        let focus = self.rename_input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.spawn(async move |this, cx| {
+            let result = lsp.prepare_rename(line, column).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    match result {
+                        Ok(Some(range)) => {
+                            let old_name = app
+                                .documents
+                                .get(&doc)
+                                .map(|document| {
+                                    let snapshot = document.buffer.read(cx).snapshot();
+                                    let start = snapshot.point_utf16_to_offset(
+                                        text::PointUtf16::new(range.start.line, range.start.col),
+                                    );
+                                    let end = snapshot.point_utf16_to_offset(
+                                        text::PointUtf16::new(range.end.line, range.end.col),
+                                    );
+                                    snapshot.text_for_range(start..end).collect::<String>()
+                                })
+                                .unwrap_or_default();
+                            app.rename_target = Some((doc, line, column));
+                            app.rename_input.update(cx, |input, cx| {
+                                input.set_content(old_name.clone(), cx);
+                            });
+                            app.status = format!("Rename {old_name}…").into();
+                        }
+                        Ok(None) => {
+                            app.rename_open = false;
+                            app.status = "This position cannot be renamed".into();
+                        }
+                        Err(error) => {
+                            app.rename_open = false;
+                            app.status = format!("Prepare rename failed: {}", error.message).into();
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn perform_save_as(&mut self, cx: &mut Context<Self>) {
         if !self.save_as {
             return;
@@ -6665,6 +6781,74 @@ impl Workbench {
             return;
         }
         self.save_as_to_path(doc, path, cx);
+        cx.notify();
+    }
+
+    fn perform_rename(&mut self, new_name: String, cx: &mut Context<Self>) {
+        if self.rename_in_flight {
+            return;
+        }
+        let new_name = new_name.trim().to_owned();
+        if new_name.is_empty() {
+            self.status = "Enter a new symbol name".into();
+            cx.notify();
+            return;
+        }
+        let Some((doc, line, column)) = self.rename_target.take() else {
+            self.status = "Rename is still preparing".into();
+            cx.notify();
+            return;
+        };
+        let Some(document) = self.documents.get(&doc) else {
+            self.status = "The renamed document is no longer open".into();
+            cx.notify();
+            return;
+        };
+        let lsp = Arc::new(DocumentLsp::new(
+            self.host.clone(),
+            doc,
+            document.path.clone(),
+        ));
+        self.rename_open = false;
+        self.rename_in_flight = true;
+        self.status = format!("Renaming to {new_name}…").into();
+        cx.spawn(async move |this, cx| {
+            let result = lsp.rename(line, column, new_name.clone()).await;
+            let handle = this
+                .update(cx, |app, cx| {
+                    app.rename_in_flight = false;
+                    match result {
+                        Ok(outcome) => {
+                            for document in app.documents.values_mut() {
+                                if outcome.paths.iter().any(|path| {
+                                    document.path == *path || document.path.starts_with(path)
+                                }) {
+                                    document.refresh_disk_stamp();
+                                }
+                            }
+                            app.status =
+                                format!("Renamed to {new_name} in {} file(s)", outcome.files)
+                                    .into();
+                            eprintln!(
+                                "WORKBENCH_RENAME files={} paths={} new_name={} status=ok",
+                                outcome.files,
+                                outcome.paths.len(),
+                                new_name
+                            );
+                        }
+                        Err(error) => {
+                            app.status = format!("Rename failed: {}", error.message).into();
+                            eprintln!("WORKBENCH_RENAME status=error message={}", error.message);
+                        }
+                    }
+                    cx.notify();
+                    app.window_handle
+                })
+                .ok()
+                .flatten();
+            refresh_window(handle, cx);
+        })
+        .detach();
         cx.notify();
     }
 
@@ -9297,8 +9481,12 @@ impl Workbench {
                     Ok(range) => {
                         let result = lsp.rename(line, column, new_name).await;
                         match result {
-                            Ok(()) => {
-                                eprintln!("WORKBENCH_LSP_RENAME range={range:?} status=ok");
+                            Ok(outcome) => {
+                                eprintln!(
+                                    "WORKBENCH_LSP_RENAME range={range:?} files={} paths={} status=ok",
+                                    outcome.files,
+                                    outcome.paths.len()
+                                );
                             }
                             Err(error) => {
                                 eprintln!(
@@ -9325,6 +9513,13 @@ impl Workbench {
             .and_then(|doc| self.documents.get(&doc))
             .map(|document| document.text(cx))
             .unwrap_or_default()
+    }
+
+    pub fn smoke_documents_containing(&self, needle: &str, cx: &gpui::App) -> usize {
+        self.documents
+            .values()
+            .filter(|document| document.text(cx).contains(needle))
+            .count()
     }
 
     pub fn smoke_status(&self) -> String {
@@ -10851,6 +11046,88 @@ impl Workbench {
         self.perform_save_as(cx);
     }
 
+    pub fn smoke_rename_symbol(
+        &mut self,
+        line: u32,
+        column: u32,
+        new_name: String,
+        min_references: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.active else {
+            self.status = "Open a file first".into();
+            cx.notify();
+            return;
+        };
+        let Some(document) = self.documents.get(&doc) else {
+            return;
+        };
+        let lsp = Arc::new(DocumentLsp::new(
+            self.host.clone(),
+            doc,
+            document.path.clone(),
+        ));
+        let host = self.host.clone();
+        self.status = "Waiting for the language server…".into();
+        cx.spawn(async move |this, cx| {
+            let mut last_error = None;
+            let mut ready = false;
+            let mut references = 0;
+            for attempt in 0..40 {
+                let prepare = lsp.prepare_rename(line, column).await;
+                match prepare {
+                    Ok(Some(_)) => {
+                        references = host
+                            .lsp_references(doc, ide_core::Pos::new(line, column))
+                            .await
+                            .map(|locations| locations.len())
+                            .unwrap_or(0);
+                        if references >= min_references {
+                            ready = true;
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => last_error = Some(error.message),
+                }
+                if attempt < 39 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(500))
+                        .await;
+                }
+            }
+            this.update(cx, |app, cx| {
+                if ready {
+                    eprintln!(
+                        "WORKBENCH_RENAME_READY references={references} min={min_references}"
+                    );
+                    app.rename_target = Some((doc, line, column));
+                    app.perform_rename(new_name, cx);
+                } else {
+                    let message = last_error
+                        .as_deref()
+                        .unwrap_or("the server never offered a rename range");
+                    app.status = format!("Prepare rename failed: {message}").into();
+                    eprintln!("WORKBENCH_RENAME status=error message={message}");
+                    cx.notify();
+                }
+                app.window_handle
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn smoke_activate_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(doc) = self.order.get(index).copied() else {
+            self.status = format!("No tab at index {index}").into();
+            cx.notify();
+            return;
+        };
+        self.activate(doc, cx);
+    }
+
     pub fn active_path(&self) -> String {
         self.active
             .and_then(|doc| self.documents.get(&doc))
@@ -10978,6 +11255,21 @@ impl Workbench {
                     && let Err(error) = document.apply_backend_patch(version, &changes, cx)
                 {
                     self.status = format!("Document patch failed: {error:#}").into();
+                }
+            }
+            IdeEvent::WorkspaceEditApplied { paths, .. } => {
+                let changed: Vec<PathBuf> = paths.into_iter().map(|path| path.0).collect();
+                for document in self.documents.values_mut() {
+                    if changed
+                        .iter()
+                        .any(|path| document.path == *path || document.path.starts_with(path))
+                    {
+                        document.refresh_disk_stamp();
+                    }
+                }
+                let reload = self.tree.note_external_changes(&changed, &[]);
+                for directory in reload {
+                    self.load_directory(directory, cx);
                 }
             }
             IdeEvent::Diagnostics {
@@ -11343,7 +11635,7 @@ impl Workbench {
                     .text_color(theme.text)
                     .border_b_1()
                     .border_color(theme.border)
-                    .child("Save a copy"),
+                    .child("Save As"),
             )
             .child(
                 div()
@@ -11398,6 +11690,93 @@ impl Workbench {
                             .text_size(px(9.))
                             .text_color(theme.faint)
                             .child("Enter saves · Esc cancels"),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_rename(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if !self.rename_open {
+            return div().into_any_element();
+        }
+        let theme = self.theme;
+        div()
+            .absolute()
+            .top(px(130.))
+            .left(px(360.))
+            .w(px(440.))
+            .flex()
+            .flex_col()
+            .bg(theme.panel)
+            .border_1()
+            .border_color(theme.accent)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(11.))
+                    .text_color(theme.text)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child("Rename symbol"),
+            )
+            .child(
+                div()
+                    .h(px(34.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.rename_input.clone()),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("rename-confirm")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.text)
+                            .bg(theme.accent_muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                let name = this.rename_input.read(cx).content().to_owned();
+                                this.perform_rename(name, cx);
+                            }))
+                            .child("Rename"),
+                    )
+                    .child(
+                        div()
+                            .id("rename-cancel")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_size(px(10.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.rename_open = false;
+                                this.rename_target = None;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme.faint)
+                            .child("Enter renames · Esc cancels"),
                     ),
             )
             .into_any_element()
@@ -20234,6 +20613,7 @@ impl Render for Workbench {
         let run_panel = self.render_bottom_panel(window, cx);
         let quick_open = self.render_quick_open(cx);
         let save_as = self.render_save_as(cx);
+        let rename = self.render_rename(cx);
         let command_palette = self.render_command_palette(cx);
         let symbol_search = self.render_symbol_search(cx);
         let references = self.render_references(cx);
@@ -20256,6 +20636,9 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &crate::SaveDocumentAs, window, cx| {
                 this.open_save_as(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::RenameSymbol, window, cx| {
+                this.open_rename_symbol(window, cx);
             }))
             .on_action(cx.listener(|this, _: &crate::CloseTab, _, cx| {
                 if let Some(doc) = this.active {
@@ -20425,6 +20808,7 @@ impl Render for Workbench {
             )
             .child(quick_open)
             .child(save_as)
+            .child(rename)
             .child(command_palette)
             .child(symbol_search)
             .child(references)

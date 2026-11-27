@@ -15,6 +15,11 @@ pub struct DocumentLsp {
     pub path: PathBuf,
 }
 
+pub struct RenameOutcome {
+    pub files: usize,
+    pub paths: Vec<PathBuf>,
+}
+
 impl DocumentLsp {
     pub fn new(host: Arc<NativeHost>, doc: DocId, path: PathBuf) -> Self {
         Self { host, doc, path }
@@ -144,7 +149,12 @@ impl DocumentLsp {
             .await
     }
 
-    pub async fn rename(&self, line: u32, column: u32, new_name: String) -> IdeResult<()> {
+    pub async fn rename(
+        &self,
+        line: u32,
+        column: u32,
+        new_name: String,
+    ) -> IdeResult<RenameOutcome> {
         let doc = self.doc;
         self.host
             .run(move |backend| async move {
@@ -157,7 +167,26 @@ impl DocumentLsp {
                     new_name,
                 )
                 .await?;
-                ide_host::ops::lsp::apply_workspace_edit(&backend, MAIN_WINDOW, renamed.edit).await
+                let files = renamed.edit.files.len();
+                let mut paths = Vec::new();
+                for file in &renamed.edit.files {
+                    match file {
+                        ide_core::FileEdit::Edit { path, .. }
+                        | ide_core::FileEdit::Create { path, .. }
+                        | ide_core::FileEdit::Delete { path, .. } => {
+                            paths.push(path.0.clone());
+                        }
+                        ide_core::FileEdit::Rename { from, to } => {
+                            paths.push(from.0.clone());
+                            paths.push(to.0.clone());
+                        }
+                    }
+                }
+                paths.sort();
+                paths.dedup();
+                ide_host::ops::lsp::apply_workspace_edit(&backend, MAIN_WINDOW, renamed.edit)
+                    .await?;
+                Ok(RenameOutcome { files, paths })
             })
             .await
     }
