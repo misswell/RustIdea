@@ -222,8 +222,14 @@ mod tests {
         let link = root.path().join("link");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        #[cfg(not(unix))]
-        fs::copy(&real, &link).unwrap();
+        #[cfg(windows)]
+        match std::os::windows::fs::symlink_file(&real, &link) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(1314) => return,
+            Err(e) => panic!("could not create a file symlink: {e}"),
+        }
+        #[cfg(not(any(unix, windows)))]
+        return;
 
         assert_eq!(
             DocumentKey::for_path(&real),
