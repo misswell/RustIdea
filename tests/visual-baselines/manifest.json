@@ -1,0 +1,220 @@
+{
+  "schema": 1,
+  "status": "establishing",
+  "reference": {
+    "application": "OpenIDEA",
+    "source_commit": "fe3e647abb804cffbfff6bd8de42e01762d6de40",
+    "version": "0.1.54",
+    "theme": "light",
+    "density": "regular",
+    "window": "1600x900",
+    "project": "/Users/guofeng/Code/cscec3b/tg-tenant-fork",
+    "project_branch": "feature/cwh/cmp",
+    "capture_tool": "tests/visual/capture-window.sh (CGWindowListCreateImage, window id)",
+    "capture_display": "built-in Retina, logical 1800x1169, window at 263,69"
+  },
+  "scenarios": [
+    {
+      "id": "01-welcome",
+      "title": "Welcome",
+      "state": "Project closed; Welcome window with brand, Projects/Customize/Plugins rail, recent projects list",
+      "status": "captured-reference",
+      "openidea": "openidea/01-welcome.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Window title becomes 'Welcome to OpenIDEA'. Reached via Search Everywhere > Close Project, then 'Don't Save'."
+    },
+    {
+      "id": "02-project-main",
+      "title": "Project main",
+      "state": "tg-tenant-fork open; Project tree at project root, four editor tabs, Maven tool window, Terminal",
+      "status": "captured-reference",
+      "openidea": "openidea/02-project-main.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Default restored layout: Project left, Maven right, Terminal bottom, editor centre."
+    },
+    {
+      "id": "03-project-tree",
+      "title": "Project Tree",
+      "state": "Project tool window expanded to src/main/java/.../permrelation/role/controller; RoleDirController.java selected",
+      "status": "captured-reference",
+      "openidea": "openidea/03-project-tree.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Produced with Select In > Project View (Opt+F1, 1) on the open file."
+    },
+    {
+      "id": "04-java-editor",
+      "title": "Java editor",
+      "state": "RoleDirController.java at top of file: package line, folded import block, annotations, class declaration; caret on roleDirService field",
+      "status": "captured-reference",
+      "openidea": "openidea/04-java-editor.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Editor bottom breadcrumb shows 'RoleDirController roleDirService'."
+    },
+    {
+      "id": "05-tabs",
+      "title": "Multiple tabs",
+      "state": "CmpScopeControllerTest.java, CmpScopeController.java, bootstrap.yml, RoleDirController.java open as four tabs, last active",
+      "status": "captured-reference",
+      "openidea": "openidea/05-tabs.png",
+      "geometry": "1600x900",
+      "masks": []
+    },
+    {
+      "id": "06-split",
+      "title": "Split editor",
+      "state": "Two editors side by side: RoleDirController.java (left) and RoleController.java opened right via tree context menu 'Open in Right Split'",
+      "status": "captured-reference",
+      "openidea": "openidea/06-split.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Each pane has its own tab strip and bottom breadcrumb."
+    },
+    {
+      "id": "07-maven",
+      "title": "Maven tool window",
+      "state": "Maven tool window with tg-tenant module tree; Dependencies expanded showing org.springframework entries",
+      "status": "captured-reference",
+      "openidea": "openidea/07-maven.png",
+      "geometry": "1600x900",
+      "masks": []
+    },
+    {
+      "id": "08-run",
+      "title": "Run",
+      "state": "TgTenantApplication run configuration selected and running; Run tool window shows Spring/Dubbo startup log",
+      "status": "captured-reference",
+      "openidea": "openidea/08-run.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Toolbar run button shows stop state; status bar shows jdtls connected."
+    },
+    {
+      "id": "09-debug",
+      "title": "Debug",
+      "state": "Debug tool window: TgTenantApplication session, Threads & Variables / Console / Memory tabs, breakpoint marker on treeRoleDirSearch, 'Session finished'",
+      "status": "captured-reference",
+      "openidea": "openidea/09-debug.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Distinct from 08: debug toolbar, breakpoint, Threads & Variables tab."
+    },
+    {
+      "id": "10-terminal",
+      "title": "Terminal",
+      "state": "Local terminal at the project root (/Users/guofeng/Code/cscec3b/tg-tenant-fork)",
+      "status": "captured-reference",
+      "openidea": "openidea/10-terminal.png",
+      "geometry": "1600x900",
+      "masks": []
+    },
+    {
+      "id": "11-git-changes",
+      "title": "Git changes",
+      "state": "Commit tool window: Changes 1 file (bootstrap.yml), Amend checkbox, commit message box, Commit / Commit and Push buttons",
+      "status": "captured-reference",
+      "openidea": "openidea/11-git-changes.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Only pre-existing local modification in the comparison project at capture time."
+    },
+    {
+      "id": "12-git-diff",
+      "title": "Git diff",
+      "state": "Side-by-side diff editor for bootstrap.yml (HEAD vs working copy), '10 differences' summary, inline change bars",
+      "status": "captured-reference",
+      "openidea": "openidea/12-git-diff.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Opened by double-clicking the file in the Commit tool window."
+    },
+    {
+      "id": "13-search-everywhere",
+      "title": "Search Everywhere",
+      "state": "Double Shift overlay with query 'RoleDir', All/Classes/Files/Symbols/Actions/Text tabs, results with paths, 'Open In Right Split' footer",
+      "status": "captured-reference",
+      "openidea": "openidea/13-search-everywhere.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Double Shift posted as two real Shift key events (tests/visual/double-shift.swift)."
+    },
+    {
+      "id": "14-completion",
+      "title": "Completion",
+      "state": "Java completion popup after 'roleDirService.' listing RoleDirService members with return types and 'Press enter to insert, right arrow to replace'",
+      "status": "captured-reference",
+      "openidea": "openidea/14-completion.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Caret placed after an existing dot (no typing); Ctrl+Space opens the popup."
+    },
+    {
+      "id": "15-hover",
+      "title": "Hover",
+      "state": "Hover documentation popup on the roleDirService field: type signature 'RoleDirService roleDirService', doc text, 'Source: tg-tenant-server'",
+      "status": "captured-reference",
+      "openidea": "openidea/15-hover.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Appears after ~500 ms pointer dwell (codeEditing.quickDocDelay)."
+    },
+    {
+      "id": "16-rename",
+      "title": "Rename",
+      "state": "Rename dialog 'Rename treeRoleDirSearch' with New name field (treeRoleDirSearch selected) and Cancel / Rename buttons",
+      "status": "captured-reference",
+      "openidea": "openidea/16-rename.png",
+      "geometry": "1600x900",
+      "masks": []
+    },
+    {
+      "id": "17-settings",
+      "title": "Settings",
+      "state": "Settings window at Appearance & Behavior > Appearance: Theme Islands Light, Editor color scheme Theme default, accent colors, fonts, background image, accessibility",
+      "status": "captured-reference",
+      "openidea": "openidea/17-settings.png",
+      "geometry": "980x720",
+      "masks": [],
+      "notes": "Separate Settings window (not the main 1600x900 frame)."
+    },
+    {
+      "id": "18-context-menu",
+      "title": "Context menu",
+      "state": "Project tree file context menu on RoleDirController.java: New, Cut, Copy, Copy Path/Reference, Paste, Jump to Source, Find Usages, Find in Files, Replace in Files, Rename, Refactor, Delete, Reformat Code, Optimize Imports, Recompile, Build Module, Add Bookmark, Send to Agent, Override File Type, Open in Right Split",
+      "status": "captured-reference",
+      "openidea": "openidea/18-context-menu.png",
+      "geometry": "1600x900",
+      "masks": []
+    },
+    {
+      "id": "19-save-conflict",
+      "title": "Save conflict",
+      "state": "File changed on disk while the editor is dirty; 'changed on disk' dialog offers Load Changes from Disk / Keep Editor Changes",
+      "status": "pending-capture",
+      "masks": [],
+      "notes": "Previous file was a plain editor capture and was removed. Recapture requires the host display to be unlocked: the conflict toast only renders on screen, and window capture returns a blank surface while the Mac is locked."
+    },
+    {
+      "id": "20-dark-theme",
+      "title": "Dark theme",
+      "state": "Islands Dark applied to the same project: split editors, Project/Maven/Terminal, dark editor tokens",
+      "status": "captured-reference",
+      "openidea": "openidea/20-dark-theme.png",
+      "geometry": "1600x900",
+      "masks": [],
+      "notes": "Switched via Settings > Appearance > Theme, then OK."
+    },
+    {
+      "id": "21-light-theme",
+      "title": "Light theme",
+      "state": "Islands Light applied to the same layout as 20 (light is OpenIDEA's default)",
+      "status": "captured-reference",
+      "openidea": "openidea/21-light-theme.png",
+      "geometry": "1600x900",
+      "masks": []
+    }
+  ]
+}

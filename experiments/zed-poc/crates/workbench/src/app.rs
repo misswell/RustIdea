@@ -1187,7 +1187,7 @@ impl Workbench {
         let status = format!("{} · {}", project.name, root.display());
         let run_configs = host.run_configs().unwrap_or_default();
         let run_status = format!("{} run configurations", run_configs.len()).into();
-        let theme = Theme::for_mode(ThemeMode::Dark);
+        let theme = Theme::for_mode(ThemeMode::Light);
         let search_input = cx.new(|cx| {
             TextInput::new(
                 "Search project files…",

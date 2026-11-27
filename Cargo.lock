@@ -9234,6 +9234,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustidea-design"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rustidea-editor"
 version = "0.2.0"
 dependencies = [

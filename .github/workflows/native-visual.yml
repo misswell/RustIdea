@@ -1,0 +1,48 @@
+name: Native Visual Parity
+
+# This job needs a signed-in macOS GUI session with the pinned OpenIDEA app and
+# the native RustIdea build installed. It is intentionally not run on hosted
+# runners: a headless runner cannot provide the real windows the gate requires.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "tests/visual/**"
+      - "tests/visual-baselines/**"
+      - "crates/rustidea-design/**"
+      - "experiments/zed-poc/crates/workbench/**"
+
+permissions:
+  contents: read
+
+jobs:
+  real-app-screenshots:
+    name: Real OpenIDEA vs real RustIdea
+    runs-on: [self-hosted, macOS, rustidea-visual]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify the reference application is installed
+        run: |
+          test -d "/Applications/OpenIDEA.app" || {
+            echo "Install the pinned OpenIDEA build before running this gate." >&2
+            exit 1
+          }
+
+      - name: Build the native workbench
+        run: PROFILE=release scripts/build-native.sh
+
+      - name: Capture and compare the pinned scenarios
+        run: tests/visual/run-visual-regression.sh
+
+      - name: Upload visual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-visual-results
+          path: |
+            tests/visual-results/
+            tests/visual-baselines/environment.json
+          if-no-files-found: warn

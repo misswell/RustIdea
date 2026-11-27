@@ -11992,6 +11992,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustidea-design"
+version = "0.2.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "rustidea-zed-poc"
 version = "0.1.0"
 dependencies = [
@@ -12077,6 +12084,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "project",
  "release_channel",
+ "rustidea-design",
  "semver",
  "serde",
  "serde_json",

@@ -246,7 +246,7 @@ fn main() {
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         titlebar: Some(gpui::TitlebarOptions {
-                            title: Some("RustIdea Zed".into()),
+                            title: Some("RustIdea".into()),
                             ..Default::default()
                         }),
                         ..Default::default()

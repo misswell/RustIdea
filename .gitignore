@@ -12,3 +12,4 @@ dist/
 !crates/ide-plugin/tests/fixtures/*/dist/plugin.wasm.sources
 artifacts/
 test-results/
+/tests/visual-results/

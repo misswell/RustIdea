@@ -45,6 +45,7 @@ ide-vcs = { path = "../../../../crates/ide-vcs" }
 ide-tools = { path = "../../../../crates/ide-tools" }
 ide-vfs = { path = "../../../../crates/ide-vfs" }
 ide-workspace.workspace = true
+rustidea-design = { path = "../../../../crates/rustidea-design" }
 language.workspace = true
 languages = { path = "../../../../third_party/zed/crates/languages", features = ["load-grammars"] }
 lsp.workspace = true

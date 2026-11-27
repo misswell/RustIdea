@@ -9,8 +9,26 @@ permissions:
   contents: read
 
 jobs:
-  gpl-poc:
-    name: macOS Zed POC
+  design-system:
+    name: Design tokens and workbench model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install token converter dependency
+        run: pip install tinycss2
+      - name: Check generated tokens are current
+        run: python3 tools/openidea-tokens/generate.py --check
+      - name: Test the shared design system and layout model
+        run: cargo test --locked -p rustidea-design
+      - name: Check formatting
+        run: cargo fmt -p rustidea-design -- --check
+
+  native-workbench:
+    name: macOS Zed native workbench
     runs-on: macos-15
     timeout-minutes: 90
     env:
@@ -28,18 +46,18 @@ jobs:
       - name: Fetch pinned Zed and apply tree-sitter patch
         run: scripts/fetch-zed.sh
 
-      - name: Install POC Clippy component
+      - name: Install native workbench Clippy component
         working-directory: experiments/zed-poc
         run: rustup component add clippy
 
-      - name: Check POC workspace
+      - name: Check native workbench
         working-directory: experiments/zed-poc
         run: cargo check --locked -p rustidea-zed-workbench
 
-      - name: Run POC tests
+      - name: Run native workbench tests
         working-directory: experiments/zed-poc
         run: cargo test --locked -p rustidea-zed-workbench
 
-      - name: Run POC Clippy
+      - name: Run native workbench Clippy
         working-directory: experiments/zed-poc
         run: cargo clippy --locked -p rustidea-zed-workbench --all-targets -- -D warnings

@@ -9,57 +9,71 @@ CodeMirror, or Tauri.
 
 ## Status
 
-This repository is following the migration plan in the root `RUSTIDEA_*.md` files:
+The single official application is the **Zed Workbench**:
 
-- Phase 0: migration audit, feature inventory, architecture and license
-  inventory are documented; comparative performance measurements remain open.
-- Phase 1: standalone GPUI application shell, native menus, themes, workbench
-  panels, session persistence, logging and reused Rust services. OpenIDEA
-  operations run on the host Tokio runtime; UI events use a bounded coalescing
-  queue.
-- Phase 2: native editor with UTF-16 document buffers, undo/redo, selection,
-  clipboard, line numbers, virtualized scrolling, syntax highlighting,
-  diagnostics, save/autosave and IME marked-text handling. Document sync
-  coalesces local edits, rebases disjoint backend patches, preserves local
-  text on conflict, and verifies disk content with BLAKE3 before saves.
+- Zed's native `editor`/`Buffer`/`language` engine, not a re-written text editor;
+- the reusable OpenIDEA `ide-*` backend crates;
+- a GPUI workbench being migrated 1:1 from OpenIDEA's Islands design.
 
-This is not yet complete OpenIDEA parity. Native project search, in-file
-find-next/find-previous, VCS, terminal, run/build, database and HTTP panels are
-implemented at MVP depth. LSP completion, hover documentation, rename, code
-actions, go-to-definition and formatting are wired to the reused OpenIDEA
-language-server service. The Remote Host panel opens real SSH shells through the
-reused OpenIDEA SSH client. Multi-cursor/folding, full terminal emulation, real
-debugger sessions, plugins/MCP, agents, remote filesystem mounts, notebooks,
-viewers and several language tool windows remain incomplete or placeholders.
-See `RUSTIDEA_FEATURE_PARITY.md` for the item-by-item status.
+The legacy native app (`crates/rustidea`, `crates/rustidea-editor`) is a frozen
+historical regression baseline. It is no longer the release application and
+receives no new features. See `RUSTIDEA_NATIVE_APP.md` for the decision, the
+GPL/bundle-id approval gates and the user-data migration plan.
 
-The old OpenIDEA tree is a read-only migration reference, not a runtime
-dependency. Backend crates are vendored here as they are adopted.
+UI migration is tracked component by component in `RUSTIDEA_UI_PARITY.md`.
+Design tokens are generated from the pinned OpenIDEA `tokens.css` by
+`tools/openidea-tokens/generate.py`; the renderer does not keep a hand-tuned
+theme. Real reference screenshots live under `tests/visual-baselines/`.
 
-## Build
+This is not yet complete OpenIDEA parity. The current workbench still contains
+the experiment shell and must be replaced by the Islands workbench; the parity
+ledger records every unresolved gap rather than declaring success from a
+compile.
+
+## Build and run
+
+One-time fetch of the pinned Zed tree:
 
 ```sh
-cargo run -p rustidea
+scripts/fetch-zed.sh
 ```
 
-Create a signed and notarized macOS universal app:
+Run the official native app:
+
+```sh
+scripts/run-native.sh --trust /path/to/project
+```
+
+Release binary:
+
+```sh
+PROFILE=release scripts/build-native.sh
+```
+
+Create a signed and notarized macOS app (native binary only):
 
 ```sh
 scripts/release-macos.sh
 ```
 
+`scripts/release-macos.sh` produces `RustIdea Native Preview` until the
+maintainer approvals in `RUSTIDEA_NATIVE_APP.md` are recorded; setting
+`RUSTIDEA_STABLE_REPLACEMENT_APPROVED=1` switches it to `RustIdea.app`.
+The old packaging path remains only as `scripts/release-legacy-macos.sh`.
+
 ## Test
 
 ```sh
 cargo test --workspace
+cargo test -p rustidea-design
+python3 tools/openidea-tokens/generate.py --check
+(cd experiments/zed-poc && cargo test -p rustidea-zed-workbench)
 ```
 
-The targeted release-gate test set is:
+The native visual gate (real apps, never mock screenshots):
 
 ```sh
-cargo test -p rustidea -p rustidea-editor -p ide-text -p ide-workspace -p ide-host
-cargo clippy -p rustidea -p rustidea-editor -p ide-workspace -p ide-host \
-  --all-targets -- -D warnings
+tests/visual/run-visual-regression.sh
 ```
 
 Licensing details are in `THIRD_PARTY_LICENSES.md`,

@@ -1,0 +1,40 @@
+{
+  "captured_at": "2026-11-27T22:30:00+08:00",
+  "machine": {
+    "model": "MacBook Pro Mac17,2",
+    "chip": "Apple M5",
+    "memory": "24 GB",
+    "os": "macOS 27.2.1 (26B131)"
+  },
+  "display": {
+    "screenshot_pixels": "3840x2160 when unlocked",
+    "screenshot_scale": 2.0,
+    "logical_desktop_bounds": "1800x1169 (Finder desktop bounds)"
+  },
+  "openidea": {
+    "source_commit": "fe3e647abb804cffbfff6bd8de42e01762d6de40",
+    "source_version": "0.1.54",
+    "installed_build": "OpenIDEA 0.1.54 (/Applications/OpenIDEA.app; signed ai.l0ng.openidea). The signed build does not embed its source SHA; rebuild from the pinned commit before treating it as the final baseline.",
+    "theme": "Islands Light (default)",
+    "density": "regular",
+    "font": "Inter Variable 13 / JetBrains Mono 13",
+    "zoom": "100%",
+    "keymap": "IntelliJ (default)",
+    "project": "/Users/guofeng/Code/cscec3b/tg-tenant-fork",
+    "project_branch": "feature/cwh/cmp",
+    "project_working_tree": "Only the pre-existing local edit to tg-tenant-server/src/main/resources/bootstrap.yml was present while capturing; editor buffers that were dirtied for experiments were restored from git before the final captures.",
+    "window_logical": "1600x900 at (263,69) for scenarios 01-16, 18, 20-21; Settings window 980x720 for 17"
+  },
+  "rustidea": {
+    "binary": "experiments/zed-poc/target/debug/rustidea-zed-workbench",
+    "window_logical": "n/a for this set",
+    "theme": "Light (Semantics adapter installed)",
+    "note": "Native captures do not exist yet for any scenario; run-visual-regression.sh skips them and never substitutes mock images."
+  },
+  "capture_method": "CGWindowListCopyWindowInfo for bounds; screencapture -l <windowID>; normalize_window.py crops the 2x shadow and resizes to logical pixels (LANCZOS). Helper scripts and input gotchas live in tests/visual/README.md.",
+  "known_blockers": [
+    "19-save-conflict is not captured yet: the conflict toast only renders while the display is unlocked, and the GUI session locked before it could be captured. The previous file was not a conflict and was deleted.",
+    "The installed 0.1.54 app cannot be tied to a source SHA; the final baseline must be rebuilt from fe3e647 or the build metadata must be added.",
+    "No RustIdea native workbench screenshot at the same geometry/state exists yet."
+  ]
+}
