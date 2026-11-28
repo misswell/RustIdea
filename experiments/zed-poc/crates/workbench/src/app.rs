@@ -12047,10 +12047,26 @@ impl Workbench {
     fn render_project(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let nodes = self.tree.nodes();
+        if nodes.is_empty() {
+            let message = if let Some(error) = self.tree.error() {
+                format!("Project tree failed: {error}")
+            } else if self.tree.is_loading() {
+                "Loading project tree…".to_string()
+            } else {
+                "No files are visible in this project".to_string()
+            };
+            return div()
+                .size_full()
+                .p_3()
+                .text_size(px(11.))
+                .text_color(theme.faint)
+                .child(message)
+                .into_any_element();
+        }
         let coverage = self.coverage_lookup.clone();
         let row_count = nodes.len();
         let app = cx.entity();
-        uniform_list("project-tree", row_count, move |range, _window, _cx| {
+        let list = uniform_list("project-tree", row_count, move |range, _window, _cx| {
             let nodes = nodes.clone();
             let app = app.clone();
             let coverage = coverage.clone();
@@ -12128,6 +12144,8 @@ impl Workbench {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.tree_scroll)
+        .with_sizing_behavior(gpui::ListSizingBehavior::Infer);
+        div().size_full().child(list).into_any_element()
     }
 
     fn append_outline_rows(

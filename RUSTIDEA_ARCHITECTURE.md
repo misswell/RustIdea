@@ -140,7 +140,7 @@ The `ide-*` crates are copied Apache-2.0 backend code. They provide language
 registries, Tree-sitter, LSP/DAP, workspace/search/VCS/terminal/run/build/db,
 plugin, agent, remote and tooling services. RustIdea adds native adapters and
 panels, not parallel implementations of those services. Features whose panel
-is still a placeholder are clearly marked in `RUSTIDEA_FEATURE_PARITY.md`.
+is still a placeholder are clearly marked in `RUSTIDEA_LEGACY_FEATURE_PARITY.md`.
 
 ## Constraints and follow-ups
 

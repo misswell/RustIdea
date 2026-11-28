@@ -2,8 +2,14 @@
 //!
 //! A locked or sleeping display makes `screencapture -l` return stale frames,
 //! which is indistinguishable from "the app draws no text". This test renders a
-//! view through the same GPUI text/shaping stack the workbench uses, without a
-//! visible window, so glyph painting can be verified on CI and on a locked Mac.
+//! view through GPUI's headless software renderer, without a visible window, so
+//! shaping and CPU glyph rasterization can be verified on CI and on a locked Mac.
+//!
+//! It does not cover window presentation: the real window uses the Metal
+//! renderer, which additionally requires the `font-kit` feature on
+//! `gpui_platform`. Without that feature the window paints backgrounds and
+//! borders but no text or icons, while this test still passes. Window evidence
+//! must come from a real capture.
 //!
 //! Run with:
 //!   cargo test --release -p rustidea-zed-workbench --test headless_render

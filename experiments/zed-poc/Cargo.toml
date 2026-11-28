@@ -15,7 +15,7 @@ collections = { path = "../../third_party/zed/crates/collections" }
 editor = { path = "../../third_party/zed/crates/editor" }
 futures = "0.3"
 gpui = { path = "../../third_party/zed/crates/gpui" }
-gpui_platform = { path = "../../third_party/zed/crates/gpui_platform" }
+gpui_platform = { path = "../../third_party/zed/crates/gpui_platform", features = ["font-kit"] }
 ide-core = { path = "../../crates/ide-core" }
 ide-host = { path = "../../crates/ide-host" }
 ide-language = { path = "../../crates/ide-language" }

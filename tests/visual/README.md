@@ -27,17 +27,24 @@ committed — the runner treats absent files as `SKIP`, never as a pass.
    every later field.
 
    To tell "the app paints no glyphs" apart from "the capture is stale", render
-   the same GPUI text stack without a window:
+   GPUI text without a window:
 
    ```bash
    cd experiments/zed-poc
    cargo test --release -p rustidea-zed-workbench --test headless_render -- --nocapture
    ```
 
-   The test draws a red box with black text through Metal and asserts both the
-   box and the glyph pixels exist, plus a negative control that an empty label
-   produces none. It passes on a locked screen, so it is the reliable signal
-   that text rendering itself is healthy.
+   The test draws a red box with black text through the headless software
+   renderer and asserts both the box and the glyph pixels exist, plus a negative
+   control that an empty label produces none. It passes on a locked screen, so
+   it is a reliable signal for shaping and CPU rasterization.
+
+   It is **not** a window-presentation check. The real window uses the Metal
+   renderer, which also needs the `font-kit` feature on `gpui_platform`
+   (`experiments/zed-poc/Cargo.toml`). With that feature missing, the window
+   paints backgrounds, borders and rounded controls but no text and no icons,
+   while the headless test still passes. A blank-looking workbench must be
+   checked against that feature before blaming the display lock.
 2. Open the pinned OpenIDEA app and the comparison project
    (`/Users/guofeng/Code/cscec3b/tg-tenant-fork`), size the window to 1600x900
    and keep it fully on screen. Record the window origin; clicks are addressed in

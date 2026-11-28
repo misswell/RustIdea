@@ -50,6 +50,15 @@ jobs:
         working-directory: experiments/zed-poc
         run: rustup component add clippy
 
+      - name: Require the window font stack
+        working-directory: experiments/zed-poc
+        run: |
+          cargo tree -e features -i gpui_apple | grep -q 'gpui_apple feature "font-kit"' || {
+            echo "gpui_apple must enable font-kit via gpui_platform." >&2
+            echo "Without it the real window paints no text and no icons." >&2
+            exit 1
+          }
+
       - name: Check native workbench
         working-directory: experiments/zed-poc
         run: cargo check --locked -p rustidea-zed-workbench

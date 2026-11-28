@@ -108,5 +108,5 @@ The acceptance knobs added to the workbench are:
   standalone test class was executed during this acceptance.
 - Verify class or package renames that move files; the current multi-file
   rename evidence edits existing files across modules.
-- Close the remaining parity items in `RUSTIDEA_FEATURE_PARITY.md`, including
+- Close the remaining parity items in `RUSTIDEA_LEGACY_FEATURE_PARITY.md`, including
   plugin live UI, structured settings/run editors and the other listed gaps.

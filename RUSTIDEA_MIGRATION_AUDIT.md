@@ -49,7 +49,7 @@ return through GPUI tasks or typed events.
 
 Unused backend capabilities are not counted as migrated merely because their
 crate compiles. The exact UI status is recorded in
-`RUSTIDEA_FEATURE_PARITY.md`.
+`RUSTIDEA_LEGACY_FEATURE_PARITY.md`.
 
 ## Document and editor findings
 
@@ -92,4 +92,4 @@ technology remains only in the upstream reference and non-runtime assets.
   Chinese IME, large files, multi-split and process-tree inspection) remains
   open because no unlocked isolated GUI session was available.
 - Full OpenIDEA interface and function parity has not been reached. Missing
-  groups are enumerated in `RUSTIDEA_FEATURE_PARITY.md`.
+  groups are enumerated in `RUSTIDEA_LEGACY_FEATURE_PARITY.md`.

@@ -50,6 +50,12 @@ jobs:
           cd experiments/zed-poc
           cargo test --release -p rustidea-zed-workbench --test headless_render -- --nocapture
 
+      - name: Build the window probe
+        run: PROFILE=release scripts/build-native.sh
+
+      - name: Real window glyph rendering
+        run: tests/visual/window-render-smoke.sh
+
   real-app-screenshots:
     name: Real OpenIDEA vs real RustIdea
     needs: manifest

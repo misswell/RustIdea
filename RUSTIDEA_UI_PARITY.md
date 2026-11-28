@@ -25,6 +25,17 @@ complete: 20 of 21 states have real OpenIDEA 0.1.54 captures, the token table is
 generated from the pinned CSS, and the GPUI `theme.rs` adapter derives every
 colour from `Semantics` instead of a hand-tuned palette.
 
+## Renderer prerequisite
+
+The window renderer requires the `font-kit` feature on `gpui_platform`
+(`experiments/zed-poc/Cargo.toml`). Without it, GPUI paints quads and borders
+in the real window but skips glyph and SVG rasterization: every label and icon
+is missing while the layout survives. The headless test does not catch this,
+because it uses the software renderer; window captures are the only evidence.
+This was the cause of the "empty workbench" captures recorded before
+2026-11-28. With the feature enabled, window text renders on macOS 27.2.1 with
+the pinned Zed revision `2664a0aa`.
+
 ## Component ledger
 
 | OpenIDEA source | RustIdea implementation | Original geometry / behaviour | Data source | Screenshot | Tests | Status / unresolved |

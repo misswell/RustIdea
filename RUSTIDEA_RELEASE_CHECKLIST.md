@@ -9,7 +9,7 @@ The three-platform CI matrix was stopped at the release owner's request and is
 not claimed green. Interactive Phase 2 acceptance and comparative UI
 performance remain open because the macOS console is screen-locked.
 
-1. Keep `RUSTIDEA_MIGRATION_AUDIT.md`, `RUSTIDEA_FEATURE_PARITY.md` and
+1. Keep `RUSTIDEA_MIGRATION_AUDIT.md`, `RUSTIDEA_LEGACY_FEATURE_PARITY.md` and
    `RUSTIDEA_ARCHITECTURE.md` accurate. Do not describe placeholders as
    completed features.
 2. Run `scripts/update-license-bundle.sh` after the final `Cargo.lock`. Retain

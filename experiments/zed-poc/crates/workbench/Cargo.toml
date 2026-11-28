@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
+name = "rustidea-window-probe"
+path = "src/bin/window_probe.rs"
+
+[[bin]]
 name = "rustidea-zed-workbench"
 path = "src/main.rs"
 
